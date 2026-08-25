@@ -51,7 +51,7 @@ MCP server，基于 OpenAI Codex app-server JSON-RPC 协议，通过 4 个 MCP �
    - 记录当前仓库版本与依赖版本（含 `codex-schema/metadata.json`）。
    - 明确本次升级目标版本与变更范围。
 2. **更新 schema 基线（若涉及 app-server 协议）**
-   - 使用最新 CLI 生成并提交：  
+   - 使用最新 CLI 生成并提交：
      `codex app-server generate-json-schema --experimental --out codex-schema`
    - 同步确认 `codex-schema/metadata.json` 已反映新基线。
 3. **做差异分级（decision gate）**
@@ -158,7 +158,7 @@ git diff -- codex-schema/metadata.json
 
 > **同平台假设**：本项目假设 MCP 客户端和 codex-mcp 服务端运行在同一台机器上。所有通信使用 stdio（本地 IPC），子进程共享本地文件系统和 `~/.codex/config.toml`，`cwd` 路径指向本地文件系统。
 
-```
+```text
 MCP Client (Claude/Kiro/etc.)
     │
     │ MCP Protocol (stdio, same machine)
@@ -193,7 +193,7 @@ Codex Agent (cloud)
 
 **参数设计原则**：prompt、approvalPolicy、sandbox 为必填参数；effort 默认为 `low`（调用方应根据任务复杂度主动调整），其余高频参数保留在顶层，低频参数折叠到 advanced。
 
-```
+```text
 顶层参数（高频）：
 ├── prompt: string          # 必填，任务描述
 ├── approvalPolicy: enum    # 必填，审批策略：untrusted | on-failure | on-request | never
@@ -244,7 +244,7 @@ advanced 参数（低频）：
 
 ### 工具 2: `codex_reply` — 继续已有会话
 
-```
+```text
 参数：
 ├── sessionId: string       # 必填
 ├── prompt: string          # 必填，后续消息
@@ -270,7 +270,7 @@ advanced 参数（低频）：
 
 ### 工具 3: `codex_session` — 管理会话
 
-```
+```text
 参数：
 ├── action: "list" | "get" | "cancel" | "interrupt" | "fork" | "clean_background_terminals"
 ├── sessionId?: string          # get/cancel/interrupt/fork/clean_background_terminals 必填
@@ -288,7 +288,7 @@ advanced 参数（低频）：
 
 ### 工具 4: `codex_check` — 轮询事件 + 审批响应
 
-```
+```text
 参数：
 ├── action: "poll" | "respond_permission" | "respond_user_input"
 ├── sessionId: string
@@ -363,7 +363,7 @@ advanced 参数（低频）：
 
 ## 会话生命周期
 
-```
+```text
                     +---> waiting_approval ---+
                     |                         |
   (start) ---> running ---+---> idle ---+---> running (reply)
@@ -526,7 +526,7 @@ MCP 客户端（调用方）应根据自身的安全策略配置权限：
 
 ### 子进程启动
 
-```
+```text
 codex app-server [-c key=value]... [-p profile]
 ```
 
@@ -570,7 +570,7 @@ SessionManager 运行定期清理任务（每 60s 检查一次）：
 
 ## 配置解析流程
 
-```
+```text
 用户调用 codex({ prompt, model, profile, advanced: { config } })
     │
     ▼
@@ -691,13 +691,13 @@ codex app-server 内部：
 
 `prompt: string` 必须转换为 `UserInput[]` 格式：
 
-```
+```text
 input: [{ type: "text", text: prompt }]
 ```
 
 `images: string[]`（本地路径）转换为：
 
-```
+```text
 input: [..., { type: "localImage", path: imagePath }]
 ```
 
@@ -738,7 +738,7 @@ input: [..., { type: "localImage", path: imagePath }]
 
 服务端在 `codex_check` 返回值中包含 `pollInterval` 字段。该值表示**最小建议间隔**，客户端可以根据任务预计耗时继续拉长：
 
-```
+```text
 status = "waiting_approval" → pollInterval: 1000ms（需要快速响应审批）
 status = "running"          → pollInterval: 120000ms（至少 2 分钟；复杂任务建议 3-10+ 分钟）
 status = "idle"/"error"/"cancelled" → pollInterval: undefined（终态，无需继续轮询）
@@ -750,7 +750,7 @@ status = "idle"/"error"/"cancelled" → pollInterval: undefined（终态，无�
 
 ### 典型轮询流程
 
-```
+```text
 1. 调用 codex({ prompt }) → 获得 sessionId
 2. 循环:
    a. 调用 codex_check({ action: "poll", sessionId, cursor })

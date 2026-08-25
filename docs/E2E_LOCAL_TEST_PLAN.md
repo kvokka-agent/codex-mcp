@@ -1,6 +1,6 @@
 # codex-mcp E2E Local Test Plan (For Third-Party MCP Client LLMs)
 
-This document is written for a large model running inside a third-party MCP client, where `@leo000001/codex-mcp` and `codex` CLI are already installed on the host machine.
+This document is written for a large model running inside a third-party MCP client, where `@kvokka/codex-mcp` and `codex` CLI are already installed on the host machine.
 
 Your goal is to verify that `codex-mcp` works correctly as an MCP server in real tasks, not to modify `codex-mcp` source code.
 
@@ -41,7 +41,7 @@ Required:
 
 1. Node.js >= 18
 2. `codex` in PATH (`codex --version` works)
-3. `@leo000001/codex-mcp` launchable from host machine
+3. `@kvokka/codex-mcp` launchable from host machine
 4. Network available for model calls
 
 Recommended:
@@ -63,7 +63,7 @@ Use one of these launch modes in your MCP client configuration:
 1. Recommended installed package path:
 
 ```bash
-npx -y @leo000001/codex-mcp
+npx -y @kvokka/codex-mcp
 ```
 
 2. If globally installed:
@@ -124,7 +124,7 @@ Expected:
 
 1. Verify the count returned by `resources/list`. If fewer than 6 appear, you may be running an older server build. Run `npm run build` (if testing from source) or update the package to ensure all resources are registered.
 2. The minimum required set is: `server-info`, `config`, `gotchas` (these 3 have been present since early versions).
-3. `compat-report`, `quickstart`, `errors` were added after the npm `0.1.0` release. To get all 6 resources, either build from source (`master` branch) or use `@leo000001/codex-mcp@>=0.2.0` when published. If missing, note the gap in your report but do not block on it — proceed to TC1.
+3. `compat-report`, `quickstart`, `errors` were added after the npm `0.1.0` release. To get all 6 resources, either build from source (`master` branch) or use `@kvokka/codex-mcp@>=0.2.0` when published. If missing, note the gap in your report but do not block on it — proceed to TC1.
 4. JSON resources should parse cleanly; markdown resources should return non-empty text.
 
 Stop and troubleshoot only if `resources/list` itself fails or returns 0 resources.
@@ -711,6 +711,7 @@ Fix:
 - Test workspace path:
 
 ## TC Results
+
 - TC0 Discovery:
 - TC1 Async Poll:
 - TC2 Approval:
@@ -720,6 +721,7 @@ Fix:
 - TC6 Structured Output (optional):
 
 ## Key Telemetry
+
 - Session IDs:
 - Status transitions observed:
 - Cursor handling (`nextCursor`/`cursorResetTo`):
@@ -727,6 +729,7 @@ Fix:
 - Errors encountered (exact `Error [CODE]`):
 
 ## Verdict
+
 - Pass / Partial / Fail
 - Blocking issues:
 - Suggested fixes:

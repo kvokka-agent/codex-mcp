@@ -1,5 +1,5 @@
 {
-  "name": "@leo000001/codex-mcp",
+  "name": "@kvokka/codex-mcp",
   "version": "2.1.0",
   "description": "MCP server that wraps OpenAI Codex app-server — start coding agents, poll their progress, and manage permissions from any MCP client",
   "type": "module",
@@ -52,15 +52,15 @@
     "json-rpc",
     "approval-workflow"
   ],
-  "author": "xihuai18",
+  "author": "kvokka",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xihuai18/codex-mcp.git"
+    "url": "git+https://github.com/kvokka/codex-mcp.git"
   },
-  "homepage": "https://github.com/xihuai18/codex-mcp#readme",
+  "homepage": "https://github.com/kvokka/codex-mcp#readme",
   "bugs": {
-    "url": "https://github.com/xihuai18/codex-mcp/issues"
+    "url": "https://github.com/kvokka/codex-mcp/issues"
   },
   "publishConfig": {
     "access": "public"

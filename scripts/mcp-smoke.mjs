@@ -11,7 +11,7 @@ function usage(exitCode = 0) {
     "",
     "Defaults:",
     "  (no args) -> spawns: node dist/index.js",
-    "  --npx     -> spawns: npx -y @leo000001/codex-mcp",
+    "  --npx     -> spawns: npx -y @kvokka/codex-mcp",
     "  --        -> overrides command/args explicitly",
     "",
   ].join("\n");
@@ -77,7 +77,7 @@ async function main() {
   const cmdArgs = args.overrideCommand
     ? args.overrideArgs
     : args.useNpx
-      ? ["-y", "@leo000001/codex-mcp"]
+      ? ["-y", "@kvokka/codex-mcp"]
       : ["dist/index.js"];
 
   const transport = new StdioClientTransport({
@@ -129,4 +129,3 @@ main().catch((err) => {
   console.error("FAILED:", err?.stack || String(err));
   process.exitCode = 1;
 });
-

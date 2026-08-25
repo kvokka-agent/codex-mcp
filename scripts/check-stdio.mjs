@@ -16,7 +16,7 @@ function usage(exitCode = 0) {
       "",
       "Defaults:",
       "  (no args) -> spawns: node dist/index.js",
-      "  --npx     -> spawns: npx -y @leo000001/codex-mcp",
+      "  --npx     -> spawns: npx -y @kvokka/codex-mcp",
       "  --mode    -> sets CODEX_MCP_STDIO_MODE for child process (default: auto)",
       "",
     ].join("\n")
@@ -95,12 +95,12 @@ function wait(ms) {
 
 function getFixHints(platform) {
   const generic = [
-    "Prefer MCP config launch: command='npx', args=['-y', '@leo000001/codex-mcp']",
+    "Prefer MCP config launch: command='npx', args=['-y', '@kvokka/codex-mcp']",
     "Ensure stdout remains JSON-RPC only; route diagnostics to stderr.",
   ];
   if (platform === "win32") {
     return [
-      'If shell wrapping is required, use: pwsh -NoProfile -Command "npx -y @leo000001/codex-mcp"',
+      'If shell wrapping is required, use: pwsh -NoProfile -Command "npx -y @kvokka/codex-mcp"',
       ...generic,
     ];
   }
@@ -114,7 +114,7 @@ async function main() {
   const cmdArgs = args.overrideCommand
     ? args.overrideArgs
     : args.useNpx
-      ? ["-y", "@leo000001/codex-mcp"]
+      ? ["-y", "@kvokka/codex-mcp"]
       : ["dist/index.js"];
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mcp-stdio-"));

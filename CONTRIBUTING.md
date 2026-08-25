@@ -5,7 +5,7 @@ Thanks for your interest in contributing!
 ## Getting Started
 
 ```bash
-git clone https://github.com/xihuai18/codex-mcp.git
+git clone https://github.com/kvokka/codex-mcp.git
 cd codex-mcp
 npm install
 npm run build
@@ -30,7 +30,8 @@ npm run format:check # Check formatting (Prettier)
 
 ## Reporting Issues
 
-Use [GitHub Issues](https://github.com/xihuai18/codex-mcp/issues). Include:
+Use [GitHub Issues](https://github.com/kvokka/codex-mcp/issues). Include:
+
 - Steps to reproduce
 - Expected vs actual behavior
 - Node.js and Codex CLI versions

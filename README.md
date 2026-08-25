@@ -1,8 +1,8 @@
 # codex-mcp
 
-[![npm version](https://img.shields.io/npm/v/@leo000001/codex-mcp.svg)](https://www.npmjs.com/package/@leo000001/codex-mcp)
-[![license](https://img.shields.io/npm/l/@leo000001/codex-mcp.svg)](https://github.com/xihuai18/codex-mcp/blob/master/LICENSE)
-[![node](https://img.shields.io/node/v/@leo000001/codex-mcp.svg)](https://nodejs.org)
+[![npm version](https://img.shields.io/npm/v/@kvokka/codex-mcp.svg)](https://www.npmjs.com/package/@kvokka/codex-mcp)
+[![license](https://img.shields.io/npm/l/@kvokka/codex-mcp.svg)](https://github.com/kvokka/codex-mcp/blob/master/LICENSE)
+[![node](https://img.shields.io/node/v/@kvokka/codex-mcp.svg)](https://nodejs.org)
 
 MCP server that wraps [OpenAI Codex](https://github.com/openai/codex) — start coding agents, poll their progress, and manage permissions from any MCP client. Supports both `app-server` (full capability) and `exec` (fallback for codex variants without app-server) modes.
 
@@ -21,25 +21,30 @@ MCP server that wraps [OpenAI Codex](https://github.com/openai/codex) — start 
 - [Node.js](https://nodejs.org) >= 18
 - [OpenAI Codex CLI](https://github.com/openai/codex) installed and configured (`codex` in PATH)
 
+## Thanks
+
+The project was originally made by @leo000001 and forked from <https://github.com/xihuai18/codex-mcp/>
+Happy to share my gratitude for his brilliant work
+
 ## Quick Start
 
 ### npx (no install)
 
 ```bash
-npx @leo000001/codex-mcp
+npx @kvokka/codex-mcp
 ```
 
 ### Global install
 
 ```bash
-npm install -g @leo000001/codex-mcp
+npm install -g @kvokka/codex-mcp
 codex-mcp
 ```
 
 ### Windows shell wrapper (if needed)
 
 ```powershell
-pwsh -NoProfile -Command "npx -y @leo000001/codex-mcp"
+pwsh -NoProfile -Command "npx -y @kvokka/codex-mcp"
 ```
 
 ### MCP Client Configuration
@@ -51,7 +56,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, etc.):
   "mcpServers": {
     "codex": {
       "command": "npx",
-      "args": ["-y", "@leo000001/codex-mcp"]
+      "args": ["-y", "@kvokka/codex-mcp"]
     }
   }
 }
@@ -60,7 +65,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, etc.):
 ### Claude Code
 
 ```bash
-claude mcp add codex-mcp -- npx -y @leo000001/codex-mcp
+claude mcp add codex-mcp -- npx -y @kvokka/codex-mcp
 ```
 
 Or add to `~/.claude/settings.json`:
@@ -70,7 +75,7 @@ Or add to `~/.claude/settings.json`:
   "mcpServers": {
     "codex-mcp": {
       "command": "npx",
-      "args": ["-y", "@leo000001/codex-mcp"]
+      "args": ["-y", "@kvokka/codex-mcp"]
     }
   }
 }
@@ -96,6 +101,7 @@ When the codex binary does not support `app-server` (e.g. internal variants like
 **Exec mode supports multi-turn context** via `codex exec resume`. First turn uses `codex exec`, subsequent turns use `codex exec resume <threadId>`.
 
 **Exec mode limitations:**
+
 - No approval/user-input interactions
 - `threadFork`/`threadResume` throw `EXEC_NOT_SUPPORTED`
 - `sandbox`/`profile`/`cwd`/`outputSchema` overrides only apply on the first turn (exec resume does not support these flags)
@@ -105,11 +111,11 @@ Check `codex-mcp:///server-info` `clientMode` field to detect which mode is acti
 Examples:
 
 ```bash
-CODEX_MCP_STDIO_MODE=strict npx -y @leo000001/codex-mcp
+CODEX_MCP_STDIO_MODE=strict npx -y @kvokka/codex-mcp
 ```
 
 ```powershell
-$env:CODEX_MCP_STDIO_MODE = "strict"; npx -y @leo000001/codex-mcp
+$env:CODEX_MCP_STDIO_MODE = "strict"; npx -y @kvokka/codex-mcp
 ```
 
 ## Tools
@@ -207,6 +213,7 @@ List, inspect, cancel, interrupt, fork sessions, or clean background terminals.
 | `includeSensitive` | boolean | No                            | Include `cwd`/`profile`/`config`/`threadId` in `get`. Default: `false` |
 
 **Returns:**
+
 - `action="list"` → `{ sessions: PublicSessionInfo[] }`
 - `action="get"` → `PublicSessionInfo` (or `SensitiveSessionInfo` when `includeSensitive=true`)
 - `action="cancel"|"interrupt"` → `{ success: true, message }`
@@ -323,7 +330,7 @@ Common codes include `INVALID_ARGUMENT`, `SESSION_NOT_FOUND`, `SESSION_BUSY`, `S
 
 ## Typical Workflow
 
-```
+```text
 1. codex(prompt="Fix bug X")           → { sessionId, threadId, status: "running" }
 2. codex_check(action="poll", ...)      → events[], status, actions[]
 3. codex_check(action="respond_permission", decision="accept")  (if needed)
@@ -346,7 +353,7 @@ Three layers of protection:
 
 > **Same-platform assumption**: codex-mcp assumes the MCP client and server run on the same machine. All communication uses stdio (local IPC), child processes share the local filesystem and `~/.codex/config.toml`, and `cwd` paths refer to the local filesystem.
 
-```
+```text
 MCP Client ←stdio→ codex-mcp server ←stdio→ codex app-server ←→ Codex Agent   (app-server mode)
 MCP Client ←stdio→ codex-mcp server ←stdio→ codex exec --json ←→ Codex Agent  (exec fallback)
          (same machine, stdio transport)
@@ -357,7 +364,7 @@ Each session spawns an independent child process. In app-server mode, it uses th
 ## Development
 
 ```bash
-git clone https://github.com/xihuai18/codex-mcp.git
+git clone https://github.com/kvokka/codex-mcp.git
 cd codex-mcp
 npm install
 npm run build
@@ -368,6 +375,7 @@ npm run check:stdio:strict
 ```
 
 End-to-end local test plan (after installing/configuring in an MCP client):
+
 - Full guide (LLM operator handbook): `docs/E2E_LOCAL_TEST_PLAN.md`
 - Quick English checklist: run `codex` → poll with `codex_check(action="poll")` → respond via `respond_permission`/`respond_user_input` if `actions[]` appears → continue polling until `status` is `idle`/`error`/`cancelled`.
 

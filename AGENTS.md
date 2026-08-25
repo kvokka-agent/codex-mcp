@@ -102,7 +102,7 @@ This section is a practical execution checklist.
 
 ## Project Layout
 
-```
+```text
 src/
 ├── index.ts
 ├── server.ts
