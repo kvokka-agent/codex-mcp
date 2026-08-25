@@ -23,11 +23,11 @@ When you execute this plan as an LLM test operator:
 
 Minimum pass target:
 
-1. The server exposes 5 tools and up to 6 resources correctly (minimum 3: `server-info`, `config`, `gotchas`).
+1. The server exposes 5 tools and 7 resources correctly.
 2. `codex` and `codex_reply` are asynchronous (return immediately, then progress via polling).
 3. Approval flow works (`respond_permission`) and session state changes correctly.
 4. A real coding task closes the loop: test fails -> agent fixes -> test passes.
-5. Session management works (`list/get/cancel/interrupt/fork/clean`).
+5. Session management works (`list/get/cancel/interrupt/fork/clean/clean_background_terminals`).
 
 Optional but recommended:
 
@@ -104,28 +104,31 @@ Expected tool names:
 
 1. `codex`
 2. `codex_reply`
-3. `codex_session`
-4. `codex_check`
+3. `codex_setup`
+4. `codex_session`
+5. `codex_check`
+
+Call `codex_setup` first. It reports executable resolution, `codex login status`, the detected backend mode (`app-server` or `exec`), the state directory, and whether user/project `config.toml` files are visible. Fix anything in `nextSteps` before TC1; `ready: false` means later tests will fail for environment reasons, not server reasons.
 
 ## 3.2 Resource Discovery
 
 Run `resources/list`, then read each resource that appears.
 
-The server source code registers 6 resources:
+The server registers 7 resources:
 
-1. `codex-mcp:///server-info` — JSON metadata (server version, platform, capabilities)
+1. `codex-mcp:///server-info` — JSON metadata (server version, platform, `clientMode`, resource index)
 2. `codex-mcp:///compat-report` — JSON metadata (feature flags, compatibility warnings)
 3. `codex-mcp:///config` — markdown (parameter guide and config.toml mapping)
 4. `codex-mcp:///gotchas` — markdown (practical limits and common issues)
 5. `codex-mcp:///quickstart` — markdown (minimal end-to-end workflow)
 6. `codex-mcp:///errors` — markdown (error code reference and recovery hints)
+7. `codex-mcp:///delegation-guide` — markdown (approval/sandbox presets per task type)
 
 Expected:
 
-1. Verify the count returned by `resources/list`. If fewer than 6 appear, you may be running an older server build. Run `npm run build` (if testing from source) or update the package to ensure all resources are registered.
-2. The minimum required set is: `server-info`, `config`, `gotchas` (these 3 have been present since early versions).
-3. `compat-report`, `quickstart`, `errors` were added after the npm `0.1.0` release. To get all 6 resources, either build from source (`master` branch) or use `@kvokka/codex-mcp@>=0.2.0` when published. If missing, note the gap in your report but do not block on it — proceed to TC1.
-4. JSON resources should parse cleanly; markdown resources should return non-empty text.
+1. `resources/list` returns 7 entries. A smaller count means an older build; run `npm run build` when testing from source, or update the package.
+2. JSON resources parse cleanly; markdown resources return non-empty text.
+3. `server-info.clientMode` reports `app-server` or `exec`; record which one, because exec mode skips the approval tests.
 
 Stop and troubleshoot only if `resources/list` itself fails or returns 0 resources.
 
@@ -278,8 +281,11 @@ After `codex` or `codex_reply`:
    - `delta_compact`: compact delta-focused payload (larger than `minimal`, smaller than `full` in typical streaming turns).
    - `full`: raw complete event payloads for debugging.
 8. `pollOptions.includeEvents/includeActions/includeResult` default to `true`.
-9. When `pollOptions.maxBytes` is set and payload is too large, response can include `truncated=true`, `truncatedFields`, and `compatWarnings`; continue polling with returned `nextCursor`.
-10. In `respond_*` flows, if a stale `cursor` is provided, codex-mcp can auto-normalize to session cursor and include a `compatWarnings` notice.
+9. `pollOptions.skipDeltas=true` drops streaming delta events and still advances the cursor past them; `pollOptions.finalOnly=true` omits `events[]` entirely and returns `actions[]` plus the terminal `result`.
+10. `pollOptions.waitMs` long-polls: the call blocks until an event, action, or result appears, or the budget expires. It is capped at `120000` ms, and a session accepts 4 concurrent long polls — the fifth returns immediately instead of waiting.
+11. When `pollOptions.maxBytes` is set and payload is too large, response can include `truncated=true`, `truncatedFields`, and `compatWarnings`; continue polling with returned `nextCursor`.
+12. In `respond_*` flows, if a stale `cursor` is provided, codex-mcp can auto-normalize to session cursor and include a `compatWarnings` notice.
+13. `progress` summarizes the session without reading events: `phase`, `lastEventAt`, `pendingActionCount`, `lastMethod`, and `tokens` when the backend reports them. `interactionState` and `recommendedNextAction` tell you what to call next.
 
 Observed internal polling cadence (codex-mcp → app-server, NOT MCP client → codex-mcp):
 
@@ -297,6 +303,9 @@ Codex tasks often take 2-10+ minutes. Do not poll every turn.
 2. When `status` is `waiting_approval`: target ~1 second polling to respond to `actions[]` and unblock quickly.
 3. When `status` is `idle`, `error`, or `cancelled`: stop polling. The session is done.
 4. The tool descriptions for `codex`, `codex_reply`, and `codex_check` include this guidance so LLM callers see it directly.
+5. To learn about a change sooner without shortening the interval, pass `pollOptions.waitMs` and let the server answer as soon as something happens.
+6. `codex` (`advanced.waitForResult`) and `codex_reply` (`waitForResult`) skip polling entirely for short non-interactive runs: they block up to 300000 ms and return the result. Use them only with `approvalPolicy` `on-failure` or `never`; an approval request makes them return early with `execution.fallbackReason="interactive_poll_required"`.
+7. A session emits one `progress` event with `data.method="codex-mcp/ttl_warning"` 60 seconds before TTL cleanup. Any tool call on the session postpones the cleanup.
 
 **CRITICAL: Approval timeout vs polling interval conflict.** The default `approvalTimeoutMs` is 60 seconds, but the recommended `running` polling interval is ≥2 minutes. If a session transitions from `running` to `waiting_approval` between polls, the approval will auto-decline before the client can respond. Mitigations:
 
@@ -329,6 +338,7 @@ Decision constraints:
    - `accept`
    - `acceptForSession`
    - `acceptWithExecpolicyAmendment` (requires `execpolicy_amendment`)
+   - `applyNetworkPolicyAmendment` (requires `network_policy_amendment: { action: "allow"|"deny", host }`)
    - `decline`
    - `cancel`
 2. File-change approvals accept:
@@ -463,11 +473,14 @@ Validate:
 3. `action="cancel"` moves to `cancelled`.
 4. `action="interrupt"` works only while active turn is running.
 5. `action="fork"` creates a new session/thread branch.
-6. `action="clean_background_terminals"` returns success and does not crash the session. **Note:** This action requires the `experimentalApi` capability in the codex CLI backend. If your codex version does not support it, expect `Error [INTERNAL]` with a message about `experimentalApi`. This is a known limitation, not a test failure — record the error and continue.
+6. `action="clean"` batch-removes terminal sessions. Run it first with `dryRun: true` and confirm `matchedSessionIds` lists only `idle`/`error`/`cancelled` sessions, then run it for real and confirm `removedCount` matches and `codex_session(action="list")` no longer shows them.
+7. `action="clean_background_terminals"` returns success and does not crash the session. **Note:** This action requires the `experimentalApi` capability in the codex CLI backend. If your codex version does not support it, expect `Error [INTERNAL]` with a message about `experimentalApi`. This is a known limitation, not a test failure — record the error and continue.
 
 Example payload:
 
 ```json
+{ "action": "clean", "statuses": ["cancelled"], "olderThanMs": 0, "dryRun": true }
+{ "action": "clean", "statuses": ["cancelled"], "olderThanMs": 0 }
 { "action": "clean_background_terminals", "sessionId": "<SESSION_ID>" }
 ```
 
@@ -497,7 +510,8 @@ Pass criteria:
 1. State changes match action semantics.
 2. No transport crash on management operations.
 3. `interrupt` successfully stops a running turn (or is documented as missed due to timing).
-4. `clean_background_terminals` returns `{ success: true, message }`, or `Error [INTERNAL]` if the codex CLI lacks `experimentalApi` capability (see note in step 6 above).
+4. `clean` reports `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }`, and the dry run removes nothing.
+5. `clean_background_terminals` returns `{ success: true, message }`, or `Error [INTERNAL]` if the codex CLI lacks `experimentalApi` capability (see note in step 7 above).
 
 ## TC6 (Optional): Structured Output
 
@@ -621,6 +635,40 @@ Checks:
 3. Poll once with `pollOptions.includeEvents=false`, then poll again with defaults; verify events were not consumed by the first poll.
 4. Optional stress: combine very small `pollOptions.maxBytes` with `respond_*` and verify responses remain valid even if compatibility warnings are omitted to stay under byte budget.
 5. Optional stale-cursor check for `respond_*`: send a smaller stale cursor than current session progress and verify response remains monotonic (no replay), with compatibility warning when warning budget allows.
+
+## 7.5 Long Polling (`pollOptions.waitMs`)
+
+Checks:
+
+1. Start a long `running` session, then poll with `pollOptions.waitMs: 30000` at the current cursor. The call returns as soon as an event appears rather than after the full budget.
+2. Poll an `idle` session with `pollOptions.waitMs: 5000`. It returns promptly with the terminal `result`, since the result counts as visible data.
+3. Issue 5 concurrent long polls on one session. Four wait; the fifth returns immediately instead of blocking.
+
+## 7.6 Foreground Execution (`waitForResult`)
+
+Checks:
+
+1. `codex` with `approvalPolicy: "never"`, `sandbox: "read-only"`, a small prompt, and `advanced.waitForResult: 120000`. Expect the tool call itself to return `result` and `completedAt`, with `execution.effective: "foreground"`.
+2. Same call with `waitForResult: 2000` on a slow prompt. Expect a return without `result`, `execution.fallbackReason: "wait_for_result_timeout"`, and a `sessionId` you can keep polling.
+3. `codex` with `approvalPolicy: "untrusted"` and `waitForResult: 120000`. When an approval appears, expect an early return with `execution.fallbackReason: "interactive_poll_required"` and `recommendedNextAction: "respond_permission"`.
+
+## 7.7 Restart Recovery And Orphan Reaping
+
+Requires control over the server process, so run it only when you launched codex-mcp yourself.
+
+Steps:
+
+1. Start a long `running` session and record its `sessionId`.
+2. Note the state directory from `codex_setup` (`runtime.stateDir`) and confirm `sessions/<sessionId>/meta.json` exists.
+3. Kill the codex-mcp server process, then start it again with the same `CODEX_MCP_STATE_DIR`.
+4. Call `codex_session(action="get", sessionId=...)`.
+
+Expected:
+
+1. The session is present with `status: "error"` and a `cancelledReason` naming the server restart.
+2. A completed session recovered the same way still returns its last `result`.
+3. The `codex` child process from before the restart is gone; the server logs the reap count to stderr.
+4. Starting a second server against the same state directory logs a lock warning and keeps serving.
 
 ## 8. Generic Troubleshooting
 

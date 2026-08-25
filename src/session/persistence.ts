@@ -203,3 +203,36 @@ export class SessionPersistence {
     return existsSync(join(this.sessionsDir, sessionId, "meta.json"));
   }
 }
+
+// ── Startup ──────────────────────────────────────────────────────────
+
+export interface DiskPersistenceStartup {
+  /** The adapter to use, or undefined when another server owns STATE_DIR. */
+  persistence?: SessionPersistence;
+  recovered: RecoveredSession[];
+  pruned: number;
+}
+
+/**
+ * Take ownership of STATE_DIR and read back what the previous run left there.
+ *
+ * Recovery, pruning and orphan reaping all act on another server's live sessions
+ * when STATE_DIR is shared, so a server that loses the lock runs in memory only.
+ */
+export function startDiskPersistence(persistence: SessionPersistence): DiskPersistenceStartup {
+  try {
+    persistence.acquireLock();
+  } catch (err) {
+    console.error(
+      "[codex-mcp] WARNING: another server owns STATE_DIR — running without disk persistence:",
+      err
+    );
+    return { recovered: [], pruned: 0 };
+  }
+
+  return {
+    persistence,
+    recovered: persistence.recoverSessions(),
+    pruned: persistence.prune(),
+  };
+}

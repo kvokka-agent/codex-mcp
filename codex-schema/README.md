@@ -21,6 +21,4 @@ codex app-server generate-json-schema --experimental --out codex-schema
 
 ## Current snapshot
 
-- Generated with: `codex-cli 0.104.0`
-- Generated at: 2026-02-21
-- Command: `codex app-server generate-json-schema --experimental --out codex-schema`
+`codex-schema/metadata.json` records the CLI version, the date, and the command that produced this bundle.

@@ -16,7 +16,7 @@ import {
   checkDefaultCodexExecutableAvailability,
   getDefaultCodexExecutable,
 } from "./utils/codex-executable.js";
-import { SessionPersistence } from "./session/persistence.js";
+import { SessionPersistence, startDiskPersistence } from "./session/persistence.js";
 import { reapOrphanProcesses } from "./session/orphan-reaper.js";
 import { decideStdinShutdown } from "./utils/stdin-shutdown.js";
 
@@ -53,20 +53,13 @@ async function main(): Promise<void> {
     clientMode === "exec" ? new ExecClient() : new AppServerClient();
 
   // Initialize disk persistence
-  const persistence = new SessionPersistence();
-  try {
-    persistence.acquireLock();
+  const { persistence, recovered, pruned } = startDiskPersistence(new SessionPersistence());
+  if (persistence) {
     console.error("[codex-mcp] STATE_DIR lock acquired");
-  } catch (err) {
-    console.error("[codex-mcp] WARNING: Failed to acquire STATE_DIR lock:", err);
   }
-
-  // Recover sessions from disk and prune old ones
-  const recovered = persistence.recoverSessions();
   if (recovered.length > 0) {
     console.error(`[codex-mcp] Recovered ${recovered.length} session(s) from disk`);
   }
-  const pruned = persistence.prune();
   if (pruned > 0) {
     console.error(`[codex-mcp] Pruned ${pruned} old session(s)`);
   }
@@ -157,8 +150,8 @@ async function main(): Promise<void> {
 
     try {
       // Flush persistence and release lock before server close
-      persistence.flushAll();
-      persistence.releaseLockIfHeld();
+      persistence?.flushAll();
+      persistence?.releaseLockIfHeld();
     } catch {
       // best-effort
     }
@@ -169,7 +162,7 @@ async function main(): Promise<void> {
       // Ignore close errors during shutdown
     }
 
-    persistence.destroy();
+    persistence?.destroy();
     process.exitCode = lastExitCode;
 
     try {

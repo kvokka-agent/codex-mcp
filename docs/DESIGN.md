@@ -1,119 +1,100 @@
-# codex-mcp 设计文档
+# codex-mcp Design
 
-> English quick summary: `codex-mcp` is an MCP stdio server that exposes Codex `app-server` via 5 tools (`codex`, `codex_reply`, `codex_session`, `codex_check`, `codex_setup`) plus 6 read-only resources. Each session runs in an independent `codex app-server` subprocess and is polled asynchronously with cursor-based events.
+`codex-mcp` is an MCP stdio server that exposes the Codex `app-server` JSON-RPC protocol through 5 tools (`codex`, `codex_reply`, `codex_setup`, `codex_session`, `codex_check`) and 7 read-only resources. Each session runs in its own `codex` child process; MCP clients drive it by polling a cursor-paginated event stream.
 
-## 概述
+## Document Boundary (AGENTS vs DESIGN)
 
-MCP server，基于 OpenAI Codex app-server JSON-RPC 协议，通过 5 个 MCP 工具和 6 个静态只读 Resources 暴露 Codex agent 能力。
+- `AGENTS.md` holds the execution handbook: change checklists and implementation guardrails.
+- `docs/DESIGN.md` holds architecture and protocol truth, upgrade methodology, and field-level semantics.
+- Each rule has one full definition. `AGENTS.md` keeps the summary and the entry point; this file keeps the rule.
 
-## 文档分工（AGENTS vs DESIGN）
+## Dependency And SDK Upgrade Handbook (Single Source Of Truth)
 
-- `AGENTS.md`：执行规范、变更清单、实现护栏（给人类/agent 的“如何落地”视角）。
-- `docs/DESIGN.md`：架构与协议真值、升级方法论、字段级语义（“系统如何工作”视角）。
-- 同一条规则只保留一份完整定义；`AGENTS.md` 只保留摘要与入口，完整规则在本文件。
+This chapter is the authoritative procedure for dependency upgrades and interface alignment. The `AGENTS.md` upgrade checklist links back here.
 
-## 依赖接口与 SDK 升级手册（Single Source of Truth）
+### 1. Source-Of-Truth Priority
 
-本章节是依赖升级与接口对齐的唯一权威流程。执行升级时，`AGENTS.md` 的升级清单应回链到这里。
+1. The `codex app-server` protocol definition plus `codex-schema/` (including `codex-schema/metadata.json`)
+2. The repository implementation (`src/server.ts`, `src/tools/*`, `SessionManager`, `protocol.ts`, `types.ts`)
+3. The public documents (`README.md`, `AGENTS.md`, `CHANGELOG.md`, `docs/E2E_LOCAL_TEST_PLAN.md`)
 
-### 1. 权威来源优先级
+Constraints:
 
-1. `codex app-server` 协议定义 + `codex-schema/`（含 `codex-schema/metadata.json`）
-2. 仓库实现代码（`src/server.ts`、tools、`SessionManager`、`protocol.ts`、`types.ts`）
-3. 对外文档（`README.md`、`AGENTS.md`、`CHANGELOG.md`、`docs/E2E_LOCAL_TEST_PLAN.md`）
+- `CHANGELOG` helps locate a change; it never substitutes for a protocol comparison.
+- On conflict the upstream protocol and the vendored schema win, and code and documents follow them.
 
-约束：
+### 2. Upgrade Triggers
 
-- `CHANGELOG` 仅用于辅助定位，不可替代协议对比。
-- 发现冲突时，以上游协议与 vendored schema 为准，代码和文档必须追随。
+Any one of these enters this procedure:
 
-### 2. 升级触发条件
+- The `codex` CLI / `codex app-server` changes protocol, events, fields, or behavior
+- `@modelcontextprotocol/sdk` changes the MCP tool contract or transport behavior
+- `zod` changes schema or type-inference behavior
+- Node.js or TypeScript constraints change in a way that affects tool interfaces, types, or the error model
 
-以下任一发生即进入本手册流程：
+### 3. Dependency Matrix
 
-- `codex` CLI / `codex app-server` 升级（协议、事件、字段、行为变更）
-- `@modelcontextprotocol/sdk` 升级（MCP tool contract / transport 行为变更）
-- `zod` 升级（schema/类型推断行为变更）
-- 运行时约束升级（Node.js/TypeScript）且影响工具接口、类型或错误模型
+| Dependency / interface      | Truth source                      | Main impact                                                        | Change artifacts                                                                    |
+| --------------------------- | --------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `codex app-server` protocol | `codex-schema/` + `metadata.json` | JSON-RPC methods, params/result, server-initiated requests, events | `src/app-server/protocol.ts`, `src/session/manager.ts`, `src/server.ts`, tests, docs |
+| `@modelcontextprotocol/sdk` | Official SDK behavior             | Tool registration, `CallToolResult` shape, stdio interaction       | `src/server.ts`, `src/index.ts`, tests, README/docs                                  |
+| `zod`                       | Zod API and inference semantics   | Tool input validation, output schemas, error messages              | `src/server.ts`, tests                                                               |
+| Node / TS runtime           | `package.json` engines + tsconfig | Build and type system, boundary behavior                           | build/typecheck scripts, implementation and docs when behavior changes               |
 
-### 3. 依赖升级矩阵
+### 4. Standard Upgrade Procedure
 
-| 依赖/接口                   | 真值来源                          | 主要影响面                                                          | 变更产物                                                                             |
-| --------------------------- | --------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `codex app-server` 协议     | `codex-schema/` + `metadata.json` | JSON-RPC method、params/result、server-initiated requests、事件语义 | `src/app-server/protocol.ts`, `src/session/manager.ts`, `src/server.ts`, tests, docs |
-| `@modelcontextprotocol/sdk` | 官方 SDK 行为 + 本仓库现用 API    | tool 注册、`CallToolResult` 兼容、stdio 交互                        | `src/server.ts`, `src/index.ts`, tests, README/docs                                  |
-| `zod`                       | Zod API / 类型推断语义            | 工具入参验证、输出 schema、错误信息                                 | `src/server.ts`, tests                                                               |
-| Node/TS 运行时              | `package.json` engines + tsconfig | 构建/类型系统、边界行为                                             | build/typecheck scripts, impl & docs if behavior changes                             |
+1. **Pull the truth and set a comparison baseline.**
+   - Record the current repository version and dependency versions, including `codex-schema/metadata.json`.
+   - State the target version and the scope of this upgrade.
+2. **Refresh the schema baseline** when the app-server protocol is involved.
+   - Regenerate and commit: `codex app-server generate-json-schema --experimental --out codex-schema`
+   - Confirm `codex-schema/metadata.json` reflects the new baseline.
+3. **Classify the diff (decision gate).**
+   - Sort each change into: field added / field renamed / field removed / semantics changed / event behavior changed.
+   - Mark whether it is a breaking change and whether it touches public MCP parameters.
+4. **Align the implementation.**
+   - Tool schemas: `src/server.ts`
+   - Tool handlers: `src/tools/*`
+   - Session state machine and approval flow: `src/session/manager.ts`
+   - Protocol types: `src/app-server/protocol.ts`
+   - Constants and shared types: `src/types.ts`
+5. **Check naming consistency.**
+   - Public MCP parameter names match upstream field names exactly.
+   - `snake_case` stays `snake_case`; `camelCase` stays `camelCase`.
+6. **Rule on compatibility.**
+   - Keep no old aliases by default.
+   - A compatibility layer that must stay records its scope, its removal version, its removal date, and its test coverage.
+   - Compatibility runs through the whitelist below; anything outside the whitelist is deleted.
 
-### 4. 标准升级流程（必须完整执行）
+### 5. Compatibility Whitelist (Strict)
 
-1. **拉取真值并建立对比基线**
-   - 记录当前仓库版本与依赖版本（含 `codex-schema/metadata.json`）。
-   - 明确本次升级目标版本与变更范围。
-2. **更新 schema 基线（若涉及 app-server 协议）**
-   - 使用最新 CLI 生成并提交：
-     `codex app-server generate-json-schema --experimental --out codex-schema`
-   - 同步确认 `codex-schema/metadata.json` 已反映新基线。
-3. **做差异分级（decision gate）**
-   - 分类为：字段新增 / 字段重命名 / 字段删除 / 语义变化 / 事件行为变化。
-   - 标记是否为 breaking change，是否影响公开 MCP 参数。
-4. **实现对齐（代码层）**
-   - 工具 schema：`src/server.ts`
-   - tool handlers：`src/tools/*`
-   - 会话状态机与审批流：`src/session/manager.ts`
-   - 协议类型：`src/app-server/protocol.ts`
-   - 常量与公共类型：`src/types.ts`
-5. **命名一致性校验**
-   - MCP 对外参数名与上游字段严格同名。
-   - `snake_case` 不改 `camelCase`；`camelCase` 不改 `snake_case`。
-6. **兼容策略裁决**
-   - 默认不保留旧别名。
-   - 若必须保留兼容层，必须在文档中写清：适用范围、移除版本、移除日期、测试覆盖。
-   - 必要兼容使用白名单机制；白名单外的兼容逻辑必须删除，不得长期保留。
+The project keeps only necessary compatibility.
 
-### 5. 兼容白名单（严格）
+- Necessary compatibility (the whole whitelist):
+  - Response-id parsing for `thread/start` / `thread/fork` / `thread/resume` / `turn/start` accepts both `v1 {threadId|turnId}` and `v2 {thread:{id}|turn:{id}}`. Real runs still return mixed shapes; the parsing changes no public MCP field and only stabilizes internal id extraction.
+- Forbidden compatibility:
+  - `snake_case` field aliases `approval_id` and `network_approval_context`
+  - The user-input question-id alias `questionId`; the schema field `id` is the only accepted name.
 
-本项目执行“仅保留必要兼容”：
+The whitelist constrains alias and compatibility layers only. Deprecated methods that still exist in `codex-schema` — `applyPatchApproval`, `execCommandApproval` — count as protocol coverage, not as aliases.
 
-- 必要兼容（当前唯一白名单）：
-  - `thread/start` / `thread/fork` / `thread/resume` / `turn/start` 的 response id 兼容解析：`v1 {threadId|turnId}` 与 `v2 {thread:{id}|turn:{id}}`。
-  - 保留原因：真实运行中仍可能遇到混合形态返回；该兼容不改变 MCP 对外字段，仅用于内部稳定提取 id。
-- 非必要兼容（已移除，禁止回退）：
-  - snake_case 字段别名：`approval_id`、`network_approval_context`
-  - 用户输入问题 id 别名：`questionId`（统一使用 schema 标准字段 `id`）
+### 6. Diff Classification And Handling
 
-说明：
+- **Field added (non-breaking):** pass it through, complete the types, document its default and optionality, add a minimal regression test.
+- **Field renamed (usually breaking):** switch to the new name, write no dual-write compatibility, and record a migration window and a removal plan if compatibility is unavoidable.
+- **Field removed (breaking):** delete the implementation entry point and the documentation, state the error code or degraded behavior, add a test for misuse of the old parameter.
+- **Semantics changed (breaking behavior):** update the state machine, error model, and polling semantics together, and state the new semantics in README and DESIGN.
 
-- 白名单仅约束“兼容层/别名层”行为。
-- 对于 `codex-schema` 中仍存在的 deprecated method（例如 `applyPatchApproval` / `execCommandApproval`），按“协议覆盖”处理，不视为额外兼容别名。
+### 7. Change Closure Checklist (Check On Every PR)
 
-### 6. 差异分类与处理策略
+An interface field change confirms every item:
 
-- **字段新增（非 breaking）**：
-  - 实现透传与类型补全；
-  - 文档补充默认行为与可选性；
-  - 新增最小回归测试。
-- **字段重命名（通常 breaking）**：
-  - 直接切换为新字段名；
-  - 默认不做双写兼容；
-  - 若不得不兼容，必须写迁移窗口与清退计划。
-- **字段删除（breaking）**：
-  - 删除实现入口与文档；
-  - 明确错误码/降级行为；
-  - 增加旧参数误用测试。
-- **语义变化（行为 breaking）**：
-  - 同步更新状态机、错误模型、轮询语义；
-  - 在 README + DESIGN 明确新语义。
-
-### 7. 变更闭环清单（PR 必查）
-
-接口字段调整时，以下必须逐项确认：
-
-- `src/server.ts`（tool schema 与 output schema）
+- `src/server.ts` (tool schema and output schema)
 - `src/tools/codex.ts`
 - `src/tools/codex-reply.ts`
 - `src/tools/codex-session.ts`
 - `src/tools/codex-check.ts`
+- `src/tools/codex-setup.ts`
 - `src/session/manager.ts`
 - `src/app-server/protocol.ts`
 - `src/types.ts`
@@ -122,15 +103,15 @@ MCP server，基于 OpenAI Codex app-server JSON-RPC 协议，通过 5 个 MCP �
 - `AGENTS.md`
 - `CHANGELOG.md`
 - `docs/E2E_LOCAL_TEST_PLAN.md`
-- 对应 `tests/*.test.ts`
+- The matching `tests/*.test.ts`
 
-### 8. 推荐审查方式
+### 8. Review Approach
 
-- 先并行探索关键路径（schema、handler、manager、docs）。
-- 合并前做一次独立交叉验证（可借助 `claude-code-mcp`）。
-- 评审重点优先顺序：行为回归 > 字段一致性 > 文档同步性。
+- Explore the key paths in parallel first: schema, handlers, manager, docs.
+- Cross-verify once independently before merging.
+- Review priority: behavior regression > field consistency > documentation sync.
 
-### 9. 单次更新执行模板（可直接复制）
+### 9. Single-Pass Update Template
 
 ```bash
 codex --version
@@ -139,24 +120,24 @@ git diff --name-only -- codex-schema
 git diff -- codex-schema/metadata.json
 ```
 
-判定规则：
+Decision rule:
 
-- `git diff --name-only -- codex-schema` 为空：schema 基线未变化，记录“已执行更新，结果无差异”即可。
-- 若有差异：进入本手册第 4 节完整流程，完成代码/测试/文档闭环后再合并。
+- `git diff --name-only -- codex-schema` is empty: the schema baseline is unchanged; record "update executed, no diff".
+- There are diffs: run section 4 in full and close the code, test, and documentation loop before merging.
 
-### 10. 最近一次执行记录
+### 10. Latest Run Record
 
-- 执行日期：`2026-02-27`（本地环境）
-- `codex` 版本：`codex-cli 0.106.0`
-- 执行命令：`codex app-server generate-json-schema --experimental --out codex-schema`
-- 结果：`codex-schema` 无文件差异，`codex-schema/metadata.json` 无变更
-- 结论：当前 vendored schema 基线与本地 CLI 生成结果一致
+- Run date: `2026-02-27` (local environment)
+- `codex` version: `codex-cli 0.106.0`
+- Command: `codex app-server generate-json-schema --experimental --out codex-schema`
+- Result: no file diffs under `codex-schema`, no change to `codex-schema/metadata.json`
+- Conclusion: the vendored schema baseline matches what the local CLI generates
 
-> 后续每次执行“单次更新”时，应覆盖本节记录，保持最新一次运行状态可追溯。
+Each single-pass update overwrites this section so the latest run stays auditable.
 
-## 系统架构
+## System Architecture
 
-> **同平台假设**：本项目假设 MCP 客户端和 codex-mcp 服务端运行在同一台机器上。所有通信使用 stdio（本地 IPC），子进程共享本地文件系统和 `~/.codex/config.toml`，`cwd` 路径指向本地文件系统。
+> **Same-machine assumption:** the MCP client and the codex-mcp server run on one machine. All transport is stdio (local IPC), child processes share the local filesystem and `~/.codex/config.toml`, and `cwd` paths are local paths.
 
 ```text
 MCP Client (Claude/Kiro/etc.)
@@ -167,161 +148,198 @@ codex-mcp server (Node.js)
     │
     │ JSON-RPC (stdio, per-session subprocess)
     ▼
-codex app-server (Rust binary)
+codex app-server (Rust binary)      ── or ──  codex exec --json (fallback)
     │
     │ OpenAI Responses API
     ▼
 Codex Agent (cloud)
 ```
 
-### 为什么选择 app-server 而非 TypeScript SDK
+### Why app-server Rather Than The TypeScript SDK
 
-| 维度       | TypeScript SDK (@openai/codex-sdk) | app-server 协议                                                |
-| ---------- | ---------------------------------- | -------------------------------------------------------------- |
-| 审批系统   | 无逐项审批回调                     | 完整：命令审批(6种决策) + 文件变更审批(4种决策)                |
-| 事件流     | 有限事件类型                       | 丰富：AgentMessageDelta, ReasoningDelta, CommandOutputDelta 等 |
-| 线程管理   | start/resume                       | start/resume/fork/archive/list/read/compact/rollback           |
-| 轮次管理   | 无                                 | start/interrupt/steer                                          |
-| 配置管理   | 需自行解析 config.toml             | 原生 config.toml + read/write API                              |
-| 协议稳定性 | 高层封装，API 可能变化             | VSCode 扩展使用的底层协议，有完整 JSON Schema                  |
+| Dimension            | TypeScript SDK (@openai/codex-sdk) | app-server protocol                                                       |
+| -------------------- | ---------------------------------- | -------------------------------------------------------------------------- |
+| Approvals            | No per-item approval callback      | Full: command approvals (6 decisions) + file-change approvals (4 decisions) |
+| Event stream         | Limited event types                | Rich: AgentMessageDelta, ReasoningDelta, CommandOutputDelta, and more       |
+| Thread management    | start/resume                       | start/resume/fork/archive/list/read/compact/rollback                        |
+| Turn management      | None                               | start/interrupt/steer                                                       |
+| Configuration        | Parse config.toml yourself         | Native config.toml plus read/write API                                      |
+| Protocol stability   | High-level wrapper, API may change | The low-level protocol the VSCode extension uses, with a full JSON Schema   |
 
-## 工具设计
+### Codex Executable Resolution
 
-### 工具 1: `codex` — 启动新 Codex agent 会话
+`src/utils/codex-executable.ts` resolves the executable once at startup and caches the result:
 
-异步启动，立即返回 `{ sessionId, threadId, status: "running", pollInterval }`。
+1. `CODEX_MCP_PATH` — a filesystem path. The server resolves it to an absolute path and throws when the file is missing or not executable.
+2. `CODEX_MCP_COMMAND` — a bare command name looked up on `PATH` (with `PATHEXT` handling on Windows). The server throws when the value looks like a path or is not found.
+3. Auto-detection — `codex`, then `codex-internal`, resolved from `PATH` to an absolute path.
+4. The bare string `codex`, which lets the later `spawn` produce a clear "not found" error.
 
-**参数设计原则**：prompt、approvalPolicy、sandbox 为必填参数；effort 默认为 `low`（调用方应根据任务复杂度主动调整），其余高频参数保留在顶层，低频参数折叠到 advanced。
+`CODEX_MCP_PATH` and `CODEX_MCP_COMMAND` are mutually exclusive; setting both throws at startup. `src/index.ts` calls `checkDefaultCodexExecutableAvailability()` before creating the server, so a misconfiguration fails immediately and prints the resolved path to stderr.
 
-```text
-顶层参数（高频）：
-├── prompt: string          # 必填，任务描述
-├── approvalPolicy: enum    # 必填，审批策略：untrusted | on-failure | on-request | never
-├── sandbox: enum           # 必填，沙箱模式：read-only | workspace-write | danger-full-access
-├── effort?: enum           # 默认 low；推理力度：none | minimal | low | medium | high | xhigh（应根据任务复杂度调整）
-├── cwd?: string            # 工作目录，默认 server cwd
-├── model?: string          # 模型，默认 config.toml
-└── profile?: string        # config.toml profile 名
+### Backend Mode Detection
 
-advanced 参数（低频）：
-├── baseInstructions?: string        # 基础指令（替换默认）
-├── developerInstructions?: string   # 开发者指令
-├── personality?: enum               # 人格：none | friendly | pragmatic
-├── summary?: enum                   # 推理摘要：auto | concise | detailed | none
-├── config?: Record<string, unknown> # 覆盖 config.toml 的任意配置
-├── ephemeral?: boolean              # 不持久化线程
-├── outputSchema?: object            # JSON Schema 结构化输出
-├── images?: string[]                # 图片路径
-└── approvalTimeoutMs?: number       # 审批超时（默认 60000ms）
-```
+`src/app-server/detect.ts` probes `<binary> app-server --help` with a 5-second timeout and picks `app-server` on success, `exec` otherwise. `CODEX_MCP_MODE=app-server|exec` skips the probe. In `exec` mode `src/app-server/exec-client.ts` drives `codex exec --json` and `codex exec resume <threadId>`; it rejects `threadFork` and `threadResume` with `EXEC_NOT_SUPPORTED` and surfaces no approval or user-input requests. Clients read the active mode from `codex-mcp:///server-info` (`clientMode`).
 
-**返回值**：
+## Tool Design
 
-```json
-{
-  "sessionId": "sess_abc123",
-  "threadId": "thread_xyz789",
-  "status": "running",
-  "pollInterval": 120000
-}
-```
+### Tool 1: `codex` — Start A New Session
 
-说明：
+Starts asynchronously and returns `{ sessionId, threadId, status: "running", pollInterval, progress, execution, interactionState, recommendedNextAction }`.
 
-- 对于 `kind="command"` 的审批项，`actions[]` 与对应 `approval_request` 事件会透出 `commandActions` 与 `proposedExecpolicyAmendment`，便于客户端直接渲染审批上下文。
-
-**工作流**：
-
-1. 构建 codex app-server 启动参数（-c/-p 等）
-2. 启动 app-server 子进程
-3. 发送 `initialize` 请求（params: `{ clientInfo: { name: "codex-mcp", version }, capabilities? }`）
-4. 发送 `thread/start` 请求创建线程（params 全部可选：cwd, model, modelProvider, approvalPolicy, sandbox, personality, ephemeral, baseInstructions, developerInstructions, config）
-5. 发送 `turn/start` 请求开始第一轮（params: `{ threadId, input: [{ type: "text", text: prompt }] }`）
-   - `images` 参数转换为 `{ type: "localImage", path }` 加入 input 数组
-6. 注册事件监听（notification + server-initiated request）
-7. 从 `turn/started` 通知中获取 `activeTurnId`（`turn/interrupt` 需要）
-8. 立即返回 sessionId
-
-### 工具 2: `codex_reply` — 继续已有会话
+**Parameter principle:** `prompt`, `approvalPolicy`, and `sandbox` are required; `effort` defaults to `low` and callers raise it for harder tasks; other frequent parameters stay at the top level and rare ones move into `advanced`.
 
 ```text
-参数：
-├── sessionId: string       # 必填
-├── prompt: string          # 必填，后续消息
-├── model?: string          # 可覆盖后续轮次的模型
-├── approvalPolicy?: string # 可覆盖后续轮次的审批策略
-├── effort?: string         # 可覆盖后续轮次的推理力度
-├── summary?: string        # 可覆盖后续轮次的推理摘要
-├── personality?: string    # 可覆盖后续轮次的人格
-├── sandbox?: enum          # 可覆盖后续轮次的沙箱策略：read-only | workspace-write | danger-full-access（内部映射为 SandboxPolicy 对象）
-├── cwd?: string            # 可覆盖后续轮次的工作目录
-└── outputSchema?: object   # 本轮结构化输出
+Top level (frequent):
+├── prompt: string          # required, task description
+├── approvalPolicy: enum    # required: untrusted | on-failure | on-request | never
+├── sandbox: enum           # required: read-only | workspace-write | danger-full-access
+├── effort?: enum           # default low: none | minimal | low | medium | high | xhigh
+├── cwd?: string            # working directory, default server cwd
+├── model?: string          # model, default from config.toml
+└── profile?: string        # config.toml profile name
+
+advanced (rare):
+├── baseInstructions?: string        # replaces the default instructions
+├── developerInstructions?: string   # developer instructions
+├── personality?: enum               # none | friendly | pragmatic
+├── summary?: enum                   # reasoning summary: auto | concise | detailed | none
+├── config?: Record<string, unknown> # arbitrary config.toml overrides
+├── ephemeral?: boolean              # do not persist the thread
+├── outputSchema?: object            # JSON Schema for structured output
+├── images?: string[]                # local image paths
+├── approvalTimeoutMs?: number       # approval timeout, default 60000ms
+└── waitForResult?: number           # foreground wait budget in ms, max 300000
 ```
 
-> 注：以上覆盖参数对应 `TurnStartParams` 中的同名字段，覆盖对当前轮次及后续轮次生效。
+**Workflow:**
 
-**工作流**：
+1. Build the `codex app-server` spawn arguments (`-c` / `-p`).
+2. Write `meta.json` for the new session and spawn the child process.
+3. Write `pid.json` once the child process reports a PID.
+4. Send `initialize` (params: `{ clientInfo: { name: "codex-mcp", version }, capabilities? }`).
+5. Send `thread/start` to create the thread (every param optional: cwd, model, modelProvider, approvalPolicy, sandbox, personality, ephemeral, baseInstructions, developerInstructions, config).
+6. Send `turn/start` for the first turn (params: `{ threadId, input: [{ type: "text", text: prompt }] }`). Each `images` entry becomes a `{ type: "localImage", path }` element of `input`.
+7. Register the notification and server-request handlers before `client.start()`.
+8. Take `activeTurnId` from the `turn/started` notification, which `turn/interrupt` needs.
+9. Return the session id, or wait for the result when `advanced.waitForResult` is set.
 
-1. 查找已有会话，验证状态为 idle 或 error（cancelled 返回专用错误码 CANCELLED）
-2. 验证 threadId 存在
-3. 清除上一轮的 result/error 事件
-4. 通过已有 app-server 子进程发送 turn/start（失败时恢复状态为 error）
-5. 立即返回
+For `kind="command"` approvals, `actions[]` and the matching `approval_request` event carry `commandActions`, `proposedExecpolicyAmendment`, `availableDecisions`, `additionalPermissions`, `networkApprovalContext`, and `proposedNetworkPolicyAmendments`, so a client can render the approval context directly.
 
-### 工具 3: `codex_session` — 管理会话
+### Tool 2: `codex_reply` — Continue A Session
 
 ```text
-参数：
-├── action: "list" | "get" | "cancel" | "interrupt" | "fork" | "clean_background_terminals"
-├── sessionId?: string          # get/cancel/interrupt/fork/clean_background_terminals 必填
-└── includeSensitive?: boolean  # get 时包含敏感信息
+├── sessionId: string       # required
+├── prompt: string          # required, follow-up message
+├── model?: string          # overrides the model for this and later turns
+├── approvalPolicy?: string # overrides the approval policy
+├── effort?: string         # overrides reasoning effort
+├── summary?: string        # overrides the reasoning summary
+├── personality?: string    # overrides the personality
+├── sandbox?: enum          # read-only | workspace-write | danger-full-access, mapped to a SandboxPolicy object
+├── cwd?: string            # overrides the working directory
+├── outputSchema?: object   # structured output for this turn
+└── waitForResult?: number  # foreground wait budget in ms, max 300000
 ```
 
-**action 详解**：
+The override parameters map to the same-named fields of `TurnStartParams` and apply to the current turn and later ones.
 
-- `list`: 返回所有会话的公开信息（脱敏）
-- `get`: 返回单个会话详情
-- `cancel`: 终止会话（发送 abort 信号，终止子进程）
-- `interrupt`: 中断当前轮次但保留会话（发送 `turn/interrupt`，需要 `threadId` + `activeTurnId`，由 SessionManager 自动跟踪）
-- `fork`: 分叉会话（发送 thread/fork，创建新的 app-server 子进程，独立于原会话运行。常用于从某个节点尝试不同方案）
-- `clean_background_terminals`: 请求 app-server 清理该线程关联的后台终端资源
+**Workflow:**
 
-### 工具 4: `codex_check` — 轮询事件 + 审批响应
+1. Look up the session and require status `idle` or `error`; a cancelled session returns error code `CANCELLED`.
+2. Require a `threadId`.
+3. Drop the previous turn's `result` and `error` events.
+4. Send `turn/start` over the existing child process; on failure restore the session to `error`.
+5. Return immediately, or wait for the result when `waitForResult` is set.
+
+### Tool 3: `codex_setup` — Report Local Readiness
+
+Takes an optional `cwd` and returns:
 
 ```text
-参数：
+├── ready: boolean               # executable resolved and auth not rejected
+├── cwd: string
+├── executable: { ok, source, command?, isPath?, detail }
+├── auth: { ok, state, detail }  # state: authenticated | unauthenticated | unknown
+├── runtime: { sameMachineRequired: true, clientMode?, stateDir }
+├── projectContext: { hasUserConfig, hasProjectConfig }
+├── warnings: string[]
+└── nextSteps: string[]
+```
+
+`auth` comes from `codex login status` with a 5-second timeout. A `codex-internal` executable skips the probe and reports `state: "unknown"` without blocking readiness. `projectContext` reports whether `~/.codex/config.toml` and `<cwd>/.codex/config.toml` exist. `runtime.clientMode` runs the same probe as startup detection.
+
+### Tool 4: `codex_session` — Manage Sessions
+
+```text
+├── action: "list" | "get" | "cancel" | "interrupt" | "fork" | "clean" | "clean_background_terminals"
+├── sessionId?: string          # required for get/cancel/interrupt/fork/clean_background_terminals
+├── includeSensitive?: boolean  # get: include sensitive fields
+├── statuses?: ("idle"|"error"|"cancelled")[]  # clean: default all three
+├── olderThanMs?: number        # clean: only sessions inactive at least this long
+├── dryRun?: boolean            # clean: report matches, remove nothing
+└── includeDisk?: boolean       # clean: default true, also remove persisted state
+```
+
+**Actions:**
+
+- `list`: public, redacted info for every session in memory.
+- `get`: one session's details; `includeSensitive=true` adds `threadId`, `cwd`, `profile`, and `config`.
+- `cancel`: terminal. Resolves every pending request with `cancel`, kills the child process, and records `cancelledReason`.
+- `interrupt`: sends `turn/interrupt` with `threadId` + `activeTurnId` and keeps the session; the interrupted turn ends as `idle`.
+- `fork`: sends `thread/fork` on the original client, then runs the forked thread in a new session with its own child process. The source session is unchanged.
+- `clean`: batch-removes sessions matching `statuses` and `olderThanMs`, returning `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }`. `dryRun` fills `matchedSessionIds` only.
+- `clean_background_terminals`: sends `thread/backgroundTerminals/clean` for the thread. It needs the `experimentalApi` capability in the backend and returns `INTERNAL` on CLI builds without it.
+
+### Tool 5: `codex_check` — Poll Events And Answer Requests
+
+```text
 ├── action: "poll" | "respond_permission" | "respond_user_input"
 ├── sessionId: string
 │
-│ # poll 参数
-├── cursor?: number          # 事件偏移量，默认使用会话上次消费的 cursor
-├── maxEvents?: number       # 最大事件数，poll 默认 1，respond_* 默认 0
-├── responseMode?: "minimal" | "delta_compact" | "full"  # 默认 minimal
+│ # poll
+├── cursor?: number          # event offset, default the session's last consumed cursor
+├── maxEvents?: number       # poll default 1 (minimum 1), respond_* default 0
+├── responseMode?: "minimal" | "delta_compact" | "full"  # default minimal
 ├── pollOptions?: {
-│     includeEvents?: boolean   # 默认 true
-│     includeActions?: boolean  # 默认 true
-│     includeResult?: boolean   # 默认 true
-│     maxBytes?: number         # 默认 unlimited，超限时 best-effort 截断
+│     includeEvents?: boolean   # default true
+│     includeActions?: boolean  # default true
+│     includeResult?: boolean   # default true
+│     skipDeltas?: boolean      # default false, drop delta events and advance the cursor past them
+│     finalOnly?: boolean       # default false, forces includeEvents=false and includeResult=true
+│     maxBytes?: number         # default unlimited, best-effort truncation when exceeded
+│     waitMs?: number           # long-poll budget in ms, clamped to 120000
 │   }
 │
-│ # respond_permission 参数
-├── requestId?: string       # 审批请求 ID
+│ # respond_permission
+├── requestId?: string       # approval request id
 ├── decision?: "accept" | "acceptForSession" | "acceptWithExecpolicyAmendment" | "applyNetworkPolicyAmendment" | "decline" | "cancel"
-├── execpolicy_amendment?: string[]        # 仅 acceptWithExecpolicyAmendment
-├── network_policy_amendment?: { action: "allow" | "deny"; host: string }  # 仅 applyNetworkPolicyAmendment
-├── denyMessage?: string     # 仅用于 codex-mcp 内部事件记录，不发送给 app-server
+├── execpolicy_amendment?: string[]        # acceptWithExecpolicyAmendment only
+├── network_policy_amendment?: { action: "allow" | "deny"; host: string }  # applyNetworkPolicyAmendment only
+├── denyMessage?: string     # recorded in the codex-mcp approval_result event, never sent to app-server
 │
-│ # respond_user_input 参数
-├── requestId?: string       # 用户输入请求 ID
-└── answers?: Record<string, { answers: string[] }>  # question-id → answers 映射
+│ # respond_user_input
+├── requestId?: string       # user-input request id
+└── answers?: Record<string, { answers: string[] }>  # question id → answers
 ```
 
-**poll 返回值**：
+**poll response:**
 
 ```json
 {
   "sessionId": "sess_abc123",
   "status": "running",
+  "pollInterval": 120000,
+  "progress": {
+    "phase": "acting",
+    "lastEventAt": "2026-02-15T...",
+    "activeTurnId": "turn_1",
+    "pendingActionCount": 0,
+    "lastMethod": "item/commandExecution/outputDelta",
+    "tokens": { "input": 1200, "output": 340, "total": 1540 }
+  },
+  "interactionState": "working",
+  "recommendedNextAction": "poll",
   "events": [
     { "id": 0, "type": "output", "data": {}, "timestamp": "..." },
     { "id": 1, "type": "progress", "data": {}, "timestamp": "..." }
@@ -344,24 +362,25 @@ advanced 参数（低频）：
 }
 ```
 
-### 静态 Resources（非工具）
+### Static Resources (Not Tools)
 
-本项目额外暴露 6 个静态只读 MCP Resources，用于元数据和使用指导，不参与 agent 生命周期控制：
+The server exposes 7 read-only MCP resources carrying metadata and usage guidance. They take no part in agent lifecycle control:
 
-- `codex-mcp:///server-info`（`application/json`）：服务端版本/运行时/平台信息
-- `codex-mcp:///compat-report`（`application/json`）：跨后端兼容性能力报告
-- `codex-mcp:///config`（`text/markdown`）：参数与 `codex app-server -c` 配置映射说明
-- `codex-mcp:///gotchas`（`text/markdown`）：轮询、cursor、审批超时等常见注意事项
-- `codex-mcp:///quickstart`（`text/markdown`）：最小端到端工作流示例
-- `codex-mcp:///errors`（`text/markdown`）：错误码参考与恢复提示
+- `codex-mcp:///server-info` (`application/json`): server version, runtime, platform, `clientMode`, and the resource index
+- `codex-mcp:///compat-report` (`application/json`): cross-backend capability report
+- `codex-mcp:///config` (`text/markdown`): parameter guide and the mapping to `codex app-server -c`
+- `codex-mcp:///gotchas` (`text/markdown`): polling, cursors, approval timeouts, and exec-mode failure modes
+- `codex-mcp:///quickstart` (`text/markdown`): the minimal end-to-end workflow
+- `codex-mcp:///errors` (`text/markdown`): error-code reference and recovery hints
+- `codex-mcp:///delegation-guide` (`text/markdown`): approval/sandbox presets per task type
 
-约束：
+Constraints:
 
-- 仍保持 4 个 MCP tools，不新增额外工具
-- 不暴露 prompts
-- resources 内容为静态文档/元信息，不返回环境变量等敏感信息
+- The server keeps 5 MCP tools and adds no others.
+- The server exposes no prompts.
+- Resource content is static documentation and metadata; it carries no environment variables or other sensitive values.
 
-## 会话生命周期
+## Session Lifecycle
 
 ```text
                     +---> waiting_approval ---+
@@ -373,36 +392,64 @@ advanced 参数（低频）：
                     +---> cancelled
 ```
 
-**状态说明**：
+**Statuses:**
 
-- `running`: agent 正在执行
-- `idle`: 轮次完成，等待后续消息
-- `waiting_approval`: agent 需要审批（命令执行或文件变更）
-- `error`: 轮次失败
-- `cancelled`: 会话被取消（终态）
+- `running`: the agent is executing
+- `idle`: the turn finished and the session accepts a follow-up
+- `waiting_approval`: the agent needs an approval or user input
+- `error`: the turn failed
+- `cancelled`: the session was cancelled (terminal)
 
-**状态转换规则**：
+**Transitions:**
 
-- `running` → `idle`: 轮次正常完成（`turn/completed` 通知）
-- `running` → `error`: 轮次失败（`error` 通知，含 `willRetry` 标记）
-- `running` → `waiting_approval`: 收到审批请求（`item/commandExecution/requestApproval` 或 `item/fileChange/requestApproval`）
-- `running` → `cancelled`: 用户取消
-- `waiting_approval` → `running`: 审批响应后恢复
-- `waiting_approval` → `cancelled`: 用户取消
-- `idle` → `running`: codex_reply 发送新消息
-- `error` → `running`: codex_reply 重试
-- `cancelled` / `error` 状态收到晚到审批请求时：直接返回拒绝响应，不再创建 pending request（防止状态回跳）
+- `running` → `idle`: the turn completed (`turn/completed`)
+- `running` → `error`: the turn failed (an `error` notification with `willRetry: false`)
+- `running` → `waiting_approval`: an approval or user-input request arrived
+- `running` → `cancelled`: the caller cancelled
+- `waiting_approval` → `running`: the request was answered or timed out
+- `waiting_approval` → `cancelled`: the caller cancelled
+- `idle` → `running`: `codex_reply` sent a new message
+- `error` → `running`: `codex_reply` retried
+- A late approval request against a `cancelled` or `error` session gets an immediate rejection and creates no pending request, so the status never jumps back.
 
-## 事件缓冲策略
+An `error` notification with `willRetry: true` keeps the status and emits a pinned `progress` event whose `data.method` is `codex-mcp/reconnect` and whose `phase` is `retrying`, so clients can show reconnect state without treating it as terminal.
 
-### EventBuffer 设计
+## Foreground Execution
+
+`codex` (`advanced.waitForResult`) and `codex_reply` (`waitForResult`) turn the normal background start into a foreground wait of up to 300000 ms. `src/utils/execution.ts` polls the session status in slices bounded by `SessionManager.waitForChange`, and:
+
+- returns the final `result` and `completedAt` when the status becomes `idle`, `error`, or `cancelled`;
+- returns immediately with `execution.fallbackReason: "interactive_poll_required"` when the status becomes `waiting_approval`, because answering an approval needs another tool call;
+- returns session metadata with `execution.fallbackReason: "wait_for_result_timeout"` when the budget runs out.
+
+Every `codex`, `codex_reply`, and `codex_check` response carries three orchestration hints: `execution` (`requested` vs `effective` mode plus the fallback reason), `interactionState` (`working` / `waiting_input` / `finished`), and `recommendedNextAction` (`poll` / `respond_permission` / `respond_user_input` / `none`).
+
+## Progress Reporting
+
+`progress` summarizes a session without reading its events:
+
+| Field                | Source                                                                                              |
+| -------------------- | --------------------------------------------------------------------------------------------------- |
+| `phase`              | Status first (`waiting_approval`/`cancelled`/`error`/`finished`), then `starting` when no turn is active, then `reasoning` or `acting` from the last observed method, else `running` |
+| `lastEventAt`        | Timestamp of the last notification or server request                                                |
+| `activeTurnId`       | The turn id tracked from `turn/started`                                                             |
+| `pendingActionCount` | Unresolved pending requests                                                                         |
+| `lastMethod`         | The last observed JSON-RPC method, ignoring `thread/tokenUsage/updated`                             |
+| `percent`            | `percent`/`percentage`/`progress`/`fractionComplete` from notification params, normalized to 0-100   |
+| `tokens`             | Merged from notification params and `turn.usage`, accepting both camelCase and snake_case key names  |
+
+`reasoning` covers `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`, and `item/plan/delta`. `acting` covers `item/commandExecution/outputDelta`, `item/commandExecution/terminalInteraction`, `item/fileChange/outputDelta`, `item/mcpToolCall/progress`, `turn/diff/updated`, and `turn/plan/updated`.
+
+## Event Buffering
+
+### EventBuffer
 
 ```typescript
 interface EventBuffer {
   events: SessionEvent[];
-  maxSize: number; // 1000（软限制）
-  hardMaxSize: number; // 2000（硬限制）
-  nextId: number; // 单调递增
+  maxSize: number; // 1000 (soft limit)
+  hardMaxSize: number; // 2000 (hard limit)
+  nextId: number; // monotonic
 }
 
 interface SessionEvent {
@@ -414,195 +461,291 @@ interface SessionEvent {
 }
 ```
 
-### 事件类型映射
+### Event Type Mapping
 
-> 左列为 app-server JSON-RPC 通知/请求的真实 `method` 名（来自 `codex app-server generate-json-schema`）。
-> “通知方法”就是 JSON-RPC notification 的 `method` 字段（例如 `turn/started`、`item/agentMessage/delta`），在 `codex_check` 返回中位于 `events[].data.method`。
+> The left column is the real `method` of the app-server JSON-RPC notification or request, as generated by `codex app-server generate-json-schema`. It appears in `codex_check` responses at `events[].data.method`.
 
-| app-server method                       | codex-mcp 事件类型 | Pinned | 说明                                                                          |
-| --------------------------------------- | ------------------ | ------ | ----------------------------------------------------------------------------- |
-| `item/agentMessage/delta`               | output             | No     | agent 文本输出增量                                                            |
-| `item/completed` (ThreadItem)           | output/progress    | No     | 根据 `item.type` 分类：`agentMessage`/`userMessage` → output；其他 → progress |
-| `item/commandExecution/outputDelta`     | progress           | No     | 命令输出增量                                                                  |
-| `item/fileChange/outputDelta`           | progress           | No     | 文件变更增量                                                                  |
-| `item/reasoning/textDelta`              | progress           | No     | 推理文本增量                                                                  |
-| `item/reasoning/summaryTextDelta`       | progress           | No     | 推理摘要增量                                                                  |
-| `item/plan/delta`                       | progress           | No     | 计划增量（EXPERIMENTAL）                                                      |
-| `item/mcpToolCall/progress`             | progress           | No     | MCP 工具调用进度                                                              |
-| `turn/completed`                        | result             | Yes    | 轮次完成                                                                      |
-| `error`                                 | error              | Yes    | 错误（含 willRetry 标记）                                                     |
-| `item/commandExecution/requestApproval` | approval_request   | Yes    | 命令审批请求（server-initiated request）                                      |
-| `item/fileChange/requestApproval`       | approval_request   | Yes    | 文件变更审批请求（server-initiated request）                                  |
-| approval response（codex-mcp 内部）     | approval_result    | Yes    | 审批响应                                                                      |
-| `item/started`                          | progress           | No     | item 开始                                                                     |
-| `turn/started`                          | progress           | No     | 轮次开始（用于跟踪 activeTurnId）                                             |
-| `turn/diff/updated`                     | progress           | No     | 轮次级别统一 diff                                                             |
-| `turn/plan/updated`                     | progress           | No     | 轮次级别计划更新                                                              |
+| app-server method                       | codex-mcp event type | Pinned | Notes                                                                     |
+| --------------------------------------- | -------------------- | ------ | --------------------------------------------------------------------------- |
+| `item/agentMessage/delta`               | output               | No     | Agent text increment                                                        |
+| `item/completed` (ThreadItem)           | output/progress      | No     | By `item.type`: `agentMessage`/`userMessage` → output; everything else → progress |
+| `item/started`                          | progress             | No     | Item started                                                                |
+| `rawResponseItem/completed`             | output/progress      | No     | Same classification as `item/completed`                                     |
+| `item/commandExecution/outputDelta`     | progress             | No     | Command output increment, after shell-noise filtering                       |
+| `item/commandExecution/terminalInteraction` | progress         | No     | Terminal interaction                                                        |
+| `item/fileChange/outputDelta`           | progress             | No     | File-change increment                                                       |
+| `item/reasoning/textDelta`              | progress             | No     | Reasoning text increment                                                    |
+| `item/reasoning/summaryTextDelta`       | progress             | No     | Reasoning summary increment                                                 |
+| `item/reasoning/summaryPartAdded`       | progress             | No     | Reasoning summary part                                                      |
+| `item/plan/delta`                       | progress             | No     | Plan increment (EXPERIMENTAL)                                               |
+| `item/mcpToolCall/progress`             | progress             | No     | MCP tool call progress                                                      |
+| `turn/started`                          | progress             | No     | Turn started; the source of `activeTurnId`                                  |
+| `turn/completed`                        | result               | Yes    | Turn finished                                                               |
+| `turn/diff/updated`                     | progress             | No     | Turn-level unified diff                                                     |
+| `turn/plan/updated`                     | progress             | No     | Turn-level plan update                                                      |
+| `thread/started`                        | progress             | No     | Thread started; refreshes `threadId` when the notification carries a new one |
+| `thread/archived`, `thread/unarchived`, `thread/name/updated`, `thread/tokenUsage/updated` | progress | No | Thread state                                                          |
+| `model/rerouted`                        | progress             | No     | Backend rerouted the model                                                  |
+| `fuzzyFileSearch/sessionUpdated`, `fuzzyFileSearch/sessionCompleted` | progress | No | Fuzzy file search                                                    |
+| `windows/worldWritableWarning`          | progress             | No     | Windows permission warning                                                  |
+| `account/login/completed`               | progress             | No     | Login completed                                                             |
+| `error` (`willRetry: false`)            | error                | Yes    | Terminal error                                                              |
+| `error` (`willRetry: true`)             | progress             | Yes    | Rewritten to `codex-mcp/reconnect`                                          |
+| `item/commandExecution/requestApproval` | approval_request     | Yes    | Command approval (server-initiated request)                                 |
+| `item/fileChange/requestApproval`       | approval_request     | Yes    | File-change approval (server-initiated request)                             |
+| `item/tool/requestUserInput`            | approval_request     | Yes    | User input (server-initiated request)                                       |
+| approval response (codex-mcp internal)  | approval_result      | Yes    | The decision, including timeouts                                            |
+| `codex-mcp/ttl_warning` (codex-mcp internal) | progress        | No     | 60 seconds before TTL cleanup                                               |
 
-### 淘汰策略
+Notifications outside this table are ignored.
 
-1. events.length > maxSize: 淘汰最旧的非 pinned 事件
-2. 全部 pinned: 优先淘汰旧的 `approval_result` 事件
-3. events.length > hardMaxSize: 强制淘汰最旧事件（`shift`，包括 pinned）
+### Shell Noise Filtering
 
-### Cursor 分页
+On Windows, PowerShell profile output (oh-my-posh banners, PSReadLine, terminal-integration escape sequences) leaks into every command execution. `item/commandExecution/outputDelta` deltas are stripped of those lines before they enter the buffer, and a delta that was entirely noise produces no event. `CODEX_MCP_DISABLE_NOISE_FILTER=1` turns the filter off.
 
-- 客户端传 cursor（上次 nextCursor 值）
-- 服务端返回 id >= cursor 的事件 + nextCursor
-- 如果最早缓冲事件 id > cursor（事件被淘汰），返回 cursorResetTo
+### Eviction
 
-## 权限管理三层模型
+1. `events.length > maxSize`: evict the oldest non-pinned event.
+2. All events pinned: evict the oldest `approval_result` first.
+3. `events.length > hardMaxSize`: `shift` the oldest event, pinned included.
 
-### 第零层 — 审批策略（approvalPolicy）
+### Cursor Pagination
 
-控制 agent 何时需要人类审批：
+- The client sends `cursor` (the previous `nextCursor`); omitting it continues from the session's last consumed cursor.
+- The server returns events with `id >= cursor` plus `nextCursor`.
+- When the earliest buffered event id is greater than the cursor, older events were evicted and the response carries `cursorResetTo`.
 
-- `never`: 所有操作自动批准，无交互
-- `on-failure`: 自动批准，失败时重试
-- `on-request`: 模型决定何时请求审批（推荐默认）
-- `untrusted`: 最严格，所有操作都需审批
+### Poll Shaping
 
-### 第一层 — 沙箱隔离（sandbox）
+- `responseMode` controls per-event payload size: `minimal` (default), `delta_compact`, `full`.
+- `pollOptions.skipDeltas` omits `item/agentMessage/delta`, `item/commandExecution/outputDelta`, `item/fileChange/outputDelta`, `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`, and `item/plan/delta` while advancing the cursor past them, so the client never re-reads them.
+- `pollOptions.finalOnly` forces `includeEvents=false` and `includeResult=true`, keeps `actions[]`, and advances the cursor past every unseen event. It is the result-centric poll.
+- `pollOptions.maxBytes` caps the serialized response; when the cap bites, the response sets `truncated` and lists `truncatedFields`.
+- `respond_permission` and `respond_user_input` advance the cursor monotonically — `max(cursor, sessionLastCursor)` — so a stale cursor from an MCP host replays nothing.
 
-控制 agent 的文件系统和网络访问：
+### Long Polling
 
-- `read-only`: 只读文件系统（在某些客户端/策略组合下可能无法执行 shell 命令；`read-only + never` 常见于纯对话分析场景）
-- `workspace-write`: 工作区可写，网络受限（推荐默认）
-- `danger-full-access`: 完全访问（危险）
+`pollOptions.waitMs` turns a poll into a long poll. The handler polls, and when the response has no events, no actions, and no result it waits on `SessionManager.waitForChange` and polls again, until data appears, the request aborts, or the budget runs out. `waitMs` is clamped to 120000 ms.
 
-### 第二层 — 异步审批裁决
+`waitForChange` resolves on any state change: a pushed event, a new pending request, a status change, or a session eviction. A session accepts 4 concurrent waiters; the fifth rejects, and the caller falls back to an immediate poll.
 
-当 approvalPolicy 触发审批时的完整流程：
+## Permission Model — Three Layers
 
-1. app-server 发送 server-initiated request:
-   - `item/commandExecution/requestApproval`: 命令执行审批
-   - `item/fileChange/requestApproval`: 文件变更审批
+### Layer 0 — Approval Policy (`approvalPolicy`)
 
-2. codex-mcp 处理：
-   - 创建 ApprovalRecord（requestId, command/changes, reason）
-   - 推送 approval_request 事件到 EventBuffer
-   - 会话状态转为 waiting_approval
-   - 启动超时计时器（默认 60s）
+Controls when the agent needs a human decision:
 
-3. MCP 客户端响应：
-   - 通过 codex_check(action="respond_permission") 发送决策
-   - 命令执行决策：accept / acceptForSession / acceptWithExecpolicyAmendment / applyNetworkPolicyAmendment / decline / cancel
-   - 文件变更决策：accept / acceptForSession / decline / cancel
+- `never`: every operation is auto-approved, no interaction
+- `on-failure`: auto-approve, retry on failure
+- `on-request`: the model decides when to ask (the recommended default)
+- `untrusted`: strictest, every operation needs approval
 
-4. codex-mcp 转发：
-   - 将决策转发回 app-server（作为 server-initiated request 的 response）
-   - 推送 approval_result 事件
-   - 会话状态恢复为 running
+### Layer 1 — Sandbox Isolation (`sandbox`)
 
-5. 超时处理：
-   - 超时自动 decline（不中断 agent）
-   - 推送 approval_result 事件（标记为 timeout）
+Controls the agent's filesystem and network access:
 
-### 客户端权限配置指南
+- `read-only`: read-only filesystem. Some client and policy combinations block shell commands entirely; `read-only + never` suits pure analysis.
+- `workspace-write`: workspace writable, network restricted (the recommended default)
+- `danger-full-access`: unrestricted (dangerous)
 
-MCP 客户端（调用方）应根据自身的安全策略配置权限：
+### Layer 2 — Asynchronous Approval Arbitration
 
-1. **approvalPolicy 选择**：
-   - 完全自动化场景：`never`（仅在受信任环境中使用）
-   - CI/CD 场景：`on-failure`
-   - 交互式开发：`on-request`（推荐）
-   - 高安全要求：`untrusted`
+1. app-server sends a server-initiated request:
+   - `item/commandExecution/requestApproval` for command execution
+   - `item/fileChange/requestApproval` for file changes
+   - `item/tool/requestUserInput` for user input
 
-2. **sandbox 选择**：
-   - 只读分析：`read-only`
-   - 正常开发：`workspace-write`（推荐）
-   - 需要完全访问：`danger-full-access`（谨慎使用）
+2. codex-mcp handles it:
+   - creates a `PendingRequest` (requestId, params, itemId, threadId, turnId, reason, approval context)
+   - pushes an `approval_request` event into the EventBuffer
+   - moves the session to `waiting_approval`
+   - starts the timeout timer (60000 ms by default)
+   - wakes any long-poll waiters
 
-3. **审批响应策略**：
-   - 客户端可实现自动审批规则（如：只读命令自动 accept）
-   - 或转发给人类用户决策
-   - 建议实现 acceptForSession 以减少重复审批
+3. The MCP client answers:
+   - `codex_check(action="respond_permission")` for approvals, `codex_check(action="respond_user_input")` for questions
+   - Command decisions: accept / acceptForSession / acceptWithExecpolicyAmendment / applyNetworkPolicyAmendment / decline / cancel
+   - File-change decisions: accept / acceptForSession / decline / cancel
 
-## app-server 子进程管理
+4. codex-mcp forwards it:
+   - sends the decision back as the response to the server-initiated request
+   - pushes an `approval_result` event
+   - returns the session to `running` once no unresolved request remains
 
-### 架构
+5. Timeout:
+   - the request auto-declines without interrupting the agent
+   - the `approval_result` event carries `timeout: true`
 
-每个 MCP 会话对应一个独立的 codex app-server 子进程（stdio transport）。
+### Client Permission Guidance
 
-### 子进程启动
+1. **Choosing `approvalPolicy`:** `never` for fully automated runs in trusted environments, `on-failure` for CI/CD, `on-request` for interactive development, `untrusted` for high-security work.
+2. **Choosing `sandbox`:** `read-only` for analysis, `workspace-write` for normal development, `danger-full-access` only when genuinely required.
+3. **Answering approvals:** the client can auto-approve by rule (read-only commands, for instance), or forward the decision to a person. `acceptForSession` cuts repeat prompts.
+
+## app-server Subprocess Management
+
+### Structure
+
+Every MCP session owns one `codex` child process over stdio transport.
+
+### Spawn
 
 ```text
 codex app-server [-c key=value]... [-p profile]
 ```
 
-- `-c` 参数来自工具的 advanced.config + 顶层参数
-- `-p` 参数来自工具的 profile
-- 顶层参数映射：model → `-c model=gpt-5.2`, approvalPolicy → `-c approval_policy=on-request`, sandbox → `-c sandbox_mode=workspace-write`
-- advanced.config 中的值：原始类型（string/number/boolean）使用 `String(value)`，对象/数组使用 `JSON.stringify(value)`
+- `-c` comes from `advanced.config` plus the top-level parameters
+- `-p` comes from `profile`
+- Top-level mapping: `model` → `-c model=gpt-5.2`, `approvalPolicy` → `-c approval_policy=on-request`, `sandbox` → `-c sandbox_mode=workspace-write`
+- `advanced.config` values serialize by type: primitives through `String(value)`, objects and arrays through `JSON.stringify(value)`
 
-### JSON-RPC 通信
+### JSON-RPC Transport
 
-- 通过 stdin/stdout 进行消息收发
-- 请求 ID 管理：Map<id, { resolve, reject, timeout }>
-- 通知处理：注册 handler 按 method 分发
-- Server-initiated request 处理：注册 handler，返回 response
+- Messages travel over the child's stdin/stdout.
+- Request ids map to `{ resolve, reject, timeout }`.
+- Notifications dispatch to a handler by method.
+- Server-initiated requests dispatch to a handler that returns a response.
 
-### 生命周期
+### Lifecycle
 
-- 启动：spawn → initialize → ready
-- 运行：处理 thread/turn 请求，转发事件
-- 关闭：发送关闭信号 → 等待退出 → 强制 kill（超时后）
-- 异常：子进程退出 → 标记会话为 error
+- Start: spawn → initialize → ready
+- Run: forward thread and turn requests, dispatch events
+- Stop: close stdin → wait for exit → SIGKILL after the timeout
+- Fault: the child exits unexpectedly → the session becomes `error`
 
-### 优雅关闭流程
+### Graceful Shutdown
 
-当 MCP server 收到 SIGINT/SIGTERM 时：
+`src/index.ts` shuts down on SIGINT, SIGTERM, SIGBREAK, an unhandled runtime error, or a stdin close that passes the guard:
 
-1. 停止接受新的工具调用
-2. SessionManager.destroy()：清除所有 pending request 的超时计时器
-3. 向所有 app-server 子进程发送 SIGTERM（stdin.end + kill）
-4. 等待子进程退出（超时 5s 后 SIGKILL）
-5. 清理所有会话资源，关闭 MCP transport
+1. Stop accepting new tool calls.
+2. Flush the persistence event logs and release the STATE_DIR lock.
+3. `SessionManager.destroy()` clears every pending request timer.
+4. Send SIGTERM to every child process (`stdin.end` + kill), then SIGKILL after 5 seconds.
+5. Close the MCP transport, then force-exit after 5 seconds (10 on Windows) if cleanup hangs.
 
-### 会话清理策略
+`src/utils/stdin-shutdown.ts` guards the stdin path: while the transport still reports itself connected, a stdin `end` or `close` is treated as transient and the server keeps serving. Otherwise the server exits at once when no session is active, and waits up to 10 seconds (15 on Windows) for active sessions before forcing the exit.
 
-SessionManager 运行定期清理任务（每 60s 检查一次）：
+### STDIO Preflight
 
-- idle 超过 30 分钟 → 自动终止子进程并清理
-- running 超过 4 小时 → 自动终止（防止僵尸会话）
-- cancelled/error 状态超过 5 分钟 → 清理内存中的会话记录
-- 清理触发 `cancelSession` 时会推送 `progress` + `result(status=cancelled)`；不会额外推送 `error` 事件
+`src/utils/stdio-guard.ts` runs before the MCP handshake and reports stdout-contamination risk: a TTY on stdin or stdout, or a PowerShell environment on Windows. `CODEX_MCP_STDIO_MODE` selects the behavior — `auto` (default) warns, `strict` refuses to start on a blocking risk, `off` disables the guard.
 
-## 配置解析流程
+### Session TTL Cleanup
+
+`SessionManager` runs a cleanup pass every 60 seconds:
+
+- `idle` beyond 30 minutes → cancel the session and kill the child process
+- `running` or `waiting_approval` beyond 4 hours → cancel (this bounds zombie sessions)
+- `cancelled` or `error` beyond 5 minutes → evict from memory and remove the persisted directory
+- A session with an unparseable `lastActiveAt` → cancel immediately
+
+A session within 60 seconds of its TTL gets one `progress` event with `data.method = "codex-mcp/ttl_warning"` carrying `ttlRemainingMs` and `sessionId`. The event fires once per session and resets when the session's status changes.
+
+Cleanup-driven `cancelSession` pushes a `progress` event and a `result` with `status=cancelled`, never an extra `error` event.
+
+## Disk Persistence
+
+State lives under `CODEX_MCP_STATE_DIR`, defaulting to `~/.codex-mcp/state`.
 
 ```text
-用户调用 codex({ prompt, model, profile, advanced: { config } })
-    │
-    ▼
-构建 app-server 启动参数：
-  codex app-server
-    -c model=gpt-5.2               ← 来自 model 参数
-    -c approval_policy=on-request ← 来自 approvalPolicy 参数
-    -c sandbox_mode=workspace-write ← 来自 sandbox 参数
-    -c custom.key=value           ← 来自 advanced.config
-    -p my-profile                 ← 来自 profile 参数
-    │
-    ▼
-codex app-server 内部：
-  1. 加载 ~/.codex/config.toml 默认值
-  2. 应用 profile 覆盖
-  3. 应用 -c 参数覆盖
-  4. 最终配置生效
+STATE_DIR/
+├── .lock                      # PID lockfile, single writer
+└── sessions/
+    └── <sessionId>/
+        ├── meta.json          # session metadata
+        ├── pid.json           # child-process identity for the orphan reaper
+        ├── result.json        # final turn result
+        └── events.jsonl       # append-only event log
 ```
 
-## 错误处理策略
+### Write Path
 
-### 错误分类
+- `meta.json` holds `schemaVersion`, `sessionId`, `status`, `createdAt`, `lastActiveAt`, `cancelledAt`, `cancelledReason`, `threadId`, `model`, `cwd`, `approvalPolicy`, `sandbox`, and `profile`. `SessionManager` writes it when the session is created and on every status change, skipping a write when the status is unchanged.
+- `pid.json` holds `{ pid, spawnedAt, command }` and is written right after the child process starts.
+- `result.json` holds the final `TurnResult` and is written when a turn completes or ends in error.
+- `events.jsonl` holds one `{ seq, type, data, timestamp }` object per line. `EventLog` writes it with a tiered flush: `approval_request`, `approval_result`, `result`, and `error` flush immediately; everything else batches and flushes every 100 ms, and shutdown forces a final flush. Nothing in the current session write path calls `appendEvent`, so the file exists only for sessions whose events another writer produced.
 
-- `INVALID_ARGUMENT`: 参数验证失败
-- `SESSION_NOT_FOUND`: 会话不存在
-- `SESSION_BUSY`: 会话正在运行，无法接受新消息
-- `REQUEST_NOT_FOUND`: 审批/用户输入请求不存在或已解决
-- `TIMEOUT`: 操作超时
-- `CANCELLED`: 会话已取消
-- `INTERNAL`: 内部错误
+Every JSON file is written through `atomicWriteJson`: write a sibling temp file, then rename. A crash between the two steps leaves only the temp file.
 
-### 错误响应格式
+### Recovery
+
+`scanRecoverableSessions` runs at startup over `STATE_DIR/sessions/`:
+
+- Reads `meta.json`; a directory without one, or with `schemaVersion` above the supported version, is skipped.
+- Parses `events.jsonl` line by line and stops at the first unparseable line, dropping the torn tail a crash left behind. It keeps the last 500 events.
+- Reads `result.json` and `pid.json` when present.
+
+`SessionManager.ingestRecovered` then loads them into memory:
+
+- A session whose persisted status was `running` or `waiting_approval` becomes `error` with `cancelledReason: "Server restarted while session was active"`, because its child process is gone.
+- Other statuses carry over; an unrecognized status becomes `error`.
+- `result.json` becomes `lastResult`, so a client can still read the outcome of a completed session.
+- The event-log sequence resumes at `lastSeq + 1`.
+- A session id already in memory is skipped.
+
+### Lockfile
+
+`STATE_DIR/.lock` holds `{ pid, startedAt }` and is created with `O_EXCL`. A lock held by a dead PID is reclaimed; a lock held by a live foreign PID throws, and the message names the file to delete if the lock is stale. `startDiskPersistence()` in `src/session/persistence.ts` decides what happens next: it hands back the adapter, the recovered sessions and the prune count when it takes the lock, and warns and hands back nothing when it does not. A server that lost the lock keeps serving from memory and never reads, writes, prunes or reaps inside the state directory another server owns.
+
+### Retention
+
+`pruneSessionDirs` runs at startup and removes session directories oldest-first, ordering by `meta.lastActiveAt` with the directory mtime as the fallback:
+
+1. Age: older than 7 days
+2. Count: beyond 200 retained sessions
+3. Size: beyond 500 MB total across all session directories
+
+### Orphan Reaper
+
+`src/session/orphan-reaper.ts` runs after recovery and before the server accepts calls. For every recovered session that has a `pid.json`:
+
+1. `process.kill(pid, 0)` decides whether the PID is alive; a dead PID counts as already gone.
+2. The identity check compares the recorded `spawnedAt` against the process start time reported by the OS, with a 5-second tolerance: `wmic process where "ProcessId=<pid>" get CreationDate` on Windows, `ps -p <pid> -o lstart=` elsewhere. When `ps` gives nothing but `/proc/<pid>/stat` field 22 exists, the reaper accepts the process as an orphan only while the recorded spawn time is under 24 hours old.
+3. A live PID that fails the identity check is a reused PID; the reaper logs it and leaves it alone.
+4. A confirmed orphan gets SIGTERM (`taskkill /PID` on Windows), a 5-second poll for exit, then SIGKILL (`taskkill /PID /F`).
+
+The reaper re-runs the liveness and identity checks immediately before signalling, which narrows the window in which the PID could be recycled.
+
+## Configuration Resolution
+
+```text
+codex({ prompt, model, profile, advanced: { config } })
+    │
+    ▼
+app-server spawn arguments:
+  codex app-server
+    -c model=gpt-5.2                ← model
+    -c approval_policy=on-request   ← approvalPolicy
+    -c sandbox_mode=workspace-write ← sandbox
+    -c custom.key=value             ← advanced.config
+    -p my-profile                   ← profile
+    │
+    ▼
+codex app-server:
+  1. loads the ~/.codex/config.toml defaults
+  2. applies the profile
+  3. applies the -c overrides
+  4. runs with the result
+```
+
+## Error Handling
+
+### Error Codes
+
+- `INVALID_ARGUMENT`: parameter validation failed
+- `SESSION_NOT_FOUND`: no such session
+- `SESSION_BUSY`: the session is running and takes no new message
+- `SESSION_NOT_RUNNING`: the action needs an active turn
+- `REQUEST_NOT_FOUND`: the approval or user-input request does not exist or is already resolved
+- `TIMEOUT`: the operation timed out
+- `CANCELLED`: the session is cancelled
+- `APP_SERVER_START_FAILED`: the child process failed to start
+- `THREAD_FORK_RESUME_FAILED`: `thread/fork` or `thread/resume` failed
+- `PROTOCOL_PARSE_ERROR`: an app-server message did not parse
+- `WRITE_QUEUE_DROPPED`: a write to the child process was dropped
+- `EXEC_NOT_SUPPORTED`: exec fallback mode does not implement this operation
+- `INTERNAL`: internal error
+
+### Error Response Shape
 
 ```json
 {
@@ -613,27 +756,34 @@ codex app-server 内部：
 }
 ```
 
-### 子进程错误处理
+`INTERNAL` messages pass through path redaction before they reach the client.
 
-- 子进程意外退出：标记会话为 error，推送 error 事件
-- JSON-RPC 超时：返回 TIMEOUT 错误
-- 初始化失败：返回 INTERNAL 错误，清理子进程
+### Subprocess Errors
 
-## 依赖
+- The child exits unexpectedly: the session becomes `error` and an `error` event is pushed.
+- A JSON-RPC request times out: `TIMEOUT`.
+- Initialization fails: `INTERNAL`, and the child process is cleaned up.
 
-- `@modelcontextprotocol/sdk` — MCP 协议实现（McpServer, StdioServerTransport）
-- `zod` — 输入验证
-- Node.js child_process — 管理 codex app-server 子进程
-- 无需 `@openai/codex-sdk` — 直接使用 codex app-server 子进程通信
+### Turn Compatibility Fallback
 
-## 协议实现要点（来自 Codex 交叉审查）
+`src/utils/turn-compat.ts` classifies a `turn/start` failure whose message names `minimal`, `web_search`, and reasoning effort together. When such a failure follows a turn sent with `effort=minimal`, `SessionManager` retries once with `effort=low` and returns `compatWarnings` describing the substitution. A retry that fails again surfaces the message telling the caller to use `effort=low` or higher.
 
-> 本仓库将 `codex app-server` 的 JSON Schema bundle 固定在 `codex-schema/` 中（版本化提交），用于协议对齐与回归测试基线。
-> 如需更新，使用：`codex app-server generate-json-schema --experimental --out codex-schema`，并同步更新 `codex-schema/metadata.json`。
+## Dependencies
 
-### 审批 response 格式（必须严格匹配 schema）
+- `@modelcontextprotocol/sdk` — MCP protocol (McpServer, StdioServerTransport)
+- `zod` — input validation
+- Node.js `child_process` — the codex child processes
 
-命令审批 response（`CommandExecutionRequestApprovalResponse`）：
+The server talks to the `codex` child process directly and needs no `@openai/codex-sdk`.
+
+## Protocol Implementation Notes
+
+> `codex-schema/` vendors the JSON Schema bundle of `codex app-server` as a versioned commit, used for protocol alignment and as a regression baseline.
+> Regenerate it with `codex app-server generate-json-schema --experimental --out codex-schema` and update `codex-schema/metadata.json` in the same change.
+
+### Approval Response Format (Must Match The Schema Exactly)
+
+Command approval response (`CommandExecutionRequestApprovalResponse`):
 
 - `accept` → `{ decision: "accept" }`
 - `acceptForSession` → `{ decision: "acceptForSession" }`
@@ -642,133 +792,135 @@ codex app-server 内部：
 - `decline` → `{ decision: "decline" }`
 - `cancel` → `{ decision: "cancel" }`
 
-文件变更审批 response（`FileChangeRequestApprovalResponse`）：
+File-change approval response (`FileChangeRequestApprovalResponse`):
 
 - `accept` / `acceptForSession` / `decline` / `cancel` → `{ decision: "..." }`
 
-注意：`denyMessage` 不是协议字段，只能作为 codex-mcp 内部 `approval_result` 事件的附加信息。
+`denyMessage` is not a protocol field; it only decorates the codex-mcp `approval_result` event.
 
-### 审批请求 params 关键字段
+### Approval Request Params
 
-`CommandExecutionRequestApprovalParams`：
+`CommandExecutionRequestApprovalParams`:
 
 - required: `itemId`, `threadId`, `turnId`
-- optional: `command?` (string | null), `cwd?`, `reason?`, `commandActions?` (array | null), `proposedExecpolicyAmendment?` (string[] | null)
-- optional (newer CLI versions): `availableDecisions?`, `additionalPermissions?`, `networkApprovalContext?`, `proposedNetworkPolicyAmendments?`
+- optional: `approvalId?`, `command?` (string | null), `cwd?`, `reason?`, `commandActions?` (array | null), `proposedExecpolicyAmendment?` (string[] | null)
+- optional, richer approval context: `availableDecisions?`, `additionalPermissions?`, `networkApprovalContext?`, `proposedNetworkPolicyAmendments?`
 
-`FileChangeRequestApprovalParams`：
+`FileChangeRequestApprovalParams`:
 
 - required: `itemId`, `threadId`, `turnId`
 - optional: `grantRoot?` (UNSTABLE), `reason?`
-- 注意：不包含 `changes[]`，文件变更详情需从 `item/fileChange/outputDelta` 按 `itemId` 聚合
+- It carries no `changes[]`; file-change detail comes from `item/fileChange/outputDelta` aggregated by `itemId`.
 
-### 额外的 server-initiated requests（必须处理）
+### Other Server-Initiated Requests (All Must Be Answered)
 
-除审批外，app-server 还会发送以下 server-initiated requests，codex-mcp 必须响应（否则 turn 会挂起）：
+app-server hangs the turn when a server-initiated request goes unanswered, so codex-mcp answers each one:
 
-1. `item/tool/requestUserInput` — 工具请求用户输入
-   - params: `{ itemId, threadId, turnId, questions: [{ id, header, question, options? }] }`
+1. `item/tool/requestUserInput` — the tool asks the user a question
+   - params: `{ itemId, threadId, turnId, questions: [{ id, header, question, isOther?, isSecret?, options? }] }`
    - response: `{ answers: Record<question-id, { answers: string[] }> }`
-   - 处理策略：缓冲为 `approval_request` 事件（subtype: "user_input"），由 MCP 客户端通过 `codex_check(action="respond_user_input")` 响应
+   - handling: buffered as an `approval_request` event of kind `user_input`, answered through `codex_check(action="respond_user_input")`
 
-2. `item/tool/call` — 动态工具调用
+2. `item/tool/call` — a dynamic tool call
    - params: `{ threadId, turnId, callId, tool, arguments }`
    - response: `{ success: boolean, contentItems: [...] }`
-   - 处理策略：自动拒绝（`{ success: false, contentItems: [{ type: "inputText", text: "Not supported by codex-mcp" }] }`）
+   - handling: declined automatically with `{ success: false, contentItems: [{ type: "inputText", text: "Not supported by codex-mcp" }] }`
 
-3. `account/chatgptAuthTokens/refresh` — 认证令牌刷新
+3. `account/chatgptAuthTokens/refresh` — auth token refresh
    - params: `{ reason: "unauthorized", previousAccountId? }`
    - response: `{ accessToken, chatgptAccountId, chatgptPlanType? }`
-   - 处理策略：返回 JSON-RPC error（codex-mcp 不管理认证），固定错误码 `-32000`
-   - 错误语义：
-     - running/waiting: `"account/chatgptAuthTokens/refresh unsupported: codex-mcp does not manage external ChatGPT auth tokens"`
-     - terminal: `"account/chatgptAuthTokens/refresh unsupported: session is terminal"`
+   - handling: a JSON-RPC error with code `-32000`, because codex-mcp manages no external auth
+   - messages: `"account/chatgptAuthTokens/refresh unsupported: codex-mcp does not manage external ChatGPT auth tokens"` while running or waiting, `"account/chatgptAuthTokens/refresh unsupported: session is terminal"` in a terminal state
 
-4. `applyPatchApproval` / `execCommandApproval` — legacy 审批（已废弃）
-   - 处理策略：返回 `{ decision: "denied" }` 并记录警告日志
+4. `applyPatchApproval` / `execCommandApproval` — deprecated approvals
+   - handling: respond `{ decision: "denied" }` and log a warning
 
-### turn/start 输入格式
+### turn/start Input Format
 
-`prompt: string` 必须转换为 `UserInput[]` 格式：
+`prompt: string` becomes a `UserInput[]`:
 
 ```text
 input: [{ type: "text", text: prompt }]
 ```
 
-`images: string[]`（本地路径）转换为：
+`images: string[]` (local paths) append:
 
 ```text
 input: [..., { type: "localImage", path: imagePath }]
 ```
 
-### SessionManager 必须跟踪的状态
+### State SessionManager Tracks
 
-- `threadId`：从 `thread/start` response 获取（兼容白名单：v1 `{threadId}` 与 v2 `{thread: {id}}`）
-- `activeTurnId`：从 `turn/started` 通知的 `turn.id` 获取（`turn/interrupt` 需要）
-- `pendingRequests`：审批/用户输入请求的 requestId → 记录（用于 `codex_check` 返回 actions 以及响应 server-initiated requests）
+- `threadId` from the `thread/start` response (whitelist compatibility: v1 `{threadId}` and v2 `{thread: {id}}`), refreshed by a `thread/started` notification that carries a different id
+- `activeTurnId` from the `turn.id` of the `turn/started` notification, needed by `turn/interrupt`
+- `pendingRequests`, mapping requestId to the record that backs both `actions[]` and the response to the server-initiated request
+- `lastAgentMessageText`, the last completed `agentMessage` item text, used as `result.text` when the backend omits `turn.output`
+- `progressState`, the running `lastEventAt`, `lastMethod`, `percent`, and token counters
 
-## 安全考量
+## Security Considerations
 
-### 输入验证
+### Input Validation
 
-- 所有工具参数通过 Zod schema 严格验证
-- `cwd` 参数默认为 server cwd，由 app-server 进一步验证
-- `advanced.config` 的值按类型序列化后传递给 app-server
+- Zod schemas validate every tool parameter, including cross-field rules for the `codex_check` actions.
+- `cwd` defaults to the server cwd and is resolved and validated before use; app-server validates it again.
+- `advanced.config` values serialize by type before reaching app-server.
+- `advanced.images` paths are resolved and validated against `cwd`.
 
-### 子进程隔离
+### Subprocess Isolation
 
-- 每个会话独立子进程，互不影响
-- 子进程继承父进程环境变量，但不暴露在公开会话信息中
-- 子进程异常退出不影响 MCP server 主进程
+- Sessions run in separate child processes and do not affect each other.
+- A child inherits the parent's environment variables, and public session output exposes none of them.
+- A child that exits abnormally does not take down the MCP server process.
 
-### 敏感信息保护
+### Sensitive Data
 
-- `codex_session(action="get")` 默认返回脱敏信息
-- `includeSensitive=true` 才返回 cwd、config 等敏感字段
-- 审批请求中的命令内容原样展示（由客户端决定是否展示给用户）
+- `codex_session(action="get")` returns redacted info by default; `includeSensitive=true` adds `cwd`, `profile`, `config`, and `threadId`.
+- Approval requests carry the command text verbatim, and the client decides how to show it.
+- `INTERNAL` error messages pass through path redaction.
 
-### 审批超时
+### Approval Timeout
 
-- 默认 60s 超时自动 decline，防止会话无限挂起
-- 超时不中断 agent，仅拒绝当前操作
+- The default 60-second timeout auto-declines, which stops a session from hanging forever.
+- A timeout declines the operation without interrupting the agent.
 
-## 客户端轮询指南
+## Client Polling Guide
 
-### 推荐轮询策略
+### Polling Strategy
 
-服务端在 `codex_check` 返回值中包含 `pollInterval` 字段。该值表示**最小建议间隔**，客户端可以根据任务预计耗时继续拉长：
-
-```text
-status = "waiting_approval" → pollInterval: 1000ms（需要快速响应审批）
-status = "running"          → pollInterval: 120000ms（至少 2 分钟；复杂任务建议 3-10+ 分钟）
-status = "idle"/"error"/"cancelled" → pollInterval: undefined（终态，无需继续轮询）
-```
-
-说明：`running` 状态下长时间无新事件在模型推理阶段是可能的，不应直接判定失败。调用方应结合任务复杂度判断轮询节奏，`pollInterval` 仅是下限。
-
-客户端也可以实现自己的退避策略：无新事件时间隔 × 1.5，有新事件时重置。
-
-### 典型轮询流程
+`codex_check` returns `pollInterval` as a **minimum** interval; a client waiting longer for a slow task is behaving correctly:
 
 ```text
-1. 调用 codex({ prompt }) → 获得 sessionId
-2. 循环:
-   a. 调用 codex_check({ action: "poll", sessionId, cursor })
-   b. 处理返回的 events（展示给用户）
-   c. 检查 actions 中是否有待审批项
-      - 有: 展示给用户，收集决策，调用 codex_check({ action: "respond_permission", ... })
-   d. 检查 status:
-      - "idle": agent 完成当前轮次，可以 codex_reply 继续或结束
-      - "error": 查看错误信息，决定是否 codex_reply 重试
-      - "cancelled": 会话已终止，退出循环
-      - "running" / "waiting_approval": 继续轮询
-   e. 更新 cursor = nextCursor
-   f. 至少等待 pollInterval 后继续（running 状态可按任务复杂度继续延长）
-3. 结束: 可选调用 codex_session({ action: "cancel" }) 清理
+status = "waiting_approval" → pollInterval: 1000ms (respond before the approval times out)
+status = "running"          → pollInterval: 120000ms (at least 2 minutes; 3-10+ for large tasks)
+status = "idle"/"error"/"cancelled" → pollInterval: undefined (terminal, stop polling)
 ```
 
-### 注意事项
+Long stretches without an event are normal while the model reasons and mean nothing about failure. A client that wants to hear about the next event sooner passes `pollOptions.waitMs` instead of shortening the interval. A client that prefers its own backoff multiplies the interval by 1.5 when a poll returns nothing and resets it when events arrive.
 
-- 始终使用 nextCursor 避免重复获取事件
-- 如果收到 cursorResetTo，说明旧事件已被淘汰，从新 cursor 开始
-- 审批请求有超时限制，及时响应避免自动 decline
+### Typical Loop
+
+```text
+1. codex({ prompt, approvalPolicy, sandbox }) → sessionId
+2. loop:
+   a. codex_check({ action: "poll", sessionId, cursor })
+   b. render events[]
+   c. answer any pending actions[]
+      - codex_check({ action: "respond_permission", requestId, decision })
+      - codex_check({ action: "respond_user_input", requestId, answers })
+   d. branch on status:
+      - "idle": the turn finished; continue with codex_reply or stop
+      - "error": read the error and decide whether codex_reply retries
+      - "cancelled": the session is over, leave the loop
+      - "running" / "waiting_approval": keep polling
+   e. cursor = nextCursor
+   f. wait at least pollInterval
+3. optionally codex_session({ action: "cancel" }) to release the child process
+```
+
+### Notes
+
+- Always send back `nextCursor` so events arrive once.
+- A `cursorResetTo` means older events were evicted; continue from the returned cursor.
+- Approvals expire, so answer them within `approvalTimeoutMs`.
+- `codex-mcp/ttl_warning` gives 60 seconds of notice before a session is cleaned up; a `codex_reply` or another tool call refreshes `lastActiveAt` and postpones the cleanup.
+- A session recovered after a server restart reports `status: "error"` with `cancelledReason` naming the restart, and its last result is still readable.

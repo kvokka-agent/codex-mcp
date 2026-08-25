@@ -10,25 +10,25 @@ This repository is a TypeScript (ESM) MCP server that wraps the OpenAI Codex CLI
 
 ## Project Philosophy & Scope
 
-本项目的核心设计理念：**利用用户本地 Codex 配置，用最少工具和最少配置，实现最大的 Codex app-server 能力暴露，同时保证无阻塞执行与完善权限管理。**
+The core principle: **reuse the user's local Codex configuration, and expose the maximum of `codex app-server` capability through the fewest tools and the least configuration, while keeping execution non-blocking and permission handling complete.**
 
-> **同平台假设**：MCP 客户端与 codex-mcp 服务端运行在同一台机器上，通过 stdio（本地 IPC）通信；子进程共享本地文件系统与 `~/.codex/config.toml`。本项目不支持跨机器远程部署。
+> **Same-machine assumption**: the MCP client and the codex-mcp server run on one machine and talk over stdio (local IPC); child processes share the local filesystem and `~/.codex/config.toml`. The project supports no cross-machine deployment.
 
 ### Minimum Tools Snapshot
 
-| Tool            | Responsibility                                            | Blocking           |
-| --------------- | --------------------------------------------------------- | ------------------ |
-| `codex`         | start new session                                         | wait init only     |
-| `codex_reply`   | continue session                                          | return immediately |
-| `codex_session` | list/get/cancel/interrupt/fork/clean background terminals | sync               |
-| `codex_check`   | poll events + respond to approvals/user input             | sync               |
-| `codex_setup`   | report codex executable, auth and app-server readiness    | sync               |
+| Tool            | Responsibility                                                  | Blocking                             |
+| --------------- | --------------------------------------------------------------- | ------------------------------------ |
+| `codex`         | start new session                                               | wait init only, or `waitForResult`   |
+| `codex_reply`   | continue session                                                | return immediately, or `waitForResult` |
+| `codex_setup`   | report codex executable, auth and app-server readiness          | sync                                 |
+| `codex_session` | list/get/cancel/interrupt/fork/clean/clean background terminals | sync                                 |
+| `codex_check`   | poll events + respond to approvals/user input                   | sync, or long-poll via `waitMs`      |
 
 ## Upgrade Execution Entry
 
 When updating interfaces, SDKs, or protocol behavior, follow the full handbook in:
 
-- `docs/DESIGN.md` → **依赖接口与 SDK 升级手册（Single Source of Truth）**
+- `docs/DESIGN.md` → **Dependency And SDK Upgrade Handbook (Single Source Of Truth)**
 
 ### One-Shot Update Commands
 
@@ -68,7 +68,7 @@ This section is a practical execution checklist.
      - `git diff -- codex-schema/metadata.json`
    - Decision gate:
      - If there are diffs: treat `codex-schema/` as the truth and follow the full upgrade playbook in `docs/DESIGN.md`.
-     - If there are no diffs: update the "最近一次执行记录" in `docs/DESIGN.md` (date + codex version + result).
+     - If there are no diffs: update "Latest Run Record" in `docs/DESIGN.md` (date + codex version + result).
 4. NPM dependency update check
    - Direct deps/devDeps: `npm outdated`
    - Full tree (incl. transitive): `npm outdated --all`
@@ -153,7 +153,9 @@ src/
 - `codex` / `codex_reply` are non-blocking: they return early and rely on `codex_check(action="poll")`.
 - Event buffering uses cursor pagination with pinning for critical events.
 - Approval flow is asynchronous: app-server request -> buffered action -> client response via `codex_check`.
-- Exec fallback: auto-detected at startup; uses `codex exec --json` + `exec resume` for multi-turn. See `CODEX_MCP_BINARY` / `CODEX_MCP_MODE` env vars.
+- Exec fallback: auto-detected at startup; uses `codex exec --json` + `exec resume` for multi-turn. `CODEX_MCP_MODE` forces the mode; `CODEX_MCP_COMMAND` / `CODEX_MCP_PATH` select the binary.
+- Disk persistence writes session metadata, PID info, and results under `CODEX_MCP_STATE_DIR` (default `~/.codex-mcp/state`); startup recovers sessions, prunes old ones, and reaps orphan child processes.
+- `codex_check(action="poll")` supports long polling through `pollOptions.waitMs`; `codex` / `codex_reply` support a foreground wait through `waitForResult`.
 - Full protocol behavior, event mapping, and lifecycle diagrams live in `docs/DESIGN.md`.
 
 ## Code Style & Conventions
@@ -183,6 +185,9 @@ These patterns are non-negotiable guardrails:
 - If `replyToSession` fails during `turnStart`, restore session state to `error`.
 - Serialize `-c key=value` config values consistently: primitives via `String()`, objects/arrays via `JSON.stringify()`.
 - Call `.unref()` on cleanup/shutdown/force-kill timers to avoid blocking Node.js exit.
+- Keep every persistence call best-effort: wrap it in try/catch so a read-only or locked `STATE_DIR` degrades persistence instead of failing the tool call.
+- Call `notifyWaiters(sessionId)` after any state change, or long-poll callers block until their `waitMs` budget expires.
+- Verify a PID's recorded spawn time before signalling it in the orphan reaper; an unverified PID is skipped, never killed.
 
 ## Testing Expectations
 

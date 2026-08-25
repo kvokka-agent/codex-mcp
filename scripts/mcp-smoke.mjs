@@ -101,7 +101,7 @@ async function main() {
   const tools = await client.listTools();
   const names = new Set(tools.tools.map((t) => t.name));
 
-  for (const required of ["codex", "codex_reply", "codex_session", "codex_check"]) {
+  for (const required of ["codex", "codex_reply", "codex_session", "codex_check", "codex_setup"]) {
     assert(names.has(required), `missing tool from tools/list: ${required}`);
   }
 
@@ -112,7 +112,12 @@ async function main() {
 
   const resources = await client.listResources();
   const uris = new Set(resources.resources.map((r) => r.uri));
-  for (const uri of ["codex-mcp:///server-info", "codex-mcp:///config", "codex-mcp:///gotchas"]) {
+  for (const uri of [
+    "codex-mcp:///server-info",
+    "codex-mcp:///config",
+    "codex-mcp:///gotchas",
+    "codex-mcp:///delegation-guide",
+  ]) {
     assert(uris.has(uri), `missing resource uri: ${uri}`);
   }
 

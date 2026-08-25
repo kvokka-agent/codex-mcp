@@ -18,7 +18,7 @@ MCP server that wraps [OpenAI Codex](https://github.com/openai/codex) — start 
 - **Long-polling** — `codex_check` supports `pollOptions.waitMs` to wait for new events instead of busy-polling
 - **Graceful shutdown** — stdin drain logic waits for active sessions before exiting
 - **Orphan reaping** — leaked child processes from crashed runs are automatically cleaned up on startup
-- **Static read-only resources** — `codex-mcp:///server-info`, `codex-mcp:///compat-report`, `codex-mcp:///config`, `codex-mcp:///gotchas`, `codex-mcp:///quickstart`, `codex-mcp:///errors`
+- **Static read-only resources** — `codex-mcp:///server-info`, `codex-mcp:///compat-report`, `codex-mcp:///config`, `codex-mcp:///gotchas`, `codex-mcp:///quickstart`, `codex-mcp:///errors`, `codex-mcp:///delegation-guide`
 
 ## Prerequisites
 
@@ -266,6 +266,7 @@ If your MCP client supports resources, this server exposes a few **read-only** r
 - `codex-mcp:///gotchas` (Markdown): practical limits/gotchas
 - `codex-mcp:///quickstart` (Markdown): minimal workflow examples
 - `codex-mcp:///errors` (Markdown): error code catalog + recovery hints
+- `codex-mcp:///delegation-guide` (Markdown): approval/sandbox presets per task type
 
 ### `codex_reply` — Continue a session
 
@@ -345,7 +346,7 @@ Query a running session for events, respond to approval requests, or answer user
 | `cursor`                   | number   | No                                | Event cursor for incremental polling (`action="poll"`). For `respond_*`, codex-mcp applies monotonic cursor progression: `max(cursor, sessionLastCursor)`.                                                                        |
 | `maxEvents`                | number   | No                                | Keep this small. `poll` default: `1` (minimum `1`; increase only for catch-up). `respond_*` default: `0` (recommended; compact ACK, no event replay).                                                                             |
 | `responseMode`             | string   | No                                | Response shaping mode: `minimal` (default), `delta_compact`, `full`                                                                                                                                                               |
-| `pollOptions`              | object   | No                                | Optional controls: `includeEvents` (default `true`), `includeActions` (default `true`), `includeResult` (default `true`), `skipDeltas`, `finalOnly`, `maxBytes` (default unlimited)                                               |
+| `pollOptions`              | object   | No                                | Optional controls: `includeEvents` (default `true`), `includeActions` (default `true`), `includeResult` (default `true`), `skipDeltas`, `finalOnly`, `maxBytes` (default unlimited), `waitMs` (long-poll budget, capped at `120000`) |
 | `requestId`                | string   | For respond_permission/user_input | Request ID from `actions[]`                                                                                                                                                                                                       |
 | `decision`                 | string   | For respond_permission            | For command approvals: `"accept"`, `"acceptForSession"`, `"acceptWithExecpolicyAmendment"`, `"applyNetworkPolicyAmendment"`, `"decline"`, `"cancel"`; for file changes: `"accept"`, `"acceptForSession"`, `"decline"`, `"cancel"` |
 | `execpolicy_amendment`     | string[] | For acceptWithExecpolicyAmendment | Exec policy amendment list (required when `decision="acceptWithExecpolicyAmendment"`)                                                                                                                                             |
@@ -385,6 +386,7 @@ Query a running session for events, respond to approval requests, or answer user
 - `pollOptions.skipDeltas=true` drops streaming delta events but still advances the cursor past them.
 - `pollOptions.finalOnly=true` omits `events[]`, focuses on `actions[]` plus terminal `result`, and advances the cursor past hidden events.
 - `pollOptions.maxBytes` is optional and enforces best-effort payload truncation (`truncated`, `truncatedFields`).
+- `pollOptions.waitMs` long-polls: the call blocks until an event, an action, or a result appears, or the budget runs out. It is capped at `120000` ms, and a session accepts 4 concurrent long polls — the fifth returns immediately.
 - `progress.phase` gives a coarse execution snapshot (`starting`, `reasoning`, `acting`, `waiting_approval`, `finished`, etc.).
 - `progress.tokens` is populated when the backend exposes token counts.
 - `respond_*` defaults to compact ACK (`events: []`, no cursor advance) unless you explicitly pass `maxEvents`.
@@ -413,11 +415,17 @@ Auth callback note: if app-server sends `account/chatgptAuthTokens/refresh`, cod
 
 ## Session Lifecycle & Cleanup
 
-Sessions auto-clean up in the background:
+Sessions auto-clean up in the background, checked once a minute:
 
 - `idle` > 30 minutes → cancelled
 - `running`/`waiting_approval` > 4 hours → cancelled
-- `cancelled`/`error` > 5 minutes → removed from memory
+- `cancelled`/`error` > 5 minutes → removed from memory and from disk
+
+60 seconds before a session hits its TTL, `codex_check` emits one `progress` event with `data.method="codex-mcp/ttl_warning"` and `ttlRemainingMs`. Any tool call on the session refreshes `lastActiveAt` and postpones the cleanup.
+
+`codex_session(action="clean")` removes matching terminal sessions on demand: filter with `statuses` and `olderThanMs`, preview with `dryRun`, and keep the persisted state with `includeDisk=false`.
+
+After a server restart, sessions that were `running` or `waiting_approval` come back as `status: "error"` with a `cancelledReason` naming the restart, and their last result stays readable.
 
 ## Error Model
 
@@ -473,7 +481,7 @@ MCP Client ←stdio→ codex-mcp server ←stdio→ codex exec --json ←→ Cod
 
 Each session spawns an independent child process. In app-server mode, it uses the JSON-RPC protocol over stdio. In exec fallback mode, it uses `codex exec --json` JSONL output with `codex exec resume` for multi-turn context.
 
-Session metadata, event logs, and results are persisted to disk (`~/.codex-mcp/state/` by default). On restart, the server recovers queryable sessions and reaps any orphaned child processes from the previous run.
+Session metadata, child-process identity, and turn results are persisted to disk (`~/.codex-mcp/state/` by default), one directory per session, written atomically. A PID lockfile at the state directory root keeps a single writer. On startup the server recovers persisted sessions, prunes them by age (7 days), count (200), and total size (500 MB), and reaps orphaned child processes left by the previous run after verifying each PID's recorded spawn time.
 
 ### Environment Variables
 
@@ -482,6 +490,8 @@ Session metadata, event logs, and results are persisted to disk (`~/.codex-mcp/s
 | `CODEX_MCP_STATE_DIR`            | Directory for persistent session state           | `~/.codex-mcp/state` |
 | `CODEX_MCP_PATH`                 | Explicit filesystem path to the codex binary     | _(unset)_            |
 | `CODEX_MCP_COMMAND`              | Command name to resolve from PATH                | _(unset)_            |
+| `CODEX_MCP_MODE`                 | Force `app-server` or `exec` backend mode        | auto-detect          |
+| `CODEX_MCP_STDIO_MODE`           | STDIO preflight guard: `auto`/`strict`/`off`     | `auto`               |
 | `CODEX_MCP_DISABLE_NOISE_FILTER` | Set to `1` to disable PowerShell noise filtering | `0`                  |
 
 ## Development
