@@ -1,10 +1,10 @@
 # codex-mcp 设计文档
 
-> English quick summary: `codex-mcp` is an MCP stdio server that exposes Codex `app-server` via 4 tools (`codex`, `codex_reply`, `codex_session`, `codex_check`) plus 6 read-only resources. Each session runs in an independent `codex app-server` subprocess and is polled asynchronously with cursor-based events.
+> English quick summary: `codex-mcp` is an MCP stdio server that exposes Codex `app-server` via 5 tools (`codex`, `codex_reply`, `codex_session`, `codex_check`, `codex_setup`) plus 6 read-only resources. Each session runs in an independent `codex app-server` subprocess and is polled asynchronously with cursor-based events.
 
 ## 概述
 
-MCP server，基于 OpenAI Codex app-server JSON-RPC 协议，通过 4 个 MCP 工具和 6 个静态只读 Resources 暴露 Codex agent 能力。
+MCP server，基于 OpenAI Codex app-server JSON-RPC 协议，通过 5 个 MCP 工具和 6 个静态只读 Resources 暴露 Codex agent 能力。
 
 ## 文档分工（AGENTS vs DESIGN）
 

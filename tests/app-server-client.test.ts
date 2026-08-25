@@ -1,4 +1,5 @@
 import { EventEmitter } from "events";
+import path from "node:path";
 import { PassThrough } from "stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Methods } from "../src/app-server/protocol.js";
@@ -62,6 +63,15 @@ function createMockProcess() {
   return proc;
 }
 
+/**
+ * The executable is resolved against PATH at spawn time, so the value is an absolute
+ * path wherever codex is installed and the bare command only where it is not.
+ */
+function expectCodexExecutable(command: string): void {
+  const base = path.basename(command, path.extname(command)).toLowerCase();
+  expect(["codex", "codex-internal"]).toContain(base);
+}
+
 describe("AppServerClient spawn behavior", () => {
   afterEach(() => {
     spawnMock.mockReset();
@@ -92,10 +102,12 @@ describe("AppServerClient spawn behavior", () => {
         expect(args[1]).toBe("app-server");
       } else {
         expect(cmd).toBe(comspec);
-        expect(args.slice(0, 5)).toEqual(["/d", "/s", "/c", "codex", "app-server"]);
+        expect(args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
+        expectCodexExecutable(args[3]);
+        expect(args[4]).toBe("app-server");
       }
     } else {
-      expect(cmd).toBe("codex");
+      expectCodexExecutable(cmd);
       expect(args[0]).toBe("app-server");
       expect(spawnOpts?.detached).toBe(true);
     }

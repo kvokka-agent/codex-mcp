@@ -92,7 +92,7 @@ describe("resources", () => {
     expect(features?.compatWarnings).toBe(true);
     expect(toolCounts).toBeDefined();
     expect(toolCounts).not.toBeNull();
-    expect(toolCounts?.core).toBe(4);
+    expect(toolCounts?.core).toBe(5);
 
     const gotchas = registered.find((r) => r.uri === RESOURCE_URIS.gotchas);
     expect(gotchas?.mimeType).toBe("text/markdown");

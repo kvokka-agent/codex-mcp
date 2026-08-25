@@ -23,11 +23,11 @@ When you execute this plan as an LLM test operator:
 
 Minimum pass target:
 
-1. The server exposes 4 tools and up to 6 resources correctly (minimum 3: `server-info`, `config`, `gotchas`).
+1. The server exposes 5 tools and up to 6 resources correctly (minimum 3: `server-info`, `config`, `gotchas`).
 2. `codex` and `codex_reply` are asynchronous (return immediately, then progress via polling).
 3. Approval flow works (`respond_permission`) and session state changes correctly.
 4. A real coding task closes the loop: test fails -> agent fixes -> test passes.
-5. Session management works (`list/get/cancel/interrupt/fork`).
+5. Session management works (`list/get/cancel/interrupt/fork/clean`).
 
 Optional but recommended:
 
@@ -361,7 +361,7 @@ Steps:
 
 Pass criteria:
 
-1. 4 tools present.
+1. 5 tools present.
 2. At least 3 resources present and readable (`server-info`, `config`, `gotchas`). Up to 6 if running latest build.
 3. No transport-level JSON-RPC corruption.
 

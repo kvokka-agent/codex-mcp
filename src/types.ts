@@ -28,6 +28,7 @@ export const SESSION_ACTIONS = [
   "cancel",
   "interrupt",
   "fork",
+  "clean",
   "clean_background_terminals",
 ] as const;
 export type SessionAction = (typeof SESSION_ACTIONS)[number];
@@ -42,7 +43,13 @@ export interface PollOptions {
   includeEvents?: boolean;
   includeActions?: boolean;
   includeResult?: boolean;
+  /** Omit delta-heavy streaming events while still advancing the cursor past them. */
+  skipDeltas?: boolean;
+  /** Shortcut for result-centric polling: omit events, keep actions, always include result. */
+  finalOnly?: boolean;
   maxBytes?: number;
+  /** Long-poll: wait up to this many ms for new events before returning. Max 120000. */
+  waitMs?: number;
 }
 
 export const APPROVAL_TYPES = ["command", "fileChange"] as const;
@@ -79,6 +86,47 @@ export interface NetworkPolicyAmendment {
 // ── Session Types ──────────────────────────────────────────────────
 
 export type SessionStatus = "running" | "idle" | "waiting_approval" | "error" | "cancelled";
+
+export type InteractionState = "working" | "waiting_input" | "finished";
+
+export type RecommendedNextAction = "poll" | "respond_permission" | "respond_user_input" | "none";
+
+export type ExecutionMode = "background" | "foreground";
+
+export type ExecutionFallbackReason = "wait_for_result_timeout" | "interactive_poll_required";
+
+export type ProgressPhase =
+  | "starting"
+  | "running"
+  | "reasoning"
+  | "acting"
+  | "waiting_approval"
+  | "finished"
+  | "error"
+  | "cancelled";
+
+export interface ProgressTokens {
+  input?: number;
+  output?: number;
+  total?: number;
+}
+
+export interface ProgressInfo {
+  phase: ProgressPhase;
+  lastEventAt: string;
+  activeTurnId?: string;
+  pendingActionCount: number;
+  lastMethod?: string;
+  percent?: number;
+  tokens?: ProgressTokens;
+}
+
+export interface ExecutionInfo {
+  requested: ExecutionMode;
+  effective: ExecutionMode;
+  waitForResultMs?: number;
+  fallbackReason?: ExecutionFallbackReason;
+}
 
 export type SessionEventType =
   | "output"
@@ -135,6 +183,7 @@ export interface SessionInfo {
   sessionId: string;
   threadId?: string;
   activeTurnId?: string;
+  lastAgentMessageText?: string;
   /** Most recent poll cursor consumed by this session. */
   lastEventCursor: number;
   status: SessionStatus;
@@ -152,6 +201,7 @@ export interface SessionInfo {
   eventBuffer: EventBuffer;
   pendingRequests: Map<string, PendingRequest>;
   lastResult?: TurnResult;
+  progressState?: Omit<ProgressInfo, "phase" | "pendingActionCount" | "activeTurnId">;
 }
 
 /** Public session info (redacted) */
@@ -180,6 +230,9 @@ export interface SensitiveSessionInfo extends PublicSessionInfo {
 
 export interface TurnResult {
   turnId: string;
+  /** Stable final assistant text for this turn, derived from turn output or the last completed agent message. */
+  text?: string;
+  /** Raw backend turn.output value when present. */
   output?: string;
   structuredOutput?: unknown;
   /** Raw turn object from app-server notifications/responses (shape depends on schema version). */
@@ -197,12 +250,20 @@ export interface SessionStartResult {
   threadId: string;
   status: "running" | "idle";
   pollInterval: number;
+  compatWarnings?: string[];
+  progress?: ProgressInfo;
+  execution?: ExecutionInfo;
+  interactionState?: InteractionState;
+  recommendedNextAction?: RecommendedNextAction;
 }
 
 export interface CheckResult {
   sessionId: string;
   status: SessionStatus;
   pollInterval?: number;
+  progress?: ProgressInfo;
+  interactionState?: InteractionState;
+  recommendedNextAction?: RecommendedNextAction;
   events: Array<{
     id: number;
     type: SessionEventType;

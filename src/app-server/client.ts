@@ -29,6 +29,7 @@ import {
 } from "./protocol.js";
 import { buildAppServerArgs, type AppServerSpawnOptions } from "./lifecycle.js";
 import { resolveCodexInvocation } from "./codex-bin.js";
+import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 import { ErrorCode } from "../types.js";
 import type { ICodexClient } from "./client-interface.js";
 
@@ -73,6 +74,10 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     return true;
   }
 
+  get childPid(): number | undefined {
+    return this.process?.pid ?? undefined;
+  }
+
   /**
    * Spawn codex app-server and perform initialization handshake.
    */
@@ -81,7 +86,11 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     const env = { ...process.env };
     const stdio: ["pipe", "pipe", "pipe"] = ["pipe", "pipe", "pipe"];
 
-    const invocation = resolveCodexInvocation(args);
+    const exe = getDefaultCodexExecutable();
+    const invocation = resolveCodexInvocation(args, {
+      codexCommand: exe.command,
+      codexIsPath: exe.isPath,
+    });
     this.spawnedViaCmd = invocation.spawnedViaCmd;
     this.spawnedDetached = process.platform !== "win32";
 

@@ -16,6 +16,7 @@ import {
   ErrorCode,
 } from "../types.js";
 import { resolveStdioMode } from "../utils/stdio-guard.js";
+import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 
 const RESOURCE_SCHEME = "codex-mcp";
 
@@ -26,6 +27,7 @@ export const RESOURCE_URIS = {
   gotchas: `${RESOURCE_SCHEME}:///gotchas`,
   quickstart: `${RESOURCE_SCHEME}:///quickstart`,
   errors: `${RESOURCE_SCHEME}:///errors`,
+  delegationGuide: `${RESOURCE_SCHEME}:///delegation-guide`,
 } as const;
 
 type RuntimeMetadataProvider = Pick<
@@ -84,6 +86,13 @@ const RESOURCE_CATALOG: ResourceCatalogEntry[] = [
     description: "Error code reference and recovery hints",
     mimeType: "text/markdown",
   },
+  {
+    key: "delegationGuide",
+    name: "delegation_guide",
+    title: "Delegation Guide",
+    description: "Best practices for delegating tasks to Codex",
+    mimeType: "text/markdown",
+  },
 ];
 
 const ERROR_CODE_HINTS: Record<ErrorCode, string> = {
@@ -120,7 +129,8 @@ function asTextResource(uri: URL, text: string, mimeType: string): ReadResourceR
 
 function detectCodexCliVersion(timeoutMs = 1500): string | null {
   try {
-    const run = spawnSync("codex", ["--version"], {
+    const executable = getDefaultCodexExecutable();
+    const run = spawnSync(executable.command, ["--version"], {
       encoding: "utf8",
       timeout: timeoutMs,
       windowsHide: true,
@@ -198,8 +208,11 @@ function buildConfigGuideText(): string {
     "- `codex_check.pollOptions.includeEvents`: default `true`.",
     "- `codex_check.pollOptions.includeActions`: default `true`.",
     "- `codex_check.pollOptions.includeResult`: default `true`.",
+    "- `codex_check.pollOptions.skipDeltas`: default `false`.",
+    "- `codex_check.pollOptions.finalOnly`: default `false`.",
     "- `codex_check.pollOptions.maxBytes`: default unlimited.",
     "- `codex_check.cursor`: default is session last consumed cursor when omitted.",
+    "- `progress` is included on `codex`, `codex_reply`, and `codex_check` responses.",
     "",
   ].join("\n");
 }
@@ -214,6 +227,8 @@ function buildGotchasText(): string {
     `- Poll enforces minimum \`maxEvents=${POLL_MIN_MAX_EVENTS}\`; sending \`0\` is normalized to \`${POLL_MIN_MAX_EVENTS}\`.`,
     `- \`respond_permission\` and \`respond_user_input\` default to compact ACK with \`maxEvents=${RESPOND_DEFAULT_MAX_EVENTS}\`.`,
     "- Default response mode is `minimal`; use `full` if you need full raw event payloads.",
+    "- Use `pollOptions.skipDeltas=true` to suppress delta-heavy stream chunks while still advancing the cursor.",
+    "- Use `pollOptions.finalOnly=true` when you only care about actions + terminal result; it also advances the cursor past hidden events.",
     "- respond_* uses monotonic cursor handling: `max(cursor, sessionLastCursor)`.",
     "- If `cursorResetTo` is present, your cursor is stale (old events were evicted); restart from that value.",
     "- **Poll frequency guidance**: Adapt poll interval to task complexity and previous poll results. For `running` sessions, start at 2 minutes and increase for long tasks. Only poll frequently (~1s) when `waiting_approval`. Do NOT high-frequency poll — it wastes tokens and provides no benefit.",
@@ -228,6 +243,8 @@ function buildGotchasText(): string {
     "## Event model",
     "",
     "- Top-level `events[].type` is one of: `output`, `progress`, `approval_request`, `approval_result`, `result`, `error`.",
+    "- Terminal `result.text` provides a stable final assistant message, even when the backend omits `turn.output`; `result.output` remains the raw backend field.",
+    "- `progress` normalizes the current phase, pending action count, last observed method, and token totals when available.",
     "- Fine-grained stream semantics are in `events[].data.method` (for example command output delta, reasoning delta, turn updates).",
     '- Retryable interruptions surface as `progress` with `method="codex-mcp/reconnect"` and include retry fields.',
     "- During reconnect/retry, continue polling normally; if retries stop (`willRetry=false`), session transitions to error path.",
@@ -244,7 +261,8 @@ function buildGotchasText(): string {
     `- Idle sessions are auto-cleaned after ${msToMinutes(DEFAULT_IDLE_CLEANUP_MS)} minutes.`,
     `- Running/waiting sessions are auto-cleaned after ${msToMinutes(DEFAULT_RUNNING_CLEANUP_MS)} minutes.`,
     `- Error/cancelled sessions are retained for about ${msToMinutes(DEFAULT_TERMINAL_CLEANUP_MS)} minutes, then removed.`,
-    "- Session state is in-memory. Restarting codex-mcp drops all existing sessions.",
+    '- Use `codex_session(action="clean")` to batch-remove idle/error/cancelled sessions on demand.',
+    "- Session metadata/results are persisted for recovery; manual clean can also delete those disk artifacts.",
     "",
     "## Capacity",
     "",
@@ -264,6 +282,8 @@ function buildGotchasText(): string {
 function buildQuickstartText(): string {
   return [
     "## Minimal flow",
+    "",
+    "0. Optional but recommended: run `codex_setup` first to verify the local Codex CLI, login state, and backend mode.",
     "",
     "1. Start session (`codex`)",
     "",
@@ -330,6 +350,7 @@ function buildQuickstartText(): string {
     "```",
     "",
     "5. Continue polling until terminal status (`idle`, `error`, or `cancelled`), respecting the >=2 minute interval while `running`.",
+    "6. Read `progress.phase` / `progress.tokens` for a coarse execution snapshot without parsing raw delta events.",
     "",
     "## Cursor notes",
     "",
@@ -338,6 +359,13 @@ function buildQuickstartText(): string {
     "- Omit `responseMode`: default is `minimal`.",
     "- Use returned `nextCursor` for the next call.",
     "- If `cursorResetTo` appears, reset to that value and continue.",
+    "- If you need schema-constrained results, pass `advanced.outputSchema` (or top-level `outputSchema` in `codex_reply`) and read terminal `result.structuredOutput`.",
+    "",
+    "## Read next",
+    "",
+    "- `codex-mcp:///config`: parameter-by-parameter guide, including `advanced.*` mapping and reply overrides.",
+    "- `codex-mcp:///delegation-guide`: task presets for approvalPolicy/sandbox selection.",
+    "- `codex-mcp:///gotchas`: polling, approval timeout, cursor, and exec-mode failure modes.",
     "",
   ].join("\n");
 }
@@ -366,6 +394,77 @@ function buildErrorsText(): string {
   lines.push("");
 
   return lines.join("\n");
+}
+
+function buildDelegationGuideText(): string {
+  return [
+    "# Codex Delegation Guide",
+    "",
+    "## When to delegate",
+    "- Bug investigation or fix that benefits from a second opinion",
+    "- Code review (use read-only sandbox)",
+    "- Refactoring or migration tasks with clear scope",
+    "- Tasks where the calling agent is stuck or wants parallel work",
+    "",
+    "## Permission combinations by task type",
+    "",
+    "| Task | approvalPolicy | sandbox | Notes |",
+    "|------|---------------|---------|-------|",
+    "| Code review / analysis | `never` | `read-only` | Safe: sandbox blocks writes, no approval needed |",
+    "| Quick bug fix | `on-failure` | `workspace-write` | Auto-approves unless error; good with `waitForResult` |",
+    "| Feature implementation | `on-failure` | `workspace-write` | Async mode recommended for longer tasks |",
+    "| Sensitive refactor | `on-request` | `workspace-write` | Codex asks before each action; requires active polling |",
+    "| Full autonomy | `never` | `workspace-write` | No guardrails — only for well-scoped, trusted tasks |",
+    "| Network access needed | `on-failure` | `danger-full-access` | Rare; avoid unless genuinely required |",
+    "",
+    "**Key rule:** `read-only` sandbox already prevents writes, so `approvalPolicy: 'never'` is safe with it. Avoid `untrusted` + `read-only` — every read command triggers approval for no safety gain.",
+    "",
+    "## Approval policy quick guide",
+    "- `never`: no interactive prompts. Best for read-only review or tightly scoped trusted tasks.",
+    "- `on-failure`: pragmatic default for implementation work when you still want some safety rails.",
+    "- `on-request`: use when a human or outer agent will actively poll and answer approvals.",
+    "- `untrusted`: strictest interactive mode; expect frequent prompts and higher timeout sensitivity.",
+    `- Default approval timeout is ${DEFAULT_APPROVAL_TIMEOUT_MS}ms. If interactive approvals are possible, raise \`advanced.approvalTimeoutMs\` to at least 300000 so requests do not expire between normal running-session polls.`,
+    "",
+    "## Quick mode: `waitForResult`",
+    "For short tasks (< 2 min), set `advanced.waitForResult` to get the final result in a single tool call:",
+    "```json",
+    '{ "prompt": "Fix the null check in auth.ts", "approvalPolicy": "on-failure", "sandbox": "workspace-write", "effort": "medium", "advanced": { "waitForResult": 120000 } }',
+    "```",
+    "If the task finishes within the timeout, the result is returned directly. Otherwise the response falls back to polling metadata (including `sessionId` and `threadId`).",
+    "",
+    "**Constraint:** `waitForResult` blocks your tool call. If the task hits `waiting_approval`, you cannot respond — the timeout will always expire. Only use with `approvalPolicy: 'on-failure'` or `'never'`.",
+    "",
+    "## Async mode: poll loop",
+    'For long tasks, omit `waitForResult`. Use `codex_check(action="poll", pollOptions={ waitMs: 30000 })` with long-polling to avoid empty polls.',
+    "",
+    "## Effort selection",
+    "- `low` (default): quick questions, lookups, simple edits",
+    "- `medium`: multi-file changes, moderate reasoning",
+    "- `high`/`xhigh`: complex architecture decisions, large refactors",
+    "",
+    "## Troubleshooting",
+    "",
+    "**Tool call hangs:** Likely `waitForResult` + approval conflict; cancel and retry with `on-failure`/`never`. See `codex-mcp:///gotchas`.",
+    "",
+    "**Empty polls:** Use `pollOptions.waitMs` for long-polling; stop when status is terminal. See `codex-mcp:///gotchas`.",
+    "",
+    "**Session not found after restart:** Previously-running sessions surface as `status: 'error'` with restart reason. See `codex-mcp:///gotchas`.",
+    "",
+    "**Approval timeout:** Default is 60s; infrequent polling causes silent auto-decline. See `codex-mcp:///gotchas`.",
+    "",
+    "## Read next",
+    "- `codex-mcp:///quickstart` for the exact start -> poll -> respond loop",
+    "- `codex-mcp:///config` for parameter mapping and override persistence",
+    "- `codex-mcp:///gotchas` for timeout, cursor, and exec-mode caveats",
+    "",
+    "## Security notes",
+    "- `sandbox: 'read-only'` is the strongest isolation — blocks all writes regardless of approval policy",
+    "- `approvalPolicy: 'never'` + `sandbox: 'workspace-write'` gives the agent full write access with no human oversight — use only for well-defined, low-risk tasks",
+    "- `danger-full-access` allows network and system access — treat as root-equivalent",
+    "- Persisted session data (events, results) may contain code snippets and file paths — stored in `~/.codex-mcp/state/`",
+    "",
+  ].join("\n");
 }
 
 function buildCompatReport(
@@ -405,7 +504,7 @@ function buildCompatReport(
         },
       },
       toolCounts: {
-        core: 4,
+        core: 5,
       },
       runtimeWarnings,
       detectedMismatches: [],
@@ -546,5 +645,18 @@ export function registerResources(
       mimeType: errorsMeta.mimeType,
     },
     () => asTextResource(errorsUri, buildErrorsText(), "text/markdown")
+  );
+
+  const delegationGuideMeta = byKey.get("delegationGuide")!;
+  const delegationGuideUri = new URL(RESOURCE_URIS.delegationGuide);
+  server.registerResource(
+    delegationGuideMeta.name,
+    delegationGuideUri.toString(),
+    {
+      title: delegationGuideMeta.title,
+      description: delegationGuideMeta.description,
+      mimeType: delegationGuideMeta.mimeType,
+    },
+    () => asTextResource(delegationGuideUri, buildDelegationGuideText(), "text/markdown")
   );
 }

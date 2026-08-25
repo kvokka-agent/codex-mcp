@@ -18,7 +18,8 @@ const DETECTION_TIMEOUT_MS = 5_000;
  * 2. Otherwise probe `<binary> app-server --help` with a timeout.
  */
 export async function detectClientMode(
-  binaryName: string,
+  codexCommand: string,
+  codexIsPath = false,
   env: NodeJS.ProcessEnv = process.env
 ): Promise<ClientMode> {
   const override = env.CODEX_MCP_MODE;
@@ -27,7 +28,7 @@ export async function detectClientMode(
   }
 
   try {
-    const supported = await probeAppServer(binaryName, env);
+    const supported = await probeAppServer(codexCommand, codexIsPath, env);
     return supported ? "app-server" : "exec";
   } catch {
     return "exec";
@@ -37,11 +38,16 @@ export async function detectClientMode(
 /**
  * Probe whether `<binary> app-server --help` succeeds.
  */
-function probeAppServer(binaryName: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+function probeAppServer(
+  codexCommand: string,
+  codexIsPath: boolean,
+  env: NodeJS.ProcessEnv
+): Promise<boolean> {
   return new Promise((resolve) => {
-    const spawnEnv = { ...env, CODEX_MCP_BINARY: binaryName };
     const invocation = resolveCodexInvocation(["app-server", "--help"], {
-      env: spawnEnv,
+      env,
+      codexCommand,
+      codexIsPath,
     });
 
     let settled = false;
@@ -57,7 +63,7 @@ function probeAppServer(binaryName: string, env: NodeJS.ProcessEnv): Promise<boo
 
     const proc = spawn(invocation.cmd, invocation.args, {
       stdio: ["ignore", "pipe", "pipe"],
-      env: spawnEnv,
+      env,
       windowsHide: true,
     });
 
@@ -94,6 +100,17 @@ function probeAppServer(binaryName: string, env: NodeJS.ProcessEnv): Promise<boo
       } catch {
         // ignore
       }
+      // Force kill after grace period if still alive
+      const forceKill = setTimeout(() => {
+        try {
+          if (!proc.killed && proc.exitCode === null) {
+            proc.kill("SIGKILL");
+          }
+        } catch {
+          /* ignore */
+        }
+      }, 2000);
+      if (forceKill.unref) forceKill.unref();
       settle(false);
     }, DETECTION_TIMEOUT_MS);
     if (timer.unref) timer.unref();

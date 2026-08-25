@@ -3,7 +3,7 @@ import { createServer } from "../src/server.js";
 
 describe("tools/list metadata", () => {
   it("advertises outputSchema + annotations for all tools", async () => {
-    const server = createServer(process.cwd());
+    const { server } = createServer(process.cwd());
     try {
       const internal = server as unknown as {
         server: {
@@ -19,7 +19,7 @@ describe("tools/list metadata", () => {
       )) as { tools: Array<Record<string, unknown>> };
 
       const byName = new Map(resp.tools.map((t) => [String(t.name), t]));
-      for (const name of ["codex", "codex_reply", "codex_session", "codex_check"]) {
+      for (const name of ["codex", "codex_reply", "codex_session", "codex_check", "codex_setup"]) {
         const tool = byName.get(name);
         expect(tool, `missing tool in tools/list: ${name}`).toBeTruthy();
         expect(tool).toHaveProperty("inputSchema");
@@ -45,7 +45,8 @@ describe("tools/list metadata", () => {
 
       const codexCheckDesc = byName.get("codex_check") as { description?: string };
       expect(codexCheckDesc.description).toContain("Default maxEvents=1");
-      expect(codexCheckDesc.description).toContain("cursorResetTo");
+      expect(codexCheckDesc.description).toContain("respond_permission");
+      expect(codexCheckDesc.description).toContain("codex-mcp:///gotchas");
 
       const codexReply = byName.get("codex_reply") as {
         inputSchema?: { properties?: Record<string, unknown> };

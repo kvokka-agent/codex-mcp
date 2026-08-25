@@ -30,6 +30,9 @@ export interface ICodexClient {
    */
   readonly supportsTurnOverrides: boolean;
 
+  /** PID of the spawned codex process, undefined before start or after exit. */
+  readonly childPid: number | undefined;
+
   /** Initialize the client (spawn subprocess / prepare resources). */
   start(opts: AppServerSpawnOptions): Promise<InitializeResult>;
 

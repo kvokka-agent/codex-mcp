@@ -9,6 +9,11 @@ import { resolveAndValidateCwd } from "../utils/cwd.js";
 import { redactPaths } from "../utils/redact.js";
 import { resolveAndValidateFilePath } from "../utils/files.js";
 import {
+  buildEffortFallbackWarning,
+  classifyTurnCompatibilityError,
+  toFriendlyTurnCompatibilityError,
+} from "../utils/turn-compat.js";
+import {
   type RequestId,
   type CommandApprovalParams,
   type CommandApprovalResponse,
@@ -34,8 +39,12 @@ import {
   type SessionEventType,
   type EventBuffer,
   type PendingRequest,
+  type ProgressInfo,
+  type ProgressPhase,
+  type ProgressTokens,
   type SessionStartResult,
   type CheckResult,
+  type TurnResult,
   type ResponseMode,
   type PollOptions,
   type NetworkPolicyAmendment,
@@ -59,6 +68,14 @@ const COALESCED_PROGRESS_DELTA_METHODS = new Set<string>([
   Methods.FILE_CHANGE_OUTPUT_DELTA,
   Methods.REASONING_TEXT_DELTA,
   Methods.REASONING_SUMMARY_DELTA,
+]);
+const SKIPPABLE_DELTA_METHODS = new Set<string>([
+  Methods.AGENT_MESSAGE_DELTA,
+  Methods.COMMAND_OUTPUT_DELTA,
+  Methods.FILE_CHANGE_OUTPUT_DELTA,
+  Methods.REASONING_TEXT_DELTA,
+  Methods.REASONING_SUMMARY_DELTA,
+  Methods.PLAN_DELTA,
 ]);
 // Guard against unbounded in-memory string growth when app-server emits hot delta streams.
 const MAX_COALESCED_DELTA_CHARS = 16_384;
@@ -114,6 +131,8 @@ export interface SessionManagerOptions {
   createClient?: () => ICodexClient;
   /** Disable background cleanup timer (useful for tests). */
   disableCleanup?: boolean;
+  /** Disk persistence adapter (optional). */
+  persistence?: import("./persistence.js").SessionPersistence;
 }
 
 export interface PollQueryOptions {
@@ -121,19 +140,167 @@ export interface PollQueryOptions {
   pollOptions?: PollOptions;
 }
 
+const MAX_WAITERS_PER_SESSION = 4;
+const MAX_WAIT_MS = 120_000;
+const EFFORT_FALLBACK_LEVEL: EffortLevel = "low";
+const CLEANABLE_SESSION_STATUSES: SessionStatus[] = ["idle", "error", "cancelled"];
+const REASONING_PROGRESS_METHODS = new Set<string>([
+  Methods.REASONING_TEXT_DELTA,
+  Methods.REASONING_SUMMARY_DELTA,
+  Methods.REASONING_SUMMARY_PART_ADDED,
+  Methods.PLAN_DELTA,
+]);
+const ACTING_PROGRESS_METHODS = new Set<string>([
+  Methods.COMMAND_OUTPUT_DELTA,
+  Methods.COMMAND_TERMINAL_INTERACTION,
+  Methods.FILE_CHANGE_OUTPUT_DELTA,
+  Methods.MCP_TOOL_PROGRESS,
+  Methods.TURN_DIFF_UPDATED,
+  Methods.TURN_PLAN_UPDATED,
+]);
+
 export class SessionManager {
   private sessions = new Map<string, SessionInfo>();
   private clients = new Map<string, ICodexClient>();
   private cancellationInFlight = new Map<string, Promise<void>>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private createClient: () => ICodexClient;
+  /** Optional disk persistence adapter. */
+  readonly persistence: import("./persistence.js").SessionPersistence | null;
+  /** Track last persisted status to avoid redundant writes. */
+  private lastPersistedStatus = new Map<string, string>();
+  /** Sessions for which a TTL warning event has already been emitted this cycle. */
+  private ttlWarningEmitted = new Set<string>();
+  /** Long-poll notifiers: set of resolve callbacks waiting for any change in a session. */
+  private sessionNotifiers = new Map<string, Set<() => void>>();
 
   constructor(options: SessionManagerOptions = {}) {
     this.createClient = options.createClient ?? (() => new AppServerClient());
+    this.persistence = options.persistence ?? null;
 
     if (!options.disableCleanup) {
       this.cleanupTimer = setInterval(() => this.cleanupSessions(), CLEANUP_INTERVAL_MS);
       if (this.cleanupTimer.unref) this.cleanupTimer.unref();
+    }
+  }
+
+  /**
+   * Ingest recovered sessions from disk into the in-memory session store.
+   * Marks previously-running sessions as error, preserves completed results.
+   */
+  ingestRecovered(
+    recovered: import("../persistence/recovery-scanner.js").RecoveredSession[]
+  ): void {
+    for (const rec of recovered) {
+      if (this.sessions.has(rec.sessionId)) continue; // skip duplicates
+      const VALID_STATUSES: Set<string> = new Set([
+        "running",
+        "idle",
+        "waiting_approval",
+        "error",
+        "cancelled",
+      ]);
+      const wasActive = rec.meta.status === "running" || rec.meta.status === "waiting_approval";
+      // Validate status from disk — unknown statuses default to "error"
+      const resolvedStatus: SessionStatus = wasActive
+        ? "error"
+        : VALID_STATUSES.has(rec.meta.status)
+          ? (rec.meta.status as SessionStatus)
+          : "error";
+      const now = new Date().toISOString();
+      const session: SessionInfo = {
+        sessionId: rec.meta.sessionId,
+        threadId: rec.meta.threadId as string | undefined,
+        status: resolvedStatus,
+        lastEventCursor: 0,
+        createdAt: rec.meta.createdAt,
+        lastActiveAt: now,
+        cancelledAt: rec.meta.cancelledAt,
+        cancelledReason: wasActive
+          ? "Server restarted while session was active"
+          : rec.meta.cancelledReason,
+        cwd: rec.meta.cwd ?? ".",
+        model: rec.meta.model as string | undefined,
+        approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
+        sandbox: rec.meta.sandbox as SandboxMode | undefined,
+        eventBuffer: createEventBuffer(),
+        pendingRequests: new Map(),
+        lastResult: rec.result as TurnResult | undefined,
+        lastAgentMessageText:
+          typeof (rec.result as TurnResult | undefined)?.text === "string"
+            ? (rec.result as TurnResult).text
+            : typeof (rec.result as TurnResult | undefined)?.output === "string"
+              ? (rec.result as TurnResult).output
+              : undefined,
+        progressState: {
+          lastEventAt: rec.meta.lastActiveAt ?? now,
+          tokens: extractTokens((rec.result as TurnResult | undefined)?.turn),
+        },
+      };
+      this.sessions.set(rec.sessionId, session);
+      // Resume event log sequence numbering
+      if (rec.lastSeq >= 0) {
+        this.persistence?.setEventLogNextSeq(rec.sessionId, rec.lastSeq + 1);
+      }
+      // Persist the updated status if it changed
+      if (wasActive) {
+        this.persistSessionIfChanged(session);
+      }
+    }
+  }
+
+  /**
+   * Best-effort persist session metadata to disk when status changes.
+   * Deduplicates writes if status hasn't changed since last persist.
+   */
+  private persistSessionIfChanged(session: SessionInfo): void {
+    if (!this.persistence) return;
+    const lastStatus = this.lastPersistedStatus.get(session.sessionId);
+    if (lastStatus === session.status) return;
+    try {
+      this.persistence.writeSessionMeta(session);
+      this.lastPersistedStatus.set(session.sessionId, session.status);
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /**
+   * Best-effort persist result to disk.
+   */
+  private persistResult(session: SessionInfo): void {
+    if (!this.persistence || !session.lastResult) return;
+    try {
+      this.persistence.writeResult(session.sessionId, session.lastResult);
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  private async startTurnWithCompatibilityFallback(
+    client: ICodexClient,
+    turnParams: TurnStartParams
+  ): Promise<{ turnStartResult: unknown; compatWarnings?: string[] }> {
+    try {
+      return { turnStartResult: await client.turnStart(turnParams) };
+    } catch (err) {
+      if (
+        turnParams.effort === "minimal" &&
+        classifyTurnCompatibilityError(err) === "minimal_web_search"
+      ) {
+        try {
+          return {
+            turnStartResult: await client.turnStart({
+              ...turnParams,
+              effort: EFFORT_FALLBACK_LEVEL,
+            }),
+            compatWarnings: [buildEffortFallbackWarning("minimal", EFFORT_FALLBACK_LEVEL)],
+          };
+        } catch (retryErr) {
+          throw toFriendlyTurnCompatibilityError(retryErr);
+        }
+      }
+      throw toFriendlyTurnCompatibilityError(err);
     }
   }
 
@@ -181,10 +348,19 @@ export class SessionManager {
       config: spawnOpts.config,
       eventBuffer: createEventBuffer(),
       pendingRequests: new Map(),
+      lastAgentMessageText: undefined,
+      progressState: { lastEventAt: now },
     };
 
     this.sessions.set(sessionId, session);
     this.clients.set(sessionId, client);
+
+    // Persist session metadata to disk
+    try {
+      this.persistence?.writeSessionMeta(session);
+    } catch {
+      /* best-effort */
+    }
 
     try {
       // Register event handlers before start to prevent unhandled "error" events
@@ -192,6 +368,15 @@ export class SessionManager {
 
       // Start app-server subprocess
       await client.start(spawnOpts);
+
+      // Persist PID info for orphan detection on next startup.
+      if (client.childPid !== undefined) {
+        try {
+          this.persistence?.writePidInfo(sessionId, client.childPid, spawnOpts.model);
+        } catch {
+          /* best-effort */
+        }
+      }
 
       // Start thread
       const threadStartResult = await client.threadStart({
@@ -217,13 +402,14 @@ export class SessionManager {
       }
 
       // Start first turn
-      const turnStartResult = await client.turnStart({
+      const turnStart = await this.startTurnWithCompatibilityFallback(client, {
         threadId,
         input,
         effort,
         summary: advanced?.summary,
         outputSchema: advanced?.outputSchema,
       });
+      const turnStartResult = turnStart.turnStartResult;
 
       // Best-effort: seed activeTurnId from response if present (notifications are authoritative)
       const startedTurnId = extractTurnId(turnStartResult);
@@ -234,6 +420,8 @@ export class SessionManager {
         threadId,
         status: "running",
         pollInterval: DEFAULT_POLL_INTERVAL,
+        compatWarnings: turnStart.compatWarnings,
+        progress: this.getProgress(sessionId),
       };
     } catch (err) {
       session.status = "error";
@@ -284,9 +472,11 @@ export class SessionManager {
 
     // Clear stale result/error events so the new turn starts clean
     clearTerminalEvents(session.eventBuffer);
+    session.lastAgentMessageText = undefined;
 
     session.status = "running";
     session.lastActiveAt = new Date().toISOString();
+    this.persistSessionIfChanged(session);
 
     const input: UserInput[] = [{ type: "text", text: prompt }];
 
@@ -311,8 +501,11 @@ export class SessionManager {
       turnParams.sandboxPolicy = toSandboxPolicy(overrides.sandbox);
     }
 
+    let compatWarnings: string[] | undefined;
     try {
-      const turnStartResult = await client.turnStart(turnParams);
+      const turnStart = await this.startTurnWithCompatibilityFallback(client, turnParams);
+      compatWarnings = turnStart.compatWarnings;
+      const turnStartResult = turnStart.turnStartResult;
       const startedTurnId = extractTurnId(turnStartResult);
       if (startedTurnId) session.activeTurnId = startedTurnId;
 
@@ -343,6 +536,8 @@ export class SessionManager {
       threadId: session.threadId,
       status: "running",
       pollInterval: DEFAULT_POLL_INTERVAL,
+      compatWarnings,
+      progress: this.getProgress(sessionId),
     };
   }
 
@@ -401,6 +596,24 @@ export class SessionManager {
     return includeSensitive ? toSensitiveInfo(session) : toPublicInfo(session);
   }
 
+  getLastResult(sessionId: string): TurnResult | undefined {
+    return this.getSessionOrThrow(sessionId).lastResult;
+  }
+
+  getProgress(sessionId: string): ProgressInfo {
+    return buildProgressInfo(this.getSessionOrThrow(sessionId));
+  }
+
+  getPendingActionTypes(sessionId: string): Array<"approval" | "user_input"> {
+    const session = this.getSessionOrThrow(sessionId);
+    const actionTypes = new Set<"approval" | "user_input">();
+    for (const req of session.pendingRequests.values()) {
+      if (req.resolved) continue;
+      actionTypes.add(req.kind === "user_input" ? "user_input" : "approval");
+    }
+    return Array.from(actionTypes);
+  }
+
   async cancelSession(sessionId: string, reason?: string): Promise<void> {
     const existing = this.cancellationInFlight.get(sessionId);
     if (existing) {
@@ -430,6 +643,9 @@ export class SessionManager {
     session.cancelledAt = now;
     session.lastActiveAt = now;
     session.cancelledReason = reason ?? "Cancelled by user";
+
+    // Persist cancelled status to disk
+    this.persistSessionIfChanged(session);
 
     // Resolve and clear all pending requests (avoid leaving hanging server-initiated requests)
     for (const [reqId, req] of session.pendingRequests) {
@@ -470,6 +686,8 @@ export class SessionManager {
       { status: "cancelled", reason: session.cancelledReason, turnId: cancelledTurnId },
       true
     );
+    // Wake long-poll waiters so they see the cancellation immediately
+    this.notifyWaiters(sessionId);
 
     if (client) {
       await client.destroy();
@@ -526,6 +744,66 @@ export class SessionManager {
       },
       true
     );
+  }
+
+  async cleanSessions(options?: {
+    statuses?: Array<"idle" | "error" | "cancelled">;
+    olderThanMs?: number;
+    dryRun?: boolean;
+    includeDisk?: boolean;
+  }): Promise<{
+    matchedSessionIds: string[];
+    removedSessionIds: string[];
+    removedCount: number;
+    diskSessionsRemoved: number;
+    dryRun: boolean;
+  }> {
+    const statuses = new Set(options?.statuses ?? CLEANABLE_SESSION_STATUSES);
+    const olderThanMs = options?.olderThanMs;
+    const dryRun = options?.dryRun ?? false;
+    const includeDisk = options?.includeDisk ?? true;
+    const now = Date.now();
+    const matchedSessionIds: string[] = [];
+
+    for (const [sessionId, session] of Array.from(this.sessions.entries())) {
+      if (!statuses.has(session.status as "idle" | "error" | "cancelled")) continue;
+      if (typeof olderThanMs === "number" && olderThanMs > 0) {
+        const lastActive = new Date(session.lastActiveAt).getTime();
+        if (!Number.isFinite(lastActive)) continue;
+        if (now - lastActive < olderThanMs) continue;
+      }
+      matchedSessionIds.push(sessionId);
+    }
+
+    if (dryRun) {
+      return {
+        matchedSessionIds,
+        removedSessionIds: [],
+        removedCount: 0,
+        diskSessionsRemoved: 0,
+        dryRun: true,
+      };
+    }
+
+    let diskSessionsRemoved = 0;
+    const removedSessionIds: string[] = [];
+    for (const sessionId of matchedSessionIds) {
+      const evicted = this.evictSession(sessionId, includeDisk);
+      if (evicted.deleted) {
+        removedSessionIds.push(sessionId);
+      }
+      if (evicted.diskRemoved) {
+        diskSessionsRemoved++;
+      }
+    }
+
+    return {
+      matchedSessionIds,
+      removedSessionIds,
+      removedCount: removedSessionIds.length,
+      diskSessionsRemoved,
+      dryRun: false,
+    };
   }
 
   async forkSession(sessionId: string): Promise<SessionStartResult> {
@@ -609,6 +887,67 @@ export class SessionManager {
     }
   }
 
+  // ── Long-poll support ────────────────────────────────────────────
+
+  /**
+   * Wait until a new event is pushed, a new pending request arrives, a status
+   * change occurs, or `timeoutMs` elapses (whichever comes first).
+   *
+   * Rejects with an error when more than MAX_WAITERS_PER_SESSION concurrent
+   * waiters are already queued for the same session.
+   */
+  waitForChange(sessionId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        resolve();
+        return;
+      }
+
+      let notifiers = this.sessionNotifiers.get(sessionId);
+      if (!notifiers) {
+        notifiers = new Set();
+        this.sessionNotifiers.set(sessionId, notifiers);
+      }
+      if (notifiers.size >= MAX_WAITERS_PER_SESSION) {
+        reject(
+          new Error(
+            `[codex-mcp] Too many concurrent long-poll waiters for session '${sessionId}' (max ${MAX_WAITERS_PER_SESSION})`
+          )
+        );
+        return;
+      }
+
+      const clampedMs = Math.min(Math.max(0, timeoutMs), MAX_WAIT_MS);
+
+      const done = (): void => {
+        notifiers!.delete(notifyFn);
+        if (notifiers!.size === 0) this.sessionNotifiers.delete(sessionId);
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+
+      const notifyFn = done;
+      const timer = setTimeout(done, clampedMs);
+      if (timer.unref) timer.unref();
+
+      const onAbort = (): void => done();
+      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+
+      notifiers.add(notifyFn);
+    });
+  }
+
+  /** Resolve all waiters for a session immediately (called on any state change). */
+  private notifyWaiters(sessionId: string): void {
+    const notifiers = this.sessionNotifiers.get(sessionId);
+    if (!notifiers || notifiers.size === 0) return;
+    // Snapshot to avoid mutation issues during iteration
+    for (const fn of Array.from(notifiers)) {
+      fn();
+    }
+  }
+
   // ── Event Polling ────────────────────────────────────────────────
 
   pollEvents(
@@ -621,33 +960,55 @@ export class SessionManager {
     const buf = session.eventBuffer;
     const responseMode = options.responseMode ?? "full";
     const pollOptions = options.pollOptions;
-    const includeEvents = pollOptions?.includeEvents ?? true;
+    const finalOnly = pollOptions?.finalOnly ?? false;
+    const skipDeltas = pollOptions?.skipDeltas ?? false;
+    const includeEvents = finalOnly ? false : (pollOptions?.includeEvents ?? true);
     const includeActions = pollOptions?.includeActions ?? true;
-    const includeResult = pollOptions?.includeResult ?? true;
+    const includeResult = finalOnly ? true : (pollOptions?.includeResult ?? true);
     const maxBytes = pollOptions?.maxBytes;
     const effectiveCursor = cursor ?? session.lastEventCursor;
 
+    const unseenEvents = buf.events.filter((e) => e.id >= effectiveCursor);
+
     // Find events with id >= cursor
-    let events = includeEvents ? buf.events.filter((e) => e.id >= effectiveCursor) : [];
+    let events = includeEvents ? unseenEvents : [];
     let cursorResetTo: number | undefined;
 
     // Check if cursor is stale (events were evicted)
-    if (includeEvents && buf.events.length > 0) {
+    if (buf.events.length > 0) {
       const earliest = buf.events[0].id;
       if (earliest > effectiveCursor) {
         cursorResetTo = earliest;
-        events = buf.events;
+        if (includeEvents) {
+          events = buf.events;
+        }
       }
     }
     const cursorFloor = cursorResetTo ?? effectiveCursor;
 
-    // Limit events
-    if (events.length > maxEvents) {
-      events = events.slice(0, maxEvents);
+    let highestConsumedEventId: number | undefined;
+    if (includeEvents) {
+      if (skipDeltas) {
+        const filtered: typeof events = [];
+        for (const event of events) {
+          highestConsumedEventId = event.id;
+          if (isSkippableDeltaEvent(event)) continue;
+          filtered.push(event);
+          if (filtered.length >= maxEvents) break;
+        }
+        events = filtered;
+      } else if (events.length > maxEvents) {
+        events = events.slice(0, maxEvents);
+        highestConsumedEventId = events.length > 0 ? events[events.length - 1]?.id : undefined;
+      } else if (events.length > 0) {
+        highestConsumedEventId = events[events.length - 1]?.id;
+      }
+    } else if (finalOnly && unseenEvents.length > 0) {
+      highestConsumedEventId = unseenEvents[unseenEvents.length - 1]?.id;
     }
 
     let nextCursor = clampCursorToLatest(
-      events.length > 0 ? events[events.length - 1].id + 1 : cursorFloor,
+      typeof highestConsumedEventId === "number" ? highestConsumedEventId + 1 : cursorFloor,
       buf.nextId
     );
 
@@ -680,6 +1041,7 @@ export class SessionManager {
       sessionId,
       status: session.status,
       pollInterval: pollIntervalForStatus(session.status),
+      progress: buildProgressInfo(session),
       events: events.map((event) => serializeEventForMode(event, responseMode)),
       nextCursor,
       cursorResetTo,
@@ -719,6 +1081,14 @@ export class SessionManager {
           truncatedFields.push("result");
         }
 
+        if (
+          typeof result.progress !== "undefined" &&
+          payloadByteSize(result) > normalizedMaxBytes
+        ) {
+          result.progress = undefined;
+          truncatedFields.push("progress");
+        }
+
         if (typeof result.actions !== "undefined" && payloadByteSize(result) > normalizedMaxBytes) {
           if (session.status === "waiting_approval") {
             result.actions = compactActionsForBudget(result.actions);
@@ -752,7 +1122,7 @@ export class SessionManager {
       }
     }
 
-    if (includeEvents) {
+    if (includeEvents || finalOnly) {
       session.lastEventCursor = persistMonotonicCursor(
         session.lastEventCursor,
         result.nextCursor,
@@ -900,10 +1270,21 @@ export class SessionManager {
       );
     }
 
-    sendPendingRequestResponseOrThrow(req, response, sessionId, requestId);
-
+    // Mark as resolved while sending to avoid duplicate timeout/response races.
     req.resolved = true;
     req.decision = decision;
+    try {
+      sendPendingRequestResponseOrThrow(req, response, sessionId, requestId);
+    } catch (error) {
+      req.resolved = false;
+      req.decision = undefined;
+      session.pendingRequests.set(requestId, req);
+      if (session.status !== "cancelled") {
+        session.status = "waiting_approval";
+      }
+      throw error;
+    }
+
     if (req.timeoutHandle) clearTimeout(req.timeoutHandle);
 
     // Push approval_result event
@@ -927,6 +1308,9 @@ export class SessionManager {
     if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
       session.status = "running";
     }
+
+    // Wake any long-poll waiters so they see the status transition
+    this.notifyWaiters(sessionId);
   }
 
   // ── User Input Response ──────────────────────────────────────────
@@ -945,14 +1329,23 @@ export class SessionManager {
       );
     }
 
-    sendPendingRequestResponseOrThrow(
-      req,
-      { answers } as UserInputRequestResponse,
-      sessionId,
-      requestId
-    );
-
     req.resolved = true;
+    try {
+      sendPendingRequestResponseOrThrow(
+        req,
+        { answers } as UserInputRequestResponse,
+        sessionId,
+        requestId
+      );
+    } catch (error) {
+      req.resolved = false;
+      session.pendingRequests.set(requestId, req);
+      if (session.status !== "cancelled") {
+        session.status = "waiting_approval";
+      }
+      throw error;
+    }
+
     if (req.timeoutHandle) clearTimeout(req.timeoutHandle);
 
     pushEvent(
@@ -972,6 +1365,9 @@ export class SessionManager {
     if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
       session.status = "running";
     }
+
+    // Wake any long-poll waiters so they see the status transition
+    this.notifyWaiters(sessionId);
   }
 
   // ── Cleanup ──────────────────────────────────────────────────────
@@ -1030,6 +1426,7 @@ export class SessionManager {
     client.onNotification((method, params) => {
       session.lastActiveAt = new Date().toISOString();
       const p = params as Record<string, unknown>;
+      recordProgressObservation(session, method, p);
 
       switch (method) {
         case Methods.THREAD_STARTED: {
@@ -1081,17 +1478,22 @@ export class SessionManager {
           if (session.status === "cancelled") break;
           const turnObj = p.turn as Record<string, unknown> | undefined;
           const completedTurnId = (turnObj?.id as string | undefined) ?? session.activeTurnId ?? "";
+          const rawTurnOutput = normalizeOptionalString(turnObj?.output);
+          const finalText =
+            normalizeOptionalString(turnObj?.output) ?? session.lastAgentMessageText;
           session.status = "idle";
           session.activeTurnId = undefined;
           session.lastResult = {
             turnId: completedTurnId,
-            output: turnObj?.output as string | undefined,
+            text: finalText,
+            output: rawTurnOutput,
             structuredOutput: turnObj?.structuredOutput,
             turn: p.turn,
             status: turnObj?.status as string | undefined,
             turnError: turnObj?.error,
             completedAt: new Date().toISOString(),
           };
+          mergeProgressTokens(session, extractTokens(turnObj?.usage));
           pushEvent(
             session.eventBuffer,
             "result",
@@ -1103,6 +1505,9 @@ export class SessionManager {
             },
             true
           );
+          // Persist idle status + result to disk
+          this.persistSessionIfChanged(session);
+          this.persistResult(session);
           break;
         }
 
@@ -1130,6 +1535,8 @@ export class SessionManager {
               );
             } else {
               pushEvent(session.eventBuffer, "error", data, true);
+              // Persist error status to disk
+              this.persistSessionIfChanged(session);
             }
           }
           break;
@@ -1146,6 +1553,16 @@ export class SessionManager {
             const item = p.item as Record<string, unknown> | undefined;
             const itemType = item && typeof item.type === "string" ? item.type : undefined;
             const status = normalizeOptionalString(item?.status);
+            const completedItem =
+              method === Methods.ITEM_COMPLETED || method === Methods.RAW_RESPONSE_ITEM_COMPLETED;
+            if (
+              itemType === "agentMessage" &&
+              completedItem &&
+              status === "completed" &&
+              typeof item?.text === "string"
+            ) {
+              session.lastAgentMessageText = item.text;
+            }
             // Keep user/agent message-like items as output; everything else is progress.
             const eventType: SessionEventType =
               itemType === "agentMessage" || itemType === "userMessage" ? "output" : "progress";
@@ -1186,6 +1603,8 @@ export class SessionManager {
           // Ignore other notifications (account, config, etc.)
           break;
       }
+      // Wake any long-poll waiters after every notification
+      this.notifyWaiters(sessionId);
     });
 
     // Handle server-initiated requests
@@ -1198,6 +1617,7 @@ export class SessionManager {
 
       session.lastActiveAt = new Date().toISOString();
       const p = params as Record<string, unknown>;
+      recordProgressObservation(session, method, p);
 
       switch (method) {
         case Methods.COMMAND_APPROVAL: {
@@ -1275,6 +1695,7 @@ export class SessionManager {
               if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
                 session.status = "running";
               }
+              this.notifyWaiters(sessionId);
             }
           }, approvalTimeoutMs);
 
@@ -1345,6 +1766,7 @@ export class SessionManager {
               if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
                 session.status = "running";
               }
+              this.notifyWaiters(sessionId);
             }
           }, approvalTimeoutMs);
 
@@ -1402,6 +1824,7 @@ export class SessionManager {
               if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
                 session.status = "running";
               }
+              this.notifyWaiters(sessionId);
             }
           }, approvalTimeoutMs);
 
@@ -1446,6 +1869,8 @@ export class SessionManager {
           client.respondErrorToServer(id, -32601, `Unhandled server request: ${method}`);
           break;
       }
+      // Wake any long-poll waiters after every server-initiated request (new pending approval)
+      this.notifyWaiters(sessionId);
     });
 
     // Handle subprocess exit
@@ -1463,6 +1888,9 @@ export class SessionManager {
           },
           true
         );
+        this.persistSessionIfChanged(session);
+        this.persistResult(session);
+        this.notifyWaiters(sessionId);
       }
     });
 
@@ -1481,41 +1909,60 @@ export class SessionManager {
           },
           true
         );
+        this.persistSessionIfChanged(session);
+        this.persistResult(session);
+        this.notifyWaiters(sessionId);
       }
     });
   }
 
   private cleanupSessions(): void {
     const now = Date.now();
+    const TTL_WARNING_THRESHOLD_MS = 60_000;
     for (const [id, session] of this.sessions) {
       const lastActive = new Date(session.lastActiveAt).getTime();
       if (Number.isNaN(lastActive)) {
         // Invalid timestamp — clean up immediately
+        this.ttlWarningEmitted.delete(id);
         this.requestCancellation(id, "Invalid timestamp");
         continue;
       }
       const age = now - lastActive;
 
       if (session.status === "idle" && age > DEFAULT_IDLE_CLEANUP_MS) {
+        this.ttlWarningEmitted.delete(id);
         this.requestCancellation(id, "Idle timeout");
       } else if (session.status === "waiting_approval" && age > DEFAULT_RUNNING_CLEANUP_MS) {
+        this.ttlWarningEmitted.delete(id);
         this.requestCancellation(id, "Approval timeout");
       } else if (session.status === "running" && age > DEFAULT_RUNNING_CLEANUP_MS) {
+        this.ttlWarningEmitted.delete(id);
         this.requestCancellation(id, "Running timeout");
       } else if (
         (session.status === "cancelled" || session.status === "error") &&
         age > DEFAULT_TERMINAL_CLEANUP_MS
       ) {
-        this.clients
-          .get(id)
-          ?.destroy()
-          .catch((err) => {
-            console.error(
-              `[codex-mcp] Failed to destroy app-server client during cleanup: session=${id} error=${err instanceof Error ? err.message : String(err)}`
-            );
-          });
-        this.clients.delete(id);
-        this.sessions.delete(id);
+        this.evictSession(id, true);
+      } else {
+        // Check if this session is within the TTL warning window.
+        let ttlMs: number | undefined;
+        if (session.status === "idle") {
+          ttlMs = DEFAULT_IDLE_CLEANUP_MS;
+        } else if (session.status === "running" || session.status === "waiting_approval") {
+          ttlMs = DEFAULT_RUNNING_CLEANUP_MS;
+        }
+        if (ttlMs !== undefined && !this.ttlWarningEmitted.has(id)) {
+          const timeUntilExpiry = ttlMs - age;
+          if (timeUntilExpiry <= TTL_WARNING_THRESHOLD_MS && timeUntilExpiry > 0) {
+            this.ttlWarningEmitted.add(id);
+            pushEvent(session.eventBuffer, "progress", {
+              method: "codex-mcp/ttl_warning",
+              type: "ttl_warning",
+              ttlRemainingMs: timeUntilExpiry,
+              sessionId: id,
+            });
+          }
+        }
       }
     }
   }
@@ -1527,6 +1974,47 @@ export class SessionManager {
         `[codex-mcp] Failed to cancel session during cleanup: session=${sessionId} reason=${reason} error=${err instanceof Error ? err.message : String(err)}`
       );
     });
+  }
+
+  private evictSession(
+    sessionId: string,
+    removeDisk: boolean
+  ): {
+    deleted: boolean;
+    diskRemoved: boolean;
+  } {
+    const session = this.sessions.get(sessionId);
+    if (!session) return { deleted: false, diskRemoved: false };
+
+    clearSessionPendingRequests(session);
+    this.notifyWaiters(sessionId);
+    this.clients
+      .get(sessionId)
+      ?.destroy()
+      .catch((err) => {
+        console.error(
+          `[codex-mcp] Failed to destroy app-server client during cleanup: session=${sessionId} error=${err instanceof Error ? err.message : String(err)}`
+        );
+      });
+    this.clients.delete(sessionId);
+    const deleted = this.sessions.delete(sessionId);
+    this.lastPersistedStatus.delete(sessionId);
+    this.ttlWarningEmitted.delete(sessionId);
+    this.sessionNotifiers.delete(sessionId);
+    this.cancellationInFlight.delete(sessionId);
+    let diskRemoved = false;
+    if (removeDisk) {
+      try {
+        if (this.persistence) {
+          this.persistence.removeSession(sessionId);
+          diskRemoved = true;
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
+
+    return { deleted, diskRemoved };
   }
 }
 
@@ -1547,6 +2035,132 @@ function createEventBuffer(): EventBuffer {
   };
 }
 
+function buildProgressInfo(session: SessionInfo): ProgressInfo {
+  const storedTokens = session.progressState?.tokens;
+  const resultTokens = extractTokens(session.lastResult?.turn);
+  return {
+    phase: deriveProgressPhase(session),
+    lastEventAt: session.progressState?.lastEventAt ?? session.lastActiveAt,
+    activeTurnId: session.activeTurnId,
+    pendingActionCount: countPendingRequests(session),
+    lastMethod: session.progressState?.lastMethod,
+    percent: session.progressState?.percent,
+    tokens: mergeTokens(storedTokens, resultTokens),
+  };
+}
+
+function countPendingRequests(session: SessionInfo): number {
+  let count = 0;
+  for (const req of session.pendingRequests.values()) {
+    if (!req.resolved) count++;
+  }
+  return count;
+}
+
+function deriveProgressPhase(session: SessionInfo): ProgressPhase {
+  if (session.status === "waiting_approval") return "waiting_approval";
+  if (session.status === "cancelled") return "cancelled";
+  if (session.status === "error") return "error";
+  if (session.status === "idle") return "finished";
+  if (!session.activeTurnId) return "starting";
+
+  const lastMethod = session.progressState?.lastMethod;
+  if (typeof lastMethod === "string") {
+    if (REASONING_PROGRESS_METHODS.has(lastMethod)) return "reasoning";
+    if (ACTING_PROGRESS_METHODS.has(lastMethod)) return "acting";
+  }
+  return "running";
+}
+
+function recordProgressObservation(
+  session: SessionInfo,
+  method: string,
+  params: Record<string, unknown>
+): void {
+  const next = session.progressState ?? { lastEventAt: new Date().toISOString() };
+  next.lastEventAt = new Date().toISOString();
+  if (method !== Methods.THREAD_TOKEN_USAGE_UPDATED) {
+    next.lastMethod = method;
+  }
+  const percent = extractPercent(params);
+  if (typeof percent === "number") next.percent = percent;
+  mergeProgressTokens(session, extractTokens(params));
+  session.progressState = next;
+}
+
+function mergeProgressTokens(session: SessionInfo, tokens?: ProgressTokens): void {
+  if (!tokens) return;
+  const next = session.progressState ?? { lastEventAt: new Date().toISOString() };
+  next.tokens = mergeTokens(next.tokens, tokens);
+  session.progressState = next;
+}
+
+function mergeTokens(base?: ProgressTokens, extra?: ProgressTokens): ProgressTokens | undefined {
+  if (!base && !extra) return undefined;
+  return {
+    input: extra?.input ?? base?.input,
+    output: extra?.output ?? base?.output,
+    total: extra?.total ?? base?.total,
+  };
+}
+
+function extractPercent(value: unknown): number | undefined {
+  if (!isRecord(value)) return undefined;
+  const candidates = [value.percent, value.percentage, value.progress, value.fractionComplete];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "number" || !Number.isFinite(candidate)) continue;
+    if (candidate >= 0 && candidate <= 1) return Math.round(candidate * 100);
+    if (candidate >= 0 && candidate <= 100) return candidate;
+  }
+  return undefined;
+}
+
+function extractTokens(value: unknown): ProgressTokens | undefined {
+  if (!isRecord(value)) return undefined;
+
+  const usage = isRecord(value.usage) ? value.usage : undefined;
+  const source = usage ?? value;
+  const input = pickNumber(source, [
+    "inputTokens",
+    "input_tokens",
+    "promptTokens",
+    "prompt_tokens",
+  ]);
+  const output = pickNumber(source, [
+    "outputTokens",
+    "output_tokens",
+    "completionTokens",
+    "completion_tokens",
+  ]);
+  const total = pickNumber(source, [
+    "totalTokens",
+    "total_tokens",
+    "tokenCount",
+    "token_count",
+    "total",
+  ]);
+
+  if (typeof input !== "number" && typeof output !== "number" && typeof total !== "number") {
+    return undefined;
+  }
+
+  return { input, output, total };
+}
+
+function pickNumber(source: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
+function isSkippableDeltaEvent(event: { data: unknown }): boolean {
+  if (!isRecord(event.data)) return false;
+  const method = event.data.method;
+  return typeof method === "string" && SKIPPABLE_DELTA_METHODS.has(method);
+}
+
 /** Clear stale result/error events when transitioning idle/error → running */
 function clearTerminalEvents(buf: EventBuffer): void {
   buf.events = buf.events.filter((e) => e.type !== "result" && e.type !== "error");
@@ -1557,6 +2171,16 @@ function clearSessionPendingRequests(session: SessionInfo): void {
   session.pendingRequests.clear();
   for (const [, req] of entries) {
     if (req.timeoutHandle) clearTimeout(req.timeoutHandle);
+    // Best-effort: send cancel response so the backend isn't left waiting.
+    if (!req.resolved && req.respond) {
+      try {
+        if (req.kind === "command") req.respond({ decision: "cancel" });
+        else if (req.kind === "fileChange") req.respond({ decision: "cancel" });
+        else if (req.kind === "user_input") req.respond({ answers: {} });
+      } catch {
+        // Client already exited — response delivery is best-effort
+      }
+    }
     req.resolved = true;
   }
 }
@@ -1918,18 +2542,30 @@ function tryCoalesceProgressDelta(
 }
 
 function evictEvents(buf: EventBuffer): void {
-  // Soft limit: evict oldest unpinned
-  while (buf.events.length > buf.maxSize) {
-    const idx = buf.events.findIndex((e) => !e.pinned);
-    if (idx === -1) break;
-    buf.events.splice(idx, 1);
-  }
+  // Soft limit: evict in a single pass to avoid O(n²) repeated findIndex+splice.
+  if (buf.events.length > buf.maxSize) {
+    const overflow = buf.events.length - buf.maxSize;
+    const unpinnedIdx: number[] = [];
+    const approvalResultIdx: number[] = [];
+    for (let i = 0; i < buf.events.length; i++) {
+      const event = buf.events[i];
+      if (!event.pinned) unpinnedIdx.push(i);
+      else if (event.type === "approval_result") approvalResultIdx.push(i);
+    }
 
-  // If still over soft limit (all pinned): evict old approval_result events first.
-  while (buf.events.length > buf.maxSize) {
-    const idx = buf.events.findIndex((e) => e.type === "approval_result");
-    if (idx === -1) break;
-    buf.events.splice(idx, 1);
+    const drop = new Set<number>();
+    for (const idx of unpinnedIdx) {
+      if (drop.size >= overflow) break;
+      drop.add(idx);
+    }
+    for (const idx of approvalResultIdx) {
+      if (drop.size >= overflow) break;
+      drop.add(idx);
+    }
+
+    if (drop.size > 0) {
+      buf.events = buf.events.filter((_, idx) => !drop.has(idx));
+    }
   }
 
   if (buf.events.length <= buf.hardMaxSize) return;

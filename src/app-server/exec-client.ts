@@ -7,7 +7,7 @@
  * that SessionManager expects.
  */
 import { spawn, type ChildProcess } from "child_process";
-import { writeFileSync, mkdtempSync } from "fs";
+import { writeFileSync, mkdtempSync, rmSync } from "fs";
 import { EventEmitter } from "events";
 import { randomUUID } from "crypto";
 import { tmpdir } from "os";
@@ -33,6 +33,7 @@ import {
 } from "./protocol.js";
 import { resolveCodexInvocation } from "./codex-bin.js";
 import { ErrorCode } from "../types.js";
+import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 
 type NotificationHandler = (method: string, params: unknown) => void;
 type ServerRequestHandler = (id: RequestId, method: string, params: unknown) => void;
@@ -166,6 +167,7 @@ export class ExecClient extends EventEmitter implements ICodexClient {
   private threadStartParams: ThreadStartParams | null = null;
   private lastAgentMessageText = "";
   private turnCompleted = false;
+  private schemaTmpDirs: string[] = [];
 
   // Handlers
   private notificationHandler: NotificationHandler | null = null;
@@ -182,6 +184,10 @@ export class ExecClient extends EventEmitter implements ICodexClient {
   get supportsTurnOverrides(): boolean {
     // After the first turn, exec resume does not support -s/-p/-C overrides
     return this.turnCount <= 1 || this.realThreadId == null;
+  }
+
+  get childPid(): number | undefined {
+    return this.process?.pid ?? undefined;
   }
 
   async start(opts: AppServerSpawnOptions): Promise<InitializeResult> {
@@ -260,7 +266,11 @@ export class ExecClient extends EventEmitter implements ICodexClient {
     const args = isResume
       ? this.buildResumeArgs(prompt, params, images)
       : this.buildExecArgs(prompt, params, images);
-    const invocation = resolveCodexInvocation(args);
+    const executable = getDefaultCodexExecutable();
+    const invocation = resolveCodexInvocation(args, {
+      codexCommand: executable.command,
+      codexIsPath: executable.isPath,
+    });
 
     const proc = spawn(invocation.cmd, invocation.args, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -287,6 +297,7 @@ export class ExecClient extends EventEmitter implements ICodexClient {
     proc.on("exit", (code, signal) => {
       // If turn wasn't completed via JSONL event, synthesize completion
       if (this.turnId && !this._destroyed && !this.turnCompleted) {
+        this.turnCompleted = true;
         if (code !== 0 && code !== null) {
           this.emitNotification(Methods.ERROR, {
             threadId: this.threadId,
@@ -295,6 +306,22 @@ export class ExecClient extends EventEmitter implements ICodexClient {
             willRetry: false,
           });
         }
+        // Synthesize TURN_COMPLETED so SessionManager transitions out of "running"
+        const turnId = this.turnId ?? "";
+        this.emitNotification(Methods.TURN_COMPLETED, {
+          threadId: this.threadId,
+          turn: {
+            id: turnId,
+            status: code === 0 ? "completed" : "failed",
+            output: this.lastAgentMessageText || undefined,
+            ...(code !== 0 && code !== null
+              ? { error: { message: `exec process exited with code ${code}` } }
+              : signal
+                ? { error: { message: `exec process killed by signal ${signal}` } }
+                : {}),
+          },
+        });
+        this.turnId = null;
       }
       if (!this._destroyed) {
         this.emit("exit", code, signal);
@@ -374,6 +401,16 @@ export class ExecClient extends EventEmitter implements ICodexClient {
 
     this.process = null;
     this.removeAllListeners();
+
+    // Clean up temp schema directories
+    for (const dir of this.schemaTmpDirs) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+    this.schemaTmpDirs = [];
   }
 
   // ── Private helpers ─────────────────────────────────────────────
@@ -420,6 +457,7 @@ export class ExecClient extends EventEmitter implements ICodexClient {
     if (params.outputSchema && Object.keys(params.outputSchema).length > 0) {
       try {
         const tmpDir = mkdtempSync(join(tmpdir(), "codex-mcp-schema-"));
+        this.schemaTmpDirs.push(tmpDir);
         const schemaPath = join(tmpDir, "output-schema.json");
         writeFileSync(schemaPath, JSON.stringify(params.outputSchema));
         args.push("--output-schema", schemaPath);
@@ -532,7 +570,7 @@ export class ExecClient extends EventEmitter implements ICodexClient {
     // Handle structured lifecycle events first (dot-notation from exec --json)
     switch (type) {
       case "thread.started": {
-        const cliThreadId = event.thread_id as string | undefined;
+        const cliThreadId = (event.thread_id ?? event.threadId) as string | undefined;
         if (cliThreadId) {
           this.threadId = cliThreadId;
           this.realThreadId = cliThreadId;

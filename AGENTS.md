@@ -22,6 +22,7 @@ This repository is a TypeScript (ESM) MCP server that wraps the OpenAI Codex CLI
 | `codex_reply`   | continue session                                          | return immediately |
 | `codex_session` | list/get/cancel/interrupt/fork/clean background terminals | sync               |
 | `codex_check`   | poll events + respond to approvals/user input             | sync               |
+| `codex_setup`   | report codex executable, auth and app-server readiness    | sync               |
 
 ## Upgrade Execution Entry
 
@@ -115,13 +116,33 @@ src/
 │   ├── codex-bin.ts
 │   ├── protocol.ts
 │   └── lifecycle.ts
+├── persistence/
+│   ├── index.ts
+│   ├── atomic-writer.ts
+│   ├── lockfile.ts
+│   ├── event-log.ts
+│   ├── recovery-scanner.ts
+│   └── retention.ts
 ├── session/
-│   └── manager.ts
+│   ├── manager.ts
+│   ├── persistence.ts
+│   └── orphan-reaper.ts
 ├── tools/
 │   ├── codex.ts
 │   ├── codex-reply.ts
 │   ├── codex-session.ts
-│   └── codex-check.ts
+│   ├── codex-check.ts
+│   └── codex-setup.ts
+├── utils/
+│   ├── codex-executable.ts
+│   ├── config.ts
+│   ├── cwd.ts
+│   ├── execution.ts
+│   ├── files.ts
+│   ├── redact.ts
+│   ├── stdin-shutdown.ts
+│   ├── stdio-guard.ts
+│   └── turn-compat.ts
 └── resources/
     └── register-resources.ts
 ```
