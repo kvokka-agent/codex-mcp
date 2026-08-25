@@ -17,17 +17,17 @@ jobs:
           - os: ubuntu-latest
             node-version: 18
           - os: ubuntu-latest
-            node-version: 20
+            node-version: 24
           - os: ubuntu-latest
             node-version: 22
           - os: windows-latest
             node-version: 18
           - os: windows-latest
-            node-version: 22
+            node-version: 24
           - os: macos-latest
             node-version: 18
           - os: macos-latest
-            node-version: 22
+            node-version: 24
     runs-on: ${{ matrix.os }}
     steps:
       - name: Normalize git EOL settings on Windows
@@ -35,8 +35,8 @@ jobs:
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
