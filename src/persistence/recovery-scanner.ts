@@ -38,6 +38,8 @@ export interface RecoveredSession {
   meta: RecoveredSessionMeta;
   /** Parsed events from events.jsonl (valid lines only, torn tail discarded) */
   events: Array<{ seq: number; [key: string]: unknown }>;
+  /** Corrupt lines skipped in the middle of events.jsonl — a torn tail is not counted */
+  corruptEventLines?: number;
   /** Highest sequence number found in events */
   lastSeq: number;
   /** Result from result.json if present */
@@ -48,17 +50,27 @@ export interface RecoveredSession {
   sessionDir: string;
 }
 
+interface ParsedEventsJsonl {
+  events: Array<{ seq: number; [key: string]: unknown }>;
+  /** Unparsable lines before the last one; the torn tail is excluded */
+  corruptLines: number;
+}
+
 /**
- * Parse events.jsonl, discarding any torn tail (incomplete last line).
- * Returns valid events sorted by seq.
+ * Parse events.jsonl into events sorted by seq.
+ *
+ * A cut power tears the last line only, so an unparsable final line is dropped without
+ * a word. An unparsable line anywhere before it is lost data: the line is skipped, the
+ * valid lines after it are kept, and the number skipped goes to the caller.
  */
-function parseEventsJsonl(filePath: string): Array<{ seq: number; [key: string]: unknown }> {
-  if (!existsSync(filePath)) return [];
+function parseEventsJsonl(filePath: string): ParsedEventsJsonl {
+  if (!existsSync(filePath)) return { events: [], corruptLines: 0 };
   const raw = readFileSync(filePath, "utf-8");
   const lines = raw.split("\n");
   const events: Array<{ seq: number; [key: string]: unknown }> = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
+  let corruptLines = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i]!.trim();
     if (!trimmed) continue;
     try {
       const parsed = JSON.parse(trimmed);
@@ -66,11 +78,12 @@ function parseEventsJsonl(filePath: string): Array<{ seq: number; [key: string]:
         events.push(parsed);
       }
     } catch {
-      // Torn tail or corrupt line — discard this and all subsequent lines
-      break;
+      // The last element of the split holds text written after the final newline:
+      // an unparsable one is the torn tail of an interrupted write.
+      if (i < lines.length - 1) corruptLines++;
     }
   }
-  return events.sort((a, b) => a.seq - b.seq);
+  return { events: events.sort((a, b) => a.seq - b.seq), corruptLines };
 }
 
 function readJsonSafe<T>(filePath: string): T | null {
@@ -118,7 +131,13 @@ export function scanRecoverableSessions(sessionsDir: string, maxEvents = 500): R
       continue;
     }
 
-    let events = parseEventsJsonl(join(sessionDir, "events.jsonl"));
+    const parsed = parseEventsJsonl(join(sessionDir, "events.jsonl"));
+    if (parsed.corruptLines > 0) {
+      console.error(
+        `[recovery] Session ${meta.sessionId}: skipped ${parsed.corruptLines} corrupt line(s) in events.jsonl`
+      );
+    }
+    let events = parsed.events;
     // Keep only the tail
     if (events.length > maxEvents) {
       events = events.slice(-maxEvents);
@@ -132,6 +151,7 @@ export function scanRecoverableSessions(sessionsDir: string, maxEvents = 500): R
       sessionId: meta.sessionId,
       meta,
       events,
+      corruptEventLines: parsed.corruptLines,
       lastSeq,
       result,
       pidInfo,

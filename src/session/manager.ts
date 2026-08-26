@@ -171,6 +171,8 @@ export class SessionManager {
   private lastPersistedStatus = new Map<string, string>();
   /** Sessions for which a TTL warning event has already been emitted this cycle. */
   private ttlWarningEmitted = new Set<string>();
+  /** Sessions whose event persistence already reported a failure — keeps stderr to one line. */
+  private eventPersistFailed = new Set<string>();
   /** Long-poll notifiers: set of resolve callbacks waiting for any change in a session. */
   private sessionNotifiers = new Map<string, Set<() => void>>();
 
@@ -237,16 +239,41 @@ export class SessionManager {
           tokens: extractTokens((rec.result as TurnResult | undefined)?.turn),
         },
       };
+      restoreEventBuffer(session.eventBuffer, rec.events);
       this.sessions.set(rec.sessionId, session);
       // Resume event log sequence numbering
       if (rec.lastSeq >= 0) {
         this.persistence?.setEventLogNextSeq(rec.sessionId, rec.lastSeq + 1);
       }
+      this.attachEventSink(session);
       // Persist the updated status if it changed
       if (wasActive) {
         this.persistSessionIfChanged(session);
       }
     }
+  }
+
+  /**
+   * Mirror this session's buffered events into its events.jsonl.
+   *
+   * Persistence is best-effort: a write that fails is reported once per session and
+   * leaves the session running on its in-memory buffer.
+   */
+  private attachEventSink(session: SessionInfo): void {
+    const persistence = this.persistence;
+    if (!persistence) return;
+    const sessionId = session.sessionId;
+    setEventSink(session.eventBuffer, (type, data, timestamp) => {
+      try {
+        persistence.appendEvent(sessionId, type, data, timestamp);
+      } catch (err) {
+        if (this.eventPersistFailed.has(sessionId)) return;
+        this.eventPersistFailed.add(sessionId);
+        console.error(
+          `[codex-mcp] Failed to persist events: session=${sessionId} error=${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    });
   }
 
   /**
@@ -354,6 +381,7 @@ export class SessionManager {
 
     this.sessions.set(sessionId, session);
     this.clients.set(sessionId, client);
+    this.attachEventSink(session);
 
     // Persist session metadata to disk
     try {
@@ -372,7 +400,7 @@ export class SessionManager {
       // Persist PID info for orphan detection on next startup.
       if (client.childPid !== undefined) {
         try {
-          this.persistence?.writePidInfo(sessionId, client.childPid, spawnOpts.model);
+          this.persistence?.writePidInfo(sessionId, client.childPid, { model: spawnOpts.model });
         } catch {
           /* best-effort */
         }
@@ -452,8 +480,9 @@ export class SessionManager {
     }
   ): Promise<SessionStartResult> {
     const session = this.getSessionOrThrow(sessionId);
-    const client = this.getClientOrThrow(sessionId);
 
+    // Status first: cancelSession drops the client, so a client lookup ahead of this
+    // reports a cancelled session as SESSION_NOT_FOUND.
     if (session.status === "cancelled") {
       throw new Error(
         `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be resumed`
@@ -469,6 +498,8 @@ export class SessionManager {
         `Error [${ErrorCode.INTERNAL}]: Session '${sessionId}' has no threadId, cannot reply`
       );
     }
+
+    const client = this.getClientOrThrow(sessionId);
 
     // Clear stale result/error events so the new turn starts clean
     clearTerminalEvents(session.eventBuffer);
@@ -697,8 +728,14 @@ export class SessionManager {
 
   async interruptSession(sessionId: string): Promise<void> {
     const session = this.getSessionOrThrow(sessionId);
-    const client = this.getClientOrThrow(sessionId);
 
+    // Status first: cancelSession drops the client, so a client lookup ahead of this
+    // reports a cancelled session as SESSION_NOT_FOUND.
+    if (session.status === "cancelled") {
+      throw new Error(
+        `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be interrupted`
+      );
+    }
     if (session.status !== "running" && session.status !== "waiting_approval") {
       throw new Error(
         `Error [${ErrorCode.SESSION_NOT_RUNNING}]: Cannot interrupt session in ${session.status} state`
@@ -711,6 +748,8 @@ export class SessionManager {
       );
     }
 
+    const client = this.getClientOrThrow(sessionId);
+
     await client.turnInterrupt({
       threadId: session.threadId,
       turnId: session.activeTurnId,
@@ -719,8 +758,9 @@ export class SessionManager {
 
   async cleanBackgroundTerminals(sessionId: string): Promise<void> {
     const session = this.getSessionOrThrow(sessionId);
-    const client = this.getClientOrThrow(sessionId);
 
+    // Status first: cancelSession drops the client, so a client lookup ahead of this
+    // reports a cancelled session as SESSION_NOT_FOUND.
     if (session.status === "cancelled") {
       throw new Error(
         `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be cleaned`
@@ -731,6 +771,8 @@ export class SessionManager {
         `Error [${ErrorCode.INTERNAL}]: Session '${sessionId}' has no threadId, cannot clean background terminals`
       );
     }
+
+    const client = this.getClientOrThrow(sessionId);
 
     await client.threadBackgroundTerminalsClean({ threadId: session.threadId });
     session.lastActiveAt = new Date().toISOString();
@@ -808,11 +850,19 @@ export class SessionManager {
 
   async forkSession(sessionId: string): Promise<SessionStartResult> {
     const session = this.getSessionOrThrow(sessionId);
-    const originalClient = this.getClientOrThrow(sessionId);
 
+    // Status first: cancelSession drops the client, so a client lookup ahead of this
+    // reports a cancelled session as SESSION_NOT_FOUND.
+    if (session.status === "cancelled") {
+      throw new Error(
+        `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be forked`
+      );
+    }
     if (!session.threadId) {
       throw new Error(`Error [${ErrorCode.INTERNAL}]: No threadId to fork`);
     }
+
+    const originalClient = this.getClientOrThrow(sessionId);
 
     // Fork the thread on the ORIGINAL client (which holds the thread state)
     const forkResult = await originalClient.threadFork({ threadId: session.threadId });
@@ -842,6 +892,8 @@ export class SessionManager {
 
     this.sessions.set(newSessionId, newSession);
     this.clients.set(newSessionId, newClient);
+    this.attachEventSink(newSession);
+    this.persistSessionIfChanged(newSession);
 
     try {
       // Register handlers before start to prevent unhandled "error" events
@@ -855,6 +907,16 @@ export class SessionManager {
         sandbox: session.sandbox,
         config: session.config,
       });
+
+      if (newClient.childPid !== undefined) {
+        try {
+          this.persistence?.writePidInfo(newSessionId, newClient.childPid, {
+            model: session.model,
+          });
+        } catch {
+          /* best-effort */
+        }
+      }
 
       // Resume the forked thread on the new process
       await newClient.threadResume({ threadId: forkedThreadId });
@@ -1393,6 +1455,12 @@ export class SessionManager {
       this.clients.delete(id);
     }
     this.sessions.clear();
+    this.eventPersistFailed.clear();
+    try {
+      this.persistence?.flushAll();
+    } catch {
+      /* best-effort */
+    }
   }
 
   // ── Private ──────────────────────────────────────────────────────
@@ -1520,7 +1588,13 @@ export class SessionManager {
           {
             const data: Record<string, unknown> = { method, ...p };
             if (typeof data.message === "string") data.message = redactPaths(data.message);
-            if (typeof data.error === "string") data.error = redactPaths(data.error);
+            // ErrorNotification.error is a TurnError object whose `message` carries the
+            // text; a bare string arrives from builds predating that shape.
+            if (typeof data.error === "string") {
+              data.error = redactPaths(data.error);
+            } else if (isRecord(data.error) && typeof data.error.message === "string") {
+              data.error = { ...data.error, message: redactPaths(data.error.message) };
+            }
             if (willRetry) {
               pushEvent(
                 session.eventBuffer,
@@ -1597,6 +1671,37 @@ export class SessionManager {
         case Methods.TURN_PLAN_UPDATED:
         case Methods.MODEL_REROUTED:
           pushEvent(session.eventBuffer, "progress", { method, ...p });
+          break;
+
+        case Methods.THREAD_STATUS_CHANGED: {
+          const threadStatus = isRecord(p.status) ? p.status : undefined;
+          const statusType = normalizeOptionalString(threadStatus?.type);
+          const activeFlags = Array.isArray(threadStatus?.activeFlags)
+            ? (threadStatus.activeFlags as unknown[])
+            : undefined;
+          const nextStatus = sessionStatusForThreadStatus(session, statusType);
+          const statusChanged = nextStatus !== undefined && nextStatus !== session.status;
+          if (statusChanged) session.status = nextStatus;
+          const failed = session.status === "error" && statusChanged;
+          pushEvent(
+            session.eventBuffer,
+            failed ? "error" : "progress",
+            { method, ...p, statusType, activeFlags },
+            failed
+          );
+          if (statusChanged) this.persistSessionIfChanged(session);
+          break;
+        }
+
+        case Methods.THREAD_CLOSED:
+        case Methods.THREAD_COMPACTED:
+        case Methods.DEPRECATION_NOTICE:
+        case Methods.CONFIG_WARNING:
+          // Pinned: a closed thread, a folded history and a codex CLI warning
+          // outlive the deltas around them in a full buffer. None of them is a
+          // failure, so they stay out of the "error" type and leave the session
+          // status alone.
+          pushEvent(session.eventBuffer, "progress", { method, ...p }, true);
           break;
 
         default:
@@ -2002,16 +2107,20 @@ export class SessionManager {
     this.ttlWarningEmitted.delete(sessionId);
     this.sessionNotifiers.delete(sessionId);
     this.cancellationInFlight.delete(sessionId);
+    this.eventPersistFailed.delete(sessionId);
     let diskRemoved = false;
-    if (removeDisk) {
-      try {
-        if (this.persistence) {
+    try {
+      if (this.persistence) {
+        if (removeDisk) {
           this.persistence.removeSession(sessionId);
           diskRemoved = true;
+        } else {
+          // Flush what the session buffered and drop its log handle.
+          this.persistence.destroySessionLog(sessionId);
         }
-      } catch {
-        /* best-effort */
       }
+    } catch {
+      /* best-effort */
     }
 
     return { deleted, diskRemoved };
@@ -2035,6 +2144,40 @@ function createEventBuffer(): EventBuffer {
   };
 }
 
+const RESTORABLE_EVENT_TYPES = new Set<string>([
+  "output",
+  "progress",
+  "approval_request",
+  "approval_result",
+  "result",
+  "error",
+]);
+
+/**
+ * Refill a fresh buffer with the events a previous run wrote to events.jsonl.
+ *
+ * Buffer ids continue the on-disk seq numbering, so a poll cursor and a log line
+ * name the same event across a restart.
+ */
+function restoreEventBuffer(
+  buf: EventBuffer,
+  events: Array<{ seq: number; [key: string]: unknown }>
+): void {
+  for (const raw of events) {
+    const type = raw.type;
+    if (typeof type !== "string" || !RESTORABLE_EVENT_TYPES.has(type)) continue;
+    buf.events.push({
+      id: raw.seq,
+      type: type as SessionEventType,
+      data: raw.data,
+      timestamp: typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
+      pinned: false,
+    });
+    if (raw.seq >= buf.nextId) buf.nextId = raw.seq + 1;
+  }
+  evictEvents(buf);
+}
+
 function buildProgressInfo(session: SessionInfo): ProgressInfo {
   const storedTokens = session.progressState?.tokens;
   const resultTokens = extractTokens(session.lastResult?.turn);
@@ -2047,6 +2190,37 @@ function buildProgressInfo(session: SessionInfo): ProgressInfo {
     percent: session.progressState?.percent,
     tokens: mergeTokens(storedTokens, resultTokens),
   };
+}
+
+/**
+ * Session status a `thread/status/changed` notification asks for, or undefined
+ * when the notification carries nothing the manager should act on.
+ *
+ * The pending request map decides `waiting_approval`, never the notification:
+ * the status change and the approval request that goes with it are two separate
+ * messages, so either one can arrive first. A wait announced while the manager
+ * holds no request would park the session on an action no caller can answer,
+ * and an `idle` arriving while a request is still open would hide that action.
+ * Codex owns the `idle` and `systemError` edges the turn lifecycle cannot see;
+ * `active` never pulls a finished session back into `running`.
+ */
+function sessionStatusForThreadStatus(
+  session: SessionInfo,
+  statusType: string | undefined
+): SessionStatus | undefined {
+  if (session.status === "cancelled" || session.status === "error") return undefined;
+  const waitingOnCaller = countPendingRequests(session) > 0;
+  switch (statusType) {
+    case "active":
+      return waitingOnCaller ? "waiting_approval" : undefined;
+    case "idle":
+      return waitingOnCaller ? undefined : "idle";
+    case "systemError":
+      return "error";
+    default:
+      // "notLoaded" and whatever a newer codex adds: no session-side meaning.
+      return undefined;
+  }
 }
 
 function countPendingRequests(session: SessionInfo): number {
@@ -2357,14 +2531,32 @@ function persistMonotonicCursor(
   return Math.max(previousCursor, boundedCursor);
 }
 
+type EventSink = (type: SessionEventType, data: unknown, timestamp: string) => void;
+
+/** Disk mirror per session event buffer; a dropped session takes its sink with it. */
+const eventSinks = new WeakMap<EventBuffer, EventSink>();
+
+function setEventSink(buf: EventBuffer, sink: EventSink): void {
+  eventSinks.set(buf, sink);
+}
+
 function pushEvent(buf: EventBuffer, type: SessionEventType, data: unknown, pinned = false): void {
+  // One clock read per event: the buffered copy a poll returns and the events.jsonl
+  // line carry the same instant, so a restart hands the client back the timestamp
+  // it already saw.
+  const timestamp = new Date().toISOString();
+
+  // Every delta goes to the log as its own line, coalesced ones included: an
+  // append-only file cannot rewrite the line the delta merges into.
+  eventSinks.get(buf)?.(type, data, timestamp);
+
   if (tryCoalesceProgressDelta(buf, type, data, pinned)) return;
 
   buf.events.push({
     id: buf.nextId++,
     type,
     data,
-    timestamp: new Date().toISOString(),
+    timestamp,
     pinned,
   });
   evictEvents(buf);

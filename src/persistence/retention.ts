@@ -1,7 +1,7 @@
 /**
  * Retention policy — prune old session directories by age, count, and disk size.
  */
-import { readdirSync, rmSync, statSync, readFileSync } from "node:fs";
+import { readdirSync, rmSync, statSync, readFileSync, type Dirent } from "node:fs";
 import { join } from "node:path";
 
 export interface RetentionPolicy {
@@ -24,19 +24,37 @@ interface SessionDirInfo {
   diskBytes: number;
 }
 
-function getDirSize(dirPath: string): number {
-  let total = 0;
+function isMissing(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/**
+ * Total size in bytes of every file under `dirPath`, recursing into subdirectories.
+ *
+ * A path that has vanished mid-walk is a race with a concurrent prune, not a failure:
+ * its subtree contributes nothing and the walk goes on. Any other read failure is
+ * reported on stderr, so a subtree that could not be measured is not silently zero.
+ * Symlinks are left uncounted — the target is counted where it lives.
+ */
+export function getDirSize(dirPath: string): number {
+  let entries: Dirent[];
   try {
-    for (const entry of readdirSync(dirPath)) {
-      try {
-        const st = statSync(join(dirPath, entry));
-        total += st.isFile() ? st.size : 0;
-      } catch {
-        // skip
-      }
+    entries = readdirSync(dirPath, { withFileTypes: true });
+  } catch (err) {
+    if (!isMissing(err)) console.error(`[retention] Failed to size ${dirPath}:`, err);
+    return 0;
+  }
+
+  let total = 0;
+  for (const entry of entries) {
+    const child = join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      total += getDirSize(child);
+    } else if (entry.isFile()) {
+      // throwIfNoEntry: false — a file removed between readdir and stat is the same race.
+      total += statSync(child, { throwIfNoEntry: false })?.size ?? 0;
     }
-  } catch {
-    // skip
   }
   return total;
 }

@@ -43,7 +43,16 @@ export interface PersistedSessionMeta {
 export interface PidInfo {
   pid: number;
   spawnedAt: string;
+  /** Command line the child was spawned with, when the client exposes it. */
   command?: string;
+  /** Model the session runs with — identifies the process in logs, never used to match a PID. */
+  model?: string;
+}
+
+/** Everything besides pid and spawn time that goes into pid.json. */
+export interface PidDetails {
+  command?: string;
+  model?: string;
 }
 
 // ── Critical event types that require immediate flush ────────────────
@@ -110,20 +119,31 @@ export class SessionPersistence {
     atomicWriteJson(join(dir, "meta.json"), meta);
   }
 
-  /** Persist PID info for orphan detection. */
-  writePidInfo(sessionId: string, pid: number, command?: string): void {
+  /**
+   * Persist PID info for orphan detection.
+   *
+   * The orphan reaper matches a live PID against `spawnedAt`; `command` and `model`
+   * only describe the process for a reader of the file.
+   */
+  writePidInfo(sessionId: string, pid: number, details: PidDetails = {}): void {
     const info: PidInfo = {
       pid,
       spawnedAt: new Date().toISOString(),
-      command,
+      command: details.command,
+      model: details.model,
     };
     const dir = join(this.sessionsDir, sessionId);
     mkdirSync(dir, { recursive: true });
     atomicWriteJson(join(dir, "pid.json"), info);
   }
 
-  /** Append an event to the session's event log. */
-  appendEvent(sessionId: string, type: SessionEventType, data: unknown): void {
+  /**
+   * Append an event to the session's event log.
+   *
+   * The caller owns the clock: `timestamp` is the one the in-memory buffer handed
+   * the poller, so a restore returns the timestamp the client already saw.
+   */
+  appendEvent(sessionId: string, type: SessionEventType, data: unknown, timestamp: string): void {
     let log = this.eventLogs.get(sessionId);
     if (!log) {
       const dir = join(this.sessionsDir, sessionId);
@@ -131,7 +151,7 @@ export class SessionPersistence {
       log = new EventLog({ filePath: join(dir, "events.jsonl") });
       this.eventLogs.set(sessionId, log);
     }
-    log.append({ type, data, timestamp: new Date().toISOString() }, eventCriticality(type));
+    log.append({ type, data, timestamp }, eventCriticality(type));
   }
 
   /** Set the next sequence number for a recovered session's event log. */

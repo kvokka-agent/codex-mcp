@@ -25,10 +25,35 @@ MCP server that wraps [OpenAI Codex](https://github.com/openai/codex) — start 
 - [Node.js](https://nodejs.org) >= 18
 - [OpenAI Codex CLI](https://github.com/openai/codex) installed and configured (`codex` or `codex-internal` in PATH)
 
-## Thanks
+## Relationship to the upstream project
 
-The project was originally made by @leo000001 and forked from <https://github.com/xihuai18/codex-mcp/>
-Happy to share my gratitude for his brilliant work
+`codex-mcp` is the work of @leo000001, published at <https://github.com/xihuai18/codex-mcp/>. The
+design, the app-server protocol mapping and the exec fallback are theirs, and this fork is grateful
+for all of it.
+
+The fork exists because the published source and the published package drifted apart: the upstream
+repository stands at 2.1.0, while releases through 2.1.7 went out on npm alone. Whoever read the
+repository was reading a different server from the one they had installed.
+
+This fork reconstructs 2.1.1 through 2.1.7 from the sourcemaps of the published packages, puts them
+under test, and releases from the same tree it publishes. It is maintained as a long-lived fork for
+one plain reason: the server has to work today, on the machines it is already installed on.
+
+Before that, the ready-made routes were tried and each broke on a specific point: OpenAI's
+`codex-plugin-cc` forwards no profile and hits Claude Code's 600,000 ms Bash ceiling,
+`codex mcp-server` is deprecated in favour of the app server, and the live agent bridges accept one
+attached session or push into the main context instead of the subagent.
+[docs/WHY-THIS-FORK.md](docs/WHY-THIS-FORK.md) tells that story in full.
+
+### What 2.2.0 changes on top of 2.1.7
+
+- A server that cannot take the `STATE_DIR` lock runs from memory instead of recovering, pruning and
+  reaping inside the state directory another server owns.
+- The orphan reaper confirms process identity by start time on every platform, and leaves a process
+  alone when no source answers.
+- Session events reach `events.jsonl`, and a recovered session carries them back.
+- `codex_setup`, the persistence primitives, the exec client, backend detection and the MCP tool
+  surface are covered by tests; `codex-schema/` is checked against `protocol.ts` on every run.
 
 ## Quick Start
 

@@ -10,6 +10,8 @@ import type { SessionInfo } from "../src/types.js";
 let root: string;
 let persistence: SessionPersistence | null = null;
 const envBackup = process.env.CODEX_MCP_STATE_DIR;
+/** appendEvent takes the event's timestamp from its caller; these tests supply it. */
+const EVENT_AT = "2024-03-04T05:06:07.008Z";
 
 function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   return {
@@ -94,23 +96,39 @@ describe("SessionPersistence", () => {
     expect(recovered!.meta.status).toBe("cancelled");
   });
 
-  it("writes pid info with a spawn timestamp", () => {
+  it("writes pid info with a spawn timestamp, and the model under its own key", () => {
     persistence = new SessionPersistence(root);
-    persistence.writePidInfo("sess_1", 4242, "codex exec");
+    persistence.writePidInfo("sess_1", 4242, { command: "codex app-server", model: "gpt-5" });
 
     const info = JSON.parse(readFileSync(sessionFile("sess_1", "pid.json"), "utf-8"));
     expect(info.pid).toBe(4242);
-    expect(info.command).toBe("codex exec");
+    expect(info.command).toBe("codex app-server");
+    expect(info.model).toBe("gpt-5");
     expect(Number.isNaN(Date.parse(info.spawnedAt))).toBe(false);
+  });
+
+  it("gives the orphan reaper the pid and spawn time even with no details", () => {
+    persistence = new SessionPersistence(root);
+    persistence.writePidInfo("sess_1", 4242);
+
+    // reapOrphanProcesses reads exactly these two fields off pidInfo.
+    const [recovered] = persistence.recoverSessions();
+    expect(recovered).toBeUndefined();
+
+    persistence.writeSessionMeta(makeSession());
+    const pidInfo = persistence.recoverSessions()[0]!.pidInfo!;
+    expect(pidInfo.pid).toBe(4242);
+    expect(Number.isNaN(Date.parse(pidInfo.spawnedAt))).toBe(false);
+    expect("command" in pidInfo).toBe(false);
   });
 
   it("flushes critical events immediately and batches the rest until flushAll", () => {
     persistence = new SessionPersistence(root);
 
-    persistence.appendEvent("sess_1", "progress", { step: 1 });
+    persistence.appendEvent("sess_1", "progress", { step: 1 }, EVENT_AT);
     expect(existsSync(sessionFile("sess_1", "events.jsonl"))).toBe(false);
 
-    persistence.appendEvent("sess_1", "approval_request", { requestId: "req_1" });
+    persistence.appendEvent("sess_1", "approval_request", { requestId: "req_1" }, EVENT_AT);
     const afterCritical = readFileSync(sessionFile("sess_1", "events.jsonl"), "utf-8")
       .trim()
       .split("\n")
@@ -118,9 +136,13 @@ describe("SessionPersistence", () => {
     expect(afterCritical).toHaveLength(2);
     expect(afterCritical[0]).toMatchObject({ seq: 0, type: "progress", data: { step: 1 } });
     expect(afterCritical[1]).toMatchObject({ seq: 1, type: "approval_request" });
-    expect(Number.isNaN(Date.parse(afterCritical[1].timestamp))).toBe(false);
+    // The line carries the caller's timestamp, not one appendEvent read itself.
+    expect(afterCritical.map((line: { timestamp: string }) => line.timestamp)).toEqual([
+      EVENT_AT,
+      EVENT_AT,
+    ]);
 
-    persistence.appendEvent("sess_1", "output", { text: "hi" });
+    persistence.appendEvent("sess_1", "output", { text: "hi" }, EVENT_AT);
     persistence.flushAll();
     expect(
       readFileSync(sessionFile("sess_1", "events.jsonl"), "utf-8").trim().split("\n")
@@ -130,7 +152,7 @@ describe("SessionPersistence", () => {
   it("continues event numbering from the recovered sequence", () => {
     persistence = new SessionPersistence(root);
     persistence.setEventLogNextSeq("sess_1", 7);
-    persistence.appendEvent("sess_1", "result", { ok: true });
+    persistence.appendEvent("sess_1", "result", { ok: true }, EVENT_AT);
 
     const line = JSON.parse(readFileSync(sessionFile("sess_1", "events.jsonl"), "utf-8").trim());
     expect(line.seq).toBe(7);
@@ -138,9 +160,9 @@ describe("SessionPersistence", () => {
 
   it("keeps using the same log when the sequence is set after the first append", () => {
     persistence = new SessionPersistence(root);
-    persistence.appendEvent("sess_1", "error", { message: "x" });
+    persistence.appendEvent("sess_1", "error", { message: "x" }, EVENT_AT);
     persistence.setEventLogNextSeq("sess_1", 100);
-    persistence.appendEvent("sess_1", "error", { message: "y" });
+    persistence.appendEvent("sess_1", "error", { message: "y" }, EVENT_AT);
 
     const seqs = readFileSync(sessionFile("sess_1", "events.jsonl"), "utf-8")
       .trim()
@@ -170,7 +192,7 @@ describe("SessionPersistence", () => {
   it("removes a session directory and its event log", () => {
     persistence = new SessionPersistence(root);
     persistence.writeSessionMeta(makeSession());
-    persistence.appendEvent("sess_1", "result", { ok: true });
+    persistence.appendEvent("sess_1", "result", { ok: true }, EVENT_AT);
 
     persistence.removeSession("sess_1");
     expect(existsSync(join(root, "sessions", "sess_1"))).toBe(false);
@@ -178,7 +200,7 @@ describe("SessionPersistence", () => {
     expect(persistence.recoverSessions()).toEqual([]);
 
     // A later append recreates the directory with a fresh sequence.
-    persistence.appendEvent("sess_1", "result", { ok: true });
+    persistence.appendEvent("sess_1", "result", { ok: true }, EVENT_AT);
     expect(
       JSON.parse(readFileSync(sessionFile("sess_1", "events.jsonl"), "utf-8").trim()).seq
     ).toBe(0);
@@ -186,8 +208,8 @@ describe("SessionPersistence", () => {
 
   it("destroySessionLog flushes buffered events for that session only", () => {
     persistence = new SessionPersistence(root);
-    persistence.appendEvent("sess_1", "progress", { a: 1 });
-    persistence.appendEvent("sess_2", "progress", { b: 2 });
+    persistence.appendEvent("sess_1", "progress", { a: 1 }, EVENT_AT);
+    persistence.appendEvent("sess_2", "progress", { b: 2 }, EVENT_AT);
 
     persistence.destroySessionLog("sess_1");
     expect(existsSync(sessionFile("sess_1", "events.jsonl"))).toBe(true);
@@ -232,8 +254,8 @@ describe("SessionPersistence", () => {
   it("destroy flushes every log and releases the lock", () => {
     persistence = new SessionPersistence(root);
     persistence.acquireLock();
-    persistence.appendEvent("sess_1", "progress", { a: 1 });
-    persistence.appendEvent("sess_2", "progress", { b: 2 });
+    persistence.appendEvent("sess_1", "progress", { a: 1 }, EVENT_AT);
+    persistence.appendEvent("sess_2", "progress", { b: 2 }, EVENT_AT);
 
     persistence.destroy();
     persistence = null;
@@ -264,7 +286,7 @@ describe("startDiskPersistence", () => {
     // lock held by this very process as reentrant, so the owner is the parent process.
     const owner = new SessionPersistence(root);
     owner.writeSessionMeta(makeSession({ sessionId: "sess_live", status: "running" }));
-    owner.writePidInfo("sess_live", 4242, "gpt-5");
+    owner.writePidInfo("sess_live", 4242, { model: "gpt-5" });
     writeFileSync(
       join(root, ".lock"),
       JSON.stringify({ pid: process.ppid, startedAt: "2024-01-01T00:00:00.000Z" }) + "\n",

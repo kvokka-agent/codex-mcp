@@ -59,12 +59,27 @@ function transformItem(item: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * Detect whether an exec `{"type":"error"}` event is a transient/retryable error
- * (e.g. "Reconnecting... n/5") vs a terminal failure.
+ * Detect whether an exec error message describes a transient/retryable failure
+ * (e.g. "Reconnecting... n/5") vs a terminal one.
  */
-function isRetryableError(event: Record<string, unknown>): boolean {
-  const msg = typeof event.message === "string" ? event.message : "";
-  return /reconnect/i.test(msg) || /\d+\/\d+/.test(msg);
+function isRetryableError(message: string): boolean {
+  return /reconnect/i.test(message) || /\d+\/\d+/.test(message);
+}
+
+/**
+ * Shape an error payload as the protocol's TurnError object: `{ message: string }`
+ * plus whatever else the payload already carried. This is the only form
+ * `codex app-server` puts in the `error` field of its `error` notification
+ * (ErrorNotification.error → TurnError, message required), so exec mode emits
+ * the same one. Fields the exec payload does not carry are not invented.
+ */
+function toTurnError(raw: unknown, fallbackMessage: string): Record<string, unknown> {
+  if (typeof raw === "string") return { message: raw };
+  if (raw !== null && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    return typeof obj.message === "string" ? obj : { ...obj, message: fallbackMessage };
+  }
+  return { message: fallbackMessage };
 }
 
 /**
@@ -258,8 +273,10 @@ export class ExecClient extends EventEmitter implements ICodexClient {
       this.emitNotification(Methods.ERROR, {
         threadId: this.threadId,
         turnId: this.turnId,
-        error:
-          "exec mode: multi-turn context unavailable (CLI did not provide thread ID). This turn runs without prior context.",
+        error: {
+          message:
+            "exec mode: multi-turn context unavailable (CLI did not provide thread ID). This turn runs without prior context.",
+        },
         willRetry: true, // non-terminal: session continues, just without context
       });
     }
@@ -633,14 +650,13 @@ export class ExecClient extends EventEmitter implements ICodexClient {
 
       case "turn.failed": {
         const turnId = this.turnId ?? "";
-        const error = event.error as Record<string, unknown> | undefined;
         this.turnCompleted = true;
         this.emitNotification(Methods.TURN_COMPLETED, {
           threadId: this.threadId,
           turn: {
             id: turnId,
             status: "failed",
-            error: error ?? { message: "Turn failed" },
+            error: toTurnError(event.error, "Turn failed"),
           },
         });
         this.turnId = null;
@@ -648,13 +664,7 @@ export class ExecClient extends EventEmitter implements ICodexClient {
       }
 
       case "error": {
-        const willRetry = isRetryableError(event);
-        this.emitNotification(Methods.ERROR, {
-          threadId: this.threadId,
-          turnId: this.turnId,
-          error: event.message ?? event.error,
-          willRetry,
-        });
+        this.emitError(event, type);
         return;
       }
 
@@ -692,18 +702,12 @@ export class ExecClient extends EventEmitter implements ICodexClient {
           turn: {
             id: turnId,
             status: "cancelled",
-            error: event.reason ?? { message: "Turn aborted" },
+            error: toTurnError(event.reason, "Turn aborted"),
           },
         });
         this.turnId = null;
       } else if (mappedMethod === Methods.ERROR) {
-        // For stream_error, apply retryable detection
-        this.emitNotification(Methods.ERROR, {
-          threadId: this.threadId,
-          turnId: this.turnId,
-          error: event.message ?? event.error ?? type,
-          willRetry: isRetryableError(event),
-        });
+        this.emitError(event, type);
       } else {
         this.emitNotification(mappedMethod, {
           threadId: this.threadId,
@@ -718,6 +722,21 @@ export class ExecClient extends EventEmitter implements ICodexClient {
     // The manager's default branch ignores unknown methods, so emitting them
     // would be misleading. Logging ensures visibility during debugging.
     console.error(`[exec-client] Unmapped exec event type: ${type}`);
+  }
+
+  /**
+   * Emit an `error` notification from an exec error event, carrying the message
+   * the CLI reported. The event type stands in as the message only when the
+   * event carried none.
+   */
+  private emitError(event: Record<string, unknown>, type: string): void {
+    const error = toTurnError(event.message ?? event.error, type);
+    this.emitNotification(Methods.ERROR, {
+      threadId: this.threadId,
+      turnId: this.turnId,
+      error,
+      willRetry: isRetryableError(String(error.message)),
+    });
   }
 
   private emitNotification(method: string, params: unknown): void {

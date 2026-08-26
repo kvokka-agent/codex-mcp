@@ -46,3 +46,20 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # Launching the built server is the only thing that exercises the startup path:
+      # STATE_DIR lock, session recovery, orphan reaping, and a stdout kept clean until
+      # the MCP handshake. Neither script needs the codex binary — the server resolves it
+      # lazily and falls back to exec mode when it is absent from PATH.
+      - run: npm run check:stdio
+      - run: npm run smoke:mcp
+
+  markdown:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      # rumdl ships as a Rust binary; the npm package carries the prebuilt one and the
+      # script pins its version, so the runner needs nothing beyond node.
+      - run: npm run lint:md

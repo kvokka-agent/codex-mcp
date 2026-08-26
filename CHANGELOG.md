@@ -5,20 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.2.0] - 2026-08-26
+
+First release of this fork. It carries the 2.1.1-2.1.7 work published on npm by @leo000001,
+reconstructed from the sourcemaps of those packages, and adds the fixes and tests below.
 
 ### Fixed
 
-- A server that cannot take the `STATE_DIR` lock now runs from memory instead of touching the state directory another server owns. It previously warned and carried on: it recovered the other server's sessions, pruned their directories, and handed their live PIDs to the orphan reaper, which killed the running codex processes of the first server.
+- A server that cannot take the `STATE_DIR` lock runs from memory instead of touching the state directory another server owns. It previously warned and carried on: it recovered the other server's sessions, pruned their directories, and handed their live PIDs to the orphan reaper, which then killed the running codex processes of the first server.
+- The orphan reaper confirms process identity by start time before it signals anything. Its `/proc` path compared no times at all and treated every live PID as an orphan when the recorded spawn time was under a day old, so a process that inherited a reused PID was killed. Where no source reports a start time, the process is left alone.
+- The orphan reaper reads process creation time through `Get-CimInstance` on Windows, falling back to `wmic`. `wmic` ships disabled on Windows 11 24H2 and is absent from Server 2025, which left identity unverified. The `wmic` path also read its local timestamp as UTC and ignored the offset, so identity never matched off UTC.
+- Session events reach `events.jsonl`. `appendEvent()` was called from nowhere, which left the event log dead code and the recovery scanner reading a file that never existed; `ingestRecovered()` also dropped the events it had just read. A recovered session now carries its events back, and its buffer ids continue the sequence written to disk.
+- `forkSession()` writes `meta.json` and `pid.json` for the fork. The fork's directory was invisible to recovery and its child process invisible to the reaper.
+- Retention measures a session directory in full. `getDirSize()` counted only top-level files, so a session whose bytes sat in subdirectories weighed zero and the disk limit never applied.
+- A corrupt line in the middle of `events.jsonl` no longer discards every valid event after it. The count of skipped lines reaches the caller and stderr; a torn last line stays silent, since that is what a power cut leaves.
+- `pid.json` records the model under `model`. It was written under `command`, a field no reader used.
+- Path redaction applies to `error.message`, not only to a bare string. Real app-server errors always carry the object form, so redaction had never run on them.
+- `ExecClient` reports errors in one shape, the `TurnError` object the protocol schema defines. It previously alternated between a bare string and an object, and retryable errors carried in `error.message` were read as terminal.
+- `thread/status/changed`, `thread/closed`, `thread/compacted`, `deprecationNotice` and `configWarning` reach the client instead of falling into `default: break`. Session status stays governed by the pending-request map, so a status notification that arrives before its approval request, or after the answer, cannot strand a session.
+- `check:stdio` waits 6 s for the server to exit on its own, up from 2 s. The old window killed the child on a cold runner and reported the kill as a runtime failure.
+- An event carries one timestamp. `pushEvent` and `appendEvent` each read the clock, so the two disagreed across a millisecond boundary and a restored session handed the client a timestamp it had never polled. `appendEvent` now takes the timestamp and reads no clock of its own.
+- A cancelled session answers `CANCELLED`. `replyToSession`, `interruptSession`, `cleanBackgroundTerminals` and `forkSession` looked the client up before they checked the status, and cancelling a session removes its client, so the caller was told `SESSION_NOT_FOUND` — the code for a session that never existed.
 
 ### Added
 
+- `codex-schema/` is checked against `src/app-server/protocol.ts` on every test run: method names and parameter shapes are read from the schema bundle and from the TypeScript compiler, so protocol drift fails the build rather than waiting for a reader to notice. Methods absent from either side are listed with a stated reason.
+- `AskForApproval` models the object variant with `reject`, `ThreadStartParams` carries `serviceName`, and `thread/name/updated` carries `threadName` — all three present in the schema, none modelled before.
+- The `config` resource documents every `CODEX_MCP_*` variable the source reads, with its default; a test scans `src/` and fails when a variable has no line. The `delegation-guide` names all six effort levels, including `none` and `minimal`, and states the level a rejected `minimal` turn is retried at.
+- The compat report distinguishes `diskPersistence` from `diskResume`: sessions survive a restart as history, and a recovered session has no codex process behind it.
+- CI runs `check:stdio` and `smoke:mcp` across the matrix — the only checks that start the server and exercise the lock, recovery, reaping and stdout cleanliness. A separate job runs `rumdl` over the markdown, which nothing linted before.
 - `scripts/mcp-smoke.mjs` checks the `codex_setup` tool and the `codex-mcp:///delegation-guide` resource.
-- Tests for the modules that arrived in 2.1.1-2.1.7: persistence primitives, session persistence, orphan reaper, backend detection, exec client, `codex_setup`, executable resolution, foreground execution, turn compatibility and stdin shutdown.
+- Tests: 98 to 771, line coverage 60.7% to 98.2%. Modules that arrived in 2.1.1-2.1.7 with no tests at all - persistence primitives, session persistence, orphan reaper, backend detection, exec client, `codex_setup`, executable resolution, foreground execution, turn compatibility, stdin shutdown - are covered, along with the MCP tool surface, the JSON-RPC client and the resource documents.
 
 ### Changed
 
-- `docs/DESIGN.md` is in English and describes the server as of 2.1.7.
+- `docs/DESIGN.md` is in English and describes the server as it is now. `AGENTS.md` and `docs/E2E_LOCAL_TEST_PLAN.md` follow the same state.
+- The event buffer evicts in one pass; `EventLog.destroy()` drops a branch that could not be reached.
 
 ## [2.1.7] - 2026-04-06
 

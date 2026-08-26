@@ -88,10 +88,7 @@ export class EventLog {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    // A pending timer implies a non-empty buffer, so flushSync has already cleared it.
     this.flushSync();
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = null;
-    }
   }
 }

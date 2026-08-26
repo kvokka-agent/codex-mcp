@@ -1,6 +1,9 @@
 [global]
-line-length = 100
+# Long lines are unavoidable in the reference tables and JSON samples of the docs.
 disable = ["MD013"]
+# Keep the lint cache inside the already-ignored node_modules tree.
+cache-dir = "node_modules/.cache/rumdl"
 
 [per-file-ignores]
+# README.md embeds raw HTML (badges, collapsible sections).
 "README.md" = ["MD033"]

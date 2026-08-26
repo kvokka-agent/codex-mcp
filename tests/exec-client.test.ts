@@ -322,7 +322,9 @@ describe("ExecClient argument building", () => {
     const [method, params] = notifications.find(([m]) => m === Methods.ERROR)!;
     expect(method).toBe(Methods.ERROR);
     expect(params).toMatchObject({ willRetry: true });
-    expect((params as { error: string }).error).toContain("multi-turn context unavailable");
+    expect((params as { error: { message: string } }).error.message).toContain(
+      "multi-turn context unavailable"
+    );
   });
 
   it("kills the previous turn process before starting the next", async () => {
@@ -436,8 +438,14 @@ describe("ExecClient event translation", () => {
     emitLine(proc, { type: "error", message: "auth token rejected" });
 
     const errors = notifications.filter(([m]) => m === Methods.ERROR).map(([, p]) => p);
-    expect(errors[0]).toMatchObject({ error: "Reconnecting... 1/5", willRetry: true });
-    expect(errors[1]).toMatchObject({ error: "auth token rejected", willRetry: false });
+    expect(errors[0]).toMatchObject({
+      error: { message: "Reconnecting... 1/5" },
+      willRetry: true,
+    });
+    expect(errors[1]).toMatchObject({
+      error: { message: "auth token rejected" },
+      willRetry: false,
+    });
   });
 
   it("maps snake_case stream events onto app-server notifications", async () => {
@@ -455,7 +463,7 @@ describe("ExecClient event translation", () => {
     emitLine(proc, { type: "stream_error", message: "reconnect in progress" });
 
     const [, params] = notifications.find(([m]) => m === Methods.ERROR)!;
-    expect(params).toMatchObject({ error: "reconnect in progress", willRetry: true });
+    expect(params).toMatchObject({ error: { message: "reconnect in progress" }, willRetry: true });
   });
 
   it("falls back to the event type when stream_error carries no message", async () => {
@@ -463,7 +471,7 @@ describe("ExecClient event translation", () => {
     emitLine(proc, { type: "stream_error" });
 
     const [, params] = notifications.find(([m]) => m === Methods.ERROR)!;
-    expect(params).toMatchObject({ error: "stream_error", willRetry: false });
+    expect(params).toMatchObject({ error: { message: "stream_error" }, willRetry: false });
   });
 
   it("translates the legacy task lifecycle events", async () => {
@@ -639,5 +647,111 @@ describe("ExecClient process exit", () => {
 
     await expect(pending).resolves.toBeUndefined();
     expect(killCalls).toContainEqual([-proc.pid, "SIGTERM"]);
+  });
+});
+
+describe("ExecClient error shape", () => {
+  /** Every `error` notification the client emits, newest last. */
+  function errorParams(
+    notifications: Array<[string, unknown]>
+  ): Array<{ error: unknown; willRetry: boolean }> {
+    return notifications
+      .filter(([m]) => m === Methods.ERROR)
+      .map(([, p]) => p as { error: unknown; willRetry: boolean });
+  }
+
+  it("emits the protocol TurnError object from every branch that reports an error", async () => {
+    const { client, notifications } = await startedClient();
+
+    await client.turnStart({ threadId: "t", input: [{ type: "text", text: "one" }] });
+    emitLine(lastProc(), { type: "error", message: "auth token rejected" });
+
+    // Second turn without a CLI thread id: the client reports the lost context.
+    await client.turnStart({ threadId: "t", input: [{ type: "text", text: "two" }] });
+    lastProc().emit("exit", 7, null);
+
+    const errors = errorParams(notifications);
+    expect(errors).toHaveLength(3);
+    for (const { error } of errors) {
+      expect(typeof error).toBe("object");
+      expect(error).not.toBeNull();
+      expect(typeof (error as { message: unknown }).message).toBe("string");
+    }
+    expect(errors.map(({ error }) => (error as { message: string }).message)).toEqual([
+      "auth token rejected",
+      expect.stringContaining("multi-turn context unavailable"),
+      "exec process exited with code 7",
+    ]);
+  });
+
+  it("carries the fields the CLI put on an error object and adds none", async () => {
+    const { client, notifications } = await startedClient();
+    await client.turnStart({ threadId: "t", input: [{ type: "text", text: "go" }] });
+
+    emitLine(lastProc(), {
+      type: "error",
+      error: {
+        message: "usage limit reached",
+        additionalDetails: "resets at 10:00",
+        codexErrorInfo: { type: "usageLimitReached" },
+      },
+    });
+
+    expect(errorParams(notifications)[0]!.error).toEqual({
+      message: "usage limit reached",
+      additionalDetails: "resets at 10:00",
+      codexErrorInfo: { type: "usageLimitReached" },
+    });
+  });
+
+  it("names the event type when the CLI error object carries no message", async () => {
+    const { client, notifications } = await startedClient();
+    await client.turnStart({ threadId: "t", input: [{ type: "text", text: "go" }] });
+
+    emitLine(lastProc(), { type: "stream_error", error: { code: "ECONNRESET" } });
+
+    expect(errorParams(notifications)[0]).toEqual({
+      threadId: expect.any(String),
+      turnId: expect.any(String),
+      error: { code: "ECONNRESET", message: "stream_error" },
+      willRetry: false,
+    });
+  });
+
+  it("reads retryability from the message the CLI object carries", async () => {
+    const { client, notifications } = await startedClient();
+    await client.turnStart({ threadId: "t", input: [{ type: "text", text: "go" }] });
+
+    emitLine(lastProc(), { type: "error", error: { message: "Reconnecting... 2/5" } });
+
+    expect(errorParams(notifications)[0]).toMatchObject({
+      error: { message: "Reconnecting... 2/5" },
+      willRetry: true,
+    });
+  });
+
+  it("reports no error notification when the process dies from a signal", async () => {
+    const { client, notifications } = await startedClient();
+    const turn = await client.turnStart({ threadId: "t", input: [{ type: "text", text: "go" }] });
+
+    lastProc().emit("exit", null, "SIGTERM");
+
+    expect(errorParams(notifications)).toEqual([]);
+    const [, params] = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    expect(params).toMatchObject({
+      turn: { id: turn.turn.id, error: { message: "exec process killed by signal SIGTERM" } },
+    });
+  });
+
+  it("shapes a string turn error from the legacy abort event as a TurnError", async () => {
+    const { client, notifications } = await startedClient();
+    await client.turnStart({ threadId: "t", input: [{ type: "text", text: "go" }] });
+
+    emitLine(lastProc(), { type: "turn_aborted", reason: "interrupted by user" });
+
+    const [, params] = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    expect(params).toMatchObject({
+      turn: { status: "cancelled", error: { message: "interrupted by user" } },
+    });
   });
 });

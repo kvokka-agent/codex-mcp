@@ -37,3 +37,6 @@ codex-app-server.schema.json
 server-notifications.json
 server-notifications.min.json
 server-notifications.*.json
+
+# rumdl cache (fallback when --no-config bypasses cache-dir)
+.rumdl_cache/

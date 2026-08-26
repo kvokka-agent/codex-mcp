@@ -11,6 +11,7 @@
  */
 import { execSync, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { uptime } from "node:os";
 import type { RecoveredSession } from "../persistence/index.js";
 
 export interface ReapSummary {
@@ -37,47 +38,115 @@ function isAlive(pid: number): boolean {
 // ── Start-time helpers ───────────────────────────────────────────────
 
 /**
- * On Windows: query WMI for the process creation time.
- * WMIC returns dates in the form "YYYYMMDDHHmmss.ffffff+ZZZ".
- * We extract just the 14-digit prefix and convert to an ISO string.
- * Returns null on any error (process gone, access denied, wmic absent).
+ * On Windows: read the process creation time from WMI.
+ * Returns null when the process is gone or no query tool answers.
  */
 function getWindowsCreationTimeMs(pid: number): number | null {
+  // PowerShell first: wmic is disabled by default from Windows 11 24H2 and absent from Server 2025.
+  const viaPowerShell = getPowerShellCreationTimeMs(pid);
+  if (viaPowerShell !== null) return viaPowerShell;
+  return getWmicCreationTimeMs(pid);
+}
+
+/**
+ * Ask CIM for Win32_Process.CreationDate, printed as an ISO 8601 round-trip
+ * string ("o") so the offset travels with it.
+ * Returns null when powershell.exe is absent, the process is gone (the query
+ * then prints nothing) or the output does not parse.
+ */
+function getPowerShellCreationTimeMs(pid: number): number | null {
   try {
-    const raw = execSync(`wmic process where "ProcessId=${pid}" get CreationDate /value`, {
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 5000,
-    }).toString();
-    const match = raw.match(/CreationDate=(\d{14})/);
-    if (!match || !match[1]) return null;
-    const s = match[1];
-    const iso = `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T${s.slice(8, 10)}:${s.slice(10, 12)}:${s.slice(12, 14)}.000Z`;
-    const ms = new Date(iso).getTime();
-    return isNaN(ms) ? null : ms;
+    const raw = execSync(
+      `powershell.exe -NoProfile -NonInteractive -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CreationDate.ToUniversalTime().ToString('o')"`,
+      { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }
+    )
+      .toString()
+      .trim();
+    if (!raw) return null;
+    const ms = new Date(raw).getTime();
+    return Number.isNaN(ms) ? null : ms;
   } catch {
     return null;
   }
 }
 
 /**
- * On Linux: read /proc/{pid}/stat and return the starttime field (field 22,
- * 0-indexed) as a raw tick string suitable for identity comparison.
- * Returns null when /proc is unavailable.
+ * Ask wmic for the process creation time, formatted as
+ * "YYYYMMDDHHmmss.ffffff+ZZZ" where ZZZ is the offset from UTC in minutes.
+ * Returns null on any error (process gone, access denied, wmic absent) and
+ * when the offset is missing, which leaves the zone of the digits unknown.
  */
-function getProcStatStartTick(pid: number): string | null {
+function getWmicCreationTimeMs(pid: number): number | null {
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-    // The second field is the comm (executable name) enclosed in parentheses
-    // and may contain spaces, so we split after the closing ')'.
-    const afterComm = stat.slice(stat.lastIndexOf(")") + 1).trim();
-    const fields = afterComm.split(" ");
-    // After stripping "state" and the next fields, starttime is at index 19
-    // of afterComm fields (which corresponds to field 22 of the full stat).
-    const starttime = fields[19];
-    return starttime ?? null;
+    const raw = execSync(`wmic process where "ProcessId=${pid}" get CreationDate /value`, {
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000,
+    }).toString();
+    const match = raw.match(/CreationDate=(\d{14})\.\d+([+-]\d{1,4})/);
+    if (!match || !match[1] || !match[2]) return null;
+    const s = match[1];
+    const iso = `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T${s.slice(8, 10)}:${s.slice(10, 12)}:${s.slice(12, 14)}.000Z`;
+    const ms = new Date(iso).getTime();
+    if (Number.isNaN(ms)) return null;
+    return ms - Number(match[2]) * 60_000;
   } catch {
     return null;
   }
+}
+
+// Every mainstream Linux build compiles USER_HZ as 100; on a kernel built with
+// another value the computed start time misses and the PID is skipped, never killed.
+const USER_HZ = 100;
+
+/**
+ * On Linux: turn field 22 of /proc/{pid}/stat (start time in clock ticks since
+ * boot) into an epoch timestamp.
+ * Returns null when the file, the field or the boot time is unavailable.
+ */
+function getProcStartTimeMs(pid: number): number | null {
+  let ticks: number;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    // Field 2 is the executable name in parentheses and may itself hold spaces
+    // and ')', so the remaining fields are split after the last ')'.
+    const fields = stat
+      .slice(stat.lastIndexOf(")") + 1)
+      .trim()
+      .split(/\s+/);
+    // fields[0] is field 3 (state), so field 22 (starttime) sits at index 19.
+    ticks = Number(fields[19]);
+  } catch {
+    return null;
+  }
+  if (!Number.isFinite(ticks) || ticks < 0) return null;
+
+  const bootMs = getBootTimeMs();
+  if (bootMs === null) return null;
+  return bootMs + (ticks / USER_HZ) * 1000;
+}
+
+/**
+ * Epoch milliseconds of the last boot, from the `btime` line of /proc/stat
+ * (whole seconds) or, where that is unreadable, from the uptime the kernel
+ * reports now.  Returns null when neither answers.
+ */
+function getBootTimeMs(): number | null {
+  try {
+    const match = readFileSync("/proc/stat", "utf-8").match(/^btime\s+(\d+)$/m);
+    if (match?.[1]) {
+      const seconds = Number(match[1]);
+      if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+    }
+  } catch {
+    // Fall through to the uptime reading.
+  }
+  try {
+    const seconds = uptime();
+    if (Number.isFinite(seconds) && seconds > 0) return Date.now() - seconds * 1000;
+  } catch {
+    // Neither source answered.
+  }
+  return null;
 }
 
 /**
@@ -123,26 +192,21 @@ function isOrphan(pid: number, spawnedAt: string): boolean {
     return Math.abs(procMs - storedMs) < 5000;
   }
 
-  // Linux: prefer /proc/{pid}/stat tick comparison.
-  // We store the tick at reaper-check time and compare with what was stored
-  // previously — actually we don't store ticks, so instead we cross-check by
-  // also trying ps lstart.
+  // `ps` first: it is the only start-time source on macOS and the BSDs.
+  // Both sources are compared with the same 5-second slop, which covers the
+  // 1-second resolution of `ps -o lstart`, the whole-second /proc boot time and
+  // the delay between the spawn and the write of pid.json.
   const lstartMs = getPsLstart(pid);
   if (lstartMs !== null) {
     return Math.abs(lstartMs - storedMs) < 5000;
   }
 
-  // Fallback: if we have a /proc tick but cannot convert it to wall time,
-  // we use a heuristic: trust the PID is an orphan when the stored spawnedAt
-  // is within the last 24 hours (processes spawned further back almost
-  // certainly hit a reboot or enough PID cycling to be harmless).
-  const tick = getProcStatStartTick(pid);
-  if (tick !== null) {
-    const ageMs = Date.now() - storedMs;
-    return ageMs > 0 && ageMs < 24 * 60 * 60 * 1000;
+  const procStartMs = getProcStartTimeMs(pid);
+  if (procStartMs !== null) {
+    return Math.abs(procStartMs - storedMs) < 5000;
   }
 
-  // No information — conservatively skip.
+  // No start time from any source — skip rather than risk a reused PID.
   return false;
 }
 

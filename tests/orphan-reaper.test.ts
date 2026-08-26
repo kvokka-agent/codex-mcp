@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reapOrphanProcesses } from "../src/session/orphan-reaper.js";
 import type { RecoveredSession } from "../src/persistence/index.js";
 
-const { execSyncMock, spawnMock, readFileSyncMock } = vi.hoisted(() => ({
+const { execSyncMock, spawnMock, readFileSyncMock, uptimeMock } = vi.hoisted(() => ({
   execSyncMock: vi.fn(),
   spawnMock: vi.fn(),
   readFileSyncMock: vi.fn(),
+  uptimeMock: vi.fn(),
 }));
 
 vi.mock("node:child_process", async () => {
@@ -18,9 +19,36 @@ vi.mock("node:fs", async () => {
   return { ...actual, default: actual, readFileSync: readFileSyncMock };
 });
 
+vi.mock("node:os", async () => {
+  const actual = await vi.importActual<typeof import("node:os")>("node:os");
+  return { ...actual, default: actual, uptime: uptimeMock };
+});
+
 const realPlatform = process.platform;
 const dead = new Set<number>();
 const killCalls: Array<[number, string | number | undefined]> = [];
+
+const BTIME_SECONDS = 1_700_000_000;
+
+/** A /proc/{pid}/stat line whose field 22 (starttime) holds `startTicks`. */
+function procStat(pid: number, startTicks: number): string {
+  const betweenFlagsAndStarttime = Array.from({ length: 12 }, () => "0").join(" ");
+  return `${pid} (codex exec) S 1 ${pid} ${pid} 0 -1 4194304 ${betweenFlagsAndStarttime} ${startTicks} 0 0\n`;
+}
+
+/** Serves /proc/stat with a fixed btime and /proc/{pid}/stat for the listed pids. */
+function procFiles(startTicksByPid: Record<number, number>, btime = `btime ${BTIME_SECONDS}\n`) {
+  return (path: string) => {
+    if (path === "/proc/stat") {
+      if (btime === "") throw new Error("EACCES");
+      return `cpu 1 2 3\n${btime}processes 42\n`;
+    }
+    const match = /^\/proc\/(\d+)\/stat$/.exec(path);
+    const ticks = match ? startTicksByPid[Number(match[1])] : undefined;
+    if (ticks === undefined) throw new Error("ENOENT");
+    return procStat(Number(match![1]), ticks);
+  };
+}
 
 function setPlatform(platform: string): void {
   Object.defineProperty(process, "platform", { value: platform, configurable: true });
@@ -72,6 +100,10 @@ beforeEach(() => {
   readFileSyncMock.mockReset();
   readFileSyncMock.mockImplementation(() => {
     throw new Error("ENOENT");
+  });
+  uptimeMock.mockReset();
+  uptimeMock.mockImplementation(() => {
+    throw new Error("uptime unavailable");
   });
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -146,39 +178,84 @@ describe("reapOrphanProcesses", () => {
     expect(summary).toEqual({ reaped: 0, alreadyDead: 0, skipped: 1 });
   });
 
-  it("falls back to the /proc start tick when ps is unavailable", async () => {
+  it("terminates a process whose /proc start tick matches when ps is unavailable", async () => {
     setPlatform("linux");
     execSyncMock.mockImplementation(() => {
       throw new Error("ps unavailable");
     });
-    readFileSyncMock.mockReturnValue(
-      `905 (codex exec) S 1 905 905 0 -1 4194304 ${Array.from({ length: 16 }, () => "0").join(" ")} 1234567 0 0`
-    );
+    readFileSyncMock.mockImplementation(procFiles({ 905: 12_345 }));
     killsOnSignal();
 
-    const summary = await reapOrphanProcesses([
-      session(905, new Date(Date.now() - 60_000).toISOString()),
-    ]);
+    const startMs = BTIME_SECONDS * 1000 + 123_450;
+    const summary = await reapOrphanProcesses([session(905, new Date(startMs).toISOString())]);
 
     expect(summary).toEqual({ reaped: 1, alreadyDead: 0, skipped: 0 });
     expect(readFileSyncMock).toHaveBeenCalledWith("/proc/905/stat", "utf-8");
+    expect(killCalls).toContainEqual([905, "SIGTERM"]);
   });
 
-  it("skips the /proc fallback when the recorded spawn time is older than a day", async () => {
+  it("skips when the /proc start tick disagrees with the recorded spawn time", async () => {
     setPlatform("linux");
     execSyncMock.mockImplementation(() => {
       throw new Error("ps unavailable");
     });
-    readFileSyncMock.mockReturnValue(
-      `906 (codex) S 1 906 906 0 -1 4194304 ${Array.from({ length: 16 }, () => "0").join(" ")} 999 0 0`
-    );
+    readFileSyncMock.mockImplementation(procFiles({ 906: 12_345 }));
+    killsOnSignal();
+
+    // The recorded spawn is a minute past the tick the kernel reports.
+    const startMs = BTIME_SECONDS * 1000 + 123_450 + 60_000;
+    const summary = await reapOrphanProcesses([session(906, new Date(startMs).toISOString())]);
+
+    expect(summary).toEqual({ reaped: 0, alreadyDead: 0, skipped: 1 });
+    expect(killCalls.every(([, signal]) => signal === 0)).toBe(true);
+  });
+
+  it("derives the boot time from the kernel uptime when /proc/stat is unreadable", async () => {
+    setPlatform("linux");
+    execSyncMock.mockImplementation(() => {
+      throw new Error("ps unavailable");
+    });
+    readFileSyncMock.mockImplementation(procFiles({ 913: 12_345 }, ""));
+    uptimeMock.mockReturnValue(3_600);
+    killsOnSignal();
+
+    const startMs = Date.now() - 3_600_000 + 123_450;
+    const summary = await reapOrphanProcesses([session(913, new Date(startMs).toISOString())]);
+
+    expect(summary).toEqual({ reaped: 1, alreadyDead: 0, skipped: 0 });
+    expect(killCalls).toContainEqual([913, "SIGTERM"]);
+  });
+
+  it("skips when the boot time is available from neither /proc/stat nor the uptime", async () => {
+    setPlatform("linux");
+    execSyncMock.mockImplementation(() => {
+      throw new Error("ps unavailable");
+    });
+    readFileSyncMock.mockImplementation(procFiles({ 914: 12_345 }, ""));
     killsOnSignal();
 
     const summary = await reapOrphanProcesses([
-      session(906, new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()),
+      session(914, new Date(BTIME_SECONDS * 1000 + 123_450).toISOString()),
     ]);
 
     expect(summary).toEqual({ reaped: 0, alreadyDead: 0, skipped: 1 });
+    expect(killCalls.every(([, signal]) => signal === 0)).toBe(true);
+  });
+
+  it("skips when /proc/{pid}/stat carries no start tick", async () => {
+    setPlatform("linux");
+    execSyncMock.mockImplementation(() => {
+      throw new Error("ps unavailable");
+    });
+    readFileSyncMock.mockImplementation((path: string) =>
+      path === "/proc/stat" ? `btime ${BTIME_SECONDS}\n` : "915 (codex exec) S 1 915 915\n"
+    );
+    killsOnSignal();
+
+    const summary = await reapOrphanProcesses([session(915, new Date().toISOString())]);
+
+    expect(summary).toEqual({ reaped: 0, alreadyDead: 0, skipped: 1 });
+    expect(killCalls.every(([, signal]) => signal === 0)).toBe(true);
   });
 
   it("force kills a process that ignores the graceful signal", async () => {
@@ -219,9 +296,9 @@ describe("reapOrphanProcesses", () => {
     expect(killCalls).toContainEqual([910, "SIGTERM"]);
   });
 
-  it("uses taskkill and the WMI creation date on Windows", async () => {
+  it("uses taskkill and the PowerShell creation time on Windows", async () => {
     setPlatform("win32");
-    execSyncMock.mockReturnValue("\r\r\nCreationDate=20240505100001.123456+000\r\r\n");
+    execSyncMock.mockReturnValue("2024-05-05T10:00:01.1234567Z\r\n");
     killsOnSignal();
     spawnMock.mockImplementation((_cmd: string, args: string[]) => {
       dead.add(Number(args[1]));
@@ -233,9 +310,10 @@ describe("reapOrphanProcesses", () => {
     ]);
 
     expect(summary).toEqual({ reaped: 1, alreadyDead: 0, skipped: 0 });
-    expect(execSyncMock.mock.calls[0]![0]).toBe(
-      'wmic process where "ProcessId=920" get CreationDate /value'
-    );
+    const command = execSyncMock.mock.calls[0]![0] as string;
+    expect(command).toContain("powershell.exe");
+    expect(command).toContain("Get-CimInstance Win32_Process -Filter 'ProcessId=920'");
+    expect(execSyncMock.mock.calls.every(([cmd]) => !String(cmd).startsWith("wmic"))).toBe(true);
     expect(spawnMock).toHaveBeenCalledWith(
       "taskkill",
       ["/PID", "920"],
@@ -243,13 +321,59 @@ describe("reapOrphanProcesses", () => {
     );
   });
 
-  it("skips on Windows when WMI reports no creation date", async () => {
+  it("falls back to wmic when powershell.exe is unavailable", async () => {
     setPlatform("win32");
-    execSyncMock.mockReturnValue("No Instance(s) Available.");
+    execSyncMock.mockImplementation((cmd: string) => {
+      if (cmd.startsWith("powershell.exe")) throw new Error("not recognized as a command");
+      return "\r\r\nCreationDate=20240505120001.123456+120\r\r\n";
+    });
+    killsOnSignal();
+    spawnMock.mockImplementation((_cmd: string, args: string[]) => {
+      dead.add(Number(args[1]));
+      return {};
+    });
+
+    // "+120" puts the stamp 2 hours ahead of UTC, so 12:00:01 local is 10:00:01Z.
+    const summary = await reapOrphanProcesses([
+      session(921, new Date("2024-05-05T10:00:00.000Z").toISOString()),
+    ]);
+
+    expect(summary).toEqual({ reaped: 1, alreadyDead: 0, skipped: 0 });
+    expect(execSyncMock.mock.calls[1]![0]).toBe(
+      'wmic process where "ProcessId=921" get CreationDate /value'
+    );
+    expect(spawnMock).toHaveBeenCalledWith(
+      "taskkill",
+      ["/PID", "921"],
+      expect.objectContaining({ windowsHide: true })
+    );
+  });
+
+  it("skips on Windows when neither powershell nor wmic reports a creation date", async () => {
+    setPlatform("win32");
+    execSyncMock.mockImplementation((cmd: string) =>
+      cmd.startsWith("powershell.exe") ? "\r\n" : "No Instance(s) Available."
+    );
     killsOnSignal();
 
     const summary = await reapOrphanProcesses([
-      session(921, new Date("2024-05-05T10:00:00.000Z").toISOString()),
+      session(922, new Date("2024-05-05T10:00:00.000Z").toISOString()),
+    ]);
+
+    expect(summary).toEqual({ reaped: 0, alreadyDead: 0, skipped: 1 });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("skips on Windows when wmic omits the UTC offset", async () => {
+    setPlatform("win32");
+    execSyncMock.mockImplementation((cmd: string) => {
+      if (cmd.startsWith("powershell.exe")) throw new Error("not recognized as a command");
+      return "\r\r\nCreationDate=20240505100001\r\r\n";
+    });
+    killsOnSignal();
+
+    const summary = await reapOrphanProcesses([
+      session(923, new Date("2024-05-05T10:00:00.000Z").toISOString()),
     ]);
 
     expect(summary).toEqual({ reaped: 0, alreadyDead: 0, skipped: 1 });

@@ -22,6 +22,7 @@ import {
   pruneSessionDirs,
   scanRecoverableSessions,
 } from "../src/persistence/index.js";
+import { getDirSize } from "../src/persistence/retention.js";
 
 let root: string;
 
@@ -137,6 +138,28 @@ describe("EventLog", () => {
     expect(readFileSync(filePath, "utf-8").trim().split("\n")).toHaveLength(1);
 
     log.destroy();
+  });
+
+  it("writes nothing when flushSync runs with an empty buffer", () => {
+    const filePath = join(root, "events.jsonl");
+    const log = new EventLog({ filePath, batchIntervalMs: 10 });
+
+    log.flushSync();
+    expect(existsSync(filePath)).toBe(false);
+
+    log.destroy();
+    expect(existsSync(filePath)).toBe(false);
+  });
+
+  it("cancels the pending batch timer on destroy", async () => {
+    const filePath = join(root, "events.jsonl");
+    const log = new EventLog({ filePath, batchIntervalMs: 10 });
+
+    log.append({ type: "progress" });
+    log.destroy();
+    await sleep(60);
+
+    expect(readFileSync(filePath, "utf-8")).toBe('{"seq":0,"type":"progress"}\n');
   });
 
   it("reports a failed flush on stderr instead of throwing", () => {
@@ -278,15 +301,46 @@ describe("scanRecoverableSessions", () => {
     expect(recovered!.pidInfo).toEqual({ pid: 77, spawnedAt: "2024-01-01T00:00:00.000Z" });
   });
 
-  it("drops the torn tail of events.jsonl and everything after it", () => {
+  it("drops the torn tail of events.jsonl without reporting damage", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     writeSession("sess_torn", {
       meta: { sessionId: "sess_torn", status: "running" },
-      events: '{"seq":0}\n{"seq":1}\n{"seq":2,"partia\n{"seq":3}\n',
+      events: '{"seq":0}\n{"seq":1}\n{"seq":2,"partia',
     });
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
     expect(recovered!.events.map((e) => e.seq)).toEqual([0, 1]);
     expect(recovered!.lastSeq).toBe(1);
+    expect(recovered!.corruptEventLines).toBe(0);
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps the events after a corrupt line in the middle and reports it", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    writeSession("sess_corrupt", {
+      meta: { sessionId: "sess_corrupt", status: "running" },
+      events: '{"seq":0}\n{"seq":1,"cut\n{"seq":2}\n{"seq":3}\n',
+    });
+
+    const [recovered] = scanRecoverableSessions(join(root, "sessions"));
+    expect(recovered!.events.map((e) => e.seq)).toEqual([0, 2, 3]);
+    expect(recovered!.lastSeq).toBe(3);
+    expect(recovered!.corruptEventLines).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[recovery] Session sess_corrupt: skipped 1 corrupt line(s) in events.jsonl"
+    );
+  });
+
+  it("counts only the corrupt middle lines when the tail is torn as well", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    writeSession("sess_both", {
+      meta: { sessionId: "sess_both", status: "running" },
+      events: '{"seq":0}\nnot json\n{"seq":1}\n{"seq":2,"tor',
+    });
+
+    const [recovered] = scanRecoverableSessions(join(root, "sessions"));
+    expect(recovered!.events.map((e) => e.seq)).toEqual([0, 1]);
+    expect(recovered!.corruptEventLines).toBe(1);
   });
 
   it("ignores lines without a numeric seq and reports -1 when nothing survives", () => {
@@ -418,6 +472,23 @@ describe("pruneSessionDirs", () => {
     expect(existsSync(c)).toBe(true);
   });
 
+  it("counts files in nested subdirectories toward maxDiskBytes", () => {
+    const a = makeSession("a", iso(3_000));
+    mkdirSync(join(a, "artifacts", "deep"), { recursive: true });
+    writeFileSync(join(a, "artifacts", "deep", "blob.bin"), "x".repeat(1_000));
+    const b = makeSession("b", iso(1_000), 100);
+
+    expect(
+      pruneSessionDirs(join(root, "sessions"), {
+        maxAgeMs: 60_000,
+        maxCount: 100,
+        maxDiskBytes: 1_000,
+      })
+    ).toBe(1);
+    expect(existsSync(a)).toBe(false);
+    expect(existsSync(b)).toBe(true);
+  });
+
   it("falls back to the directory mtime when meta.json is unusable", () => {
     const stale = makeSession("stale", null);
     const old = new Date(Date.now() - 120_000);
@@ -470,5 +541,64 @@ describe("pruneSessionDirs", () => {
 
     expect(pruneSessionDirs(join(root, "sessions"), { maxAgeMs: 60_000 })).toBe(1);
     expect(existsSync(dir)).toBe(false);
+  });
+});
+
+describe("getDirSize", () => {
+  it("sums every file of the tree, at any depth", () => {
+    const dir = join(root, "session");
+    mkdirSync(join(dir, "sub", "deeper"), { recursive: true });
+    writeFileSync(join(dir, "events.jsonl"), "x".repeat(10));
+    writeFileSync(join(dir, "sub", "part.bin"), "x".repeat(100));
+    writeFileSync(join(dir, "sub", "deeper", "blob.bin"), "x".repeat(1_000));
+
+    expect(getDirSize(dir)).toBe(1_110);
+  });
+
+  it("counts nothing for a directory removed by a concurrent prune", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(getDirSize(join(root, "gone"))).toBe(0);
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("counts nothing for a path that is not a directory", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const file = join(root, "meta.json");
+    writeFileSync(file, "{}");
+
+    expect(getDirSize(join(file, "inside"))).toBe(0);
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("reports an unreadable subdirectory on stderr and keeps counting the rest", () => {
+    const dir = join(root, "session");
+    const locked = join(dir, "locked");
+    mkdirSync(locked, { recursive: true });
+    writeFileSync(join(locked, "blob.bin"), "x".repeat(500));
+    writeFileSync(join(dir, "events.jsonl"), "x".repeat(42));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    chmodSync(locked, 0o000);
+    try {
+      expect(getDirSize(dir)).toBe(42);
+    } finally {
+      chmodSync(locked, 0o755);
+    }
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`[retention] Failed to size ${locked}`),
+      expect.anything()
+    );
+  });
+
+  it("leaves symlinked entries uncounted", () => {
+    const dir = join(root, "session");
+    mkdirSync(dir, { recursive: true });
+    const target = join(root, "outside.bin");
+    writeFileSync(target, "x".repeat(700));
+    symlinkSync(target, join(dir, "link.bin"));
+    symlinkSync(join(root, "nowhere"), join(dir, "dangling"));
+
+    expect(getDirSize(dir)).toBe(0);
   });
 });

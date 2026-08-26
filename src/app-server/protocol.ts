@@ -48,6 +48,21 @@ export interface InitializeResult {
 // ── Shared enums / aliases ─────────────────────────────────────────
 
 export type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
+
+/**
+ * Object branch of the schema's `AskForApproval` union: switches individual
+ * approval channels off instead of naming a policy preset.
+ */
+export interface AskForApprovalReject {
+  reject: {
+    mcp_elicitations: boolean;
+    rules: boolean;
+    sandbox_approval: boolean;
+  };
+}
+
+/** Schema `AskForApproval`: a policy preset string, or the `reject` object. */
+export type AskForApproval = ApprovalPolicy | AskForApprovalReject;
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type Personality = "none" | "friendly" | "pragmatic";
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -66,7 +81,7 @@ export interface ThreadStartParams {
   cwd?: string | null;
   model?: string | null;
   modelProvider?: string | null;
-  approvalPolicy?: ApprovalPolicy | null;
+  approvalPolicy?: AskForApproval | null;
   /**
    * v2 schema: sandbox mode string enum ("read-only" | "workspace-write" | "danger-full-access")
    * (Not the SandboxPolicy object used by turn/start's sandboxPolicy.)
@@ -74,6 +89,8 @@ export interface ThreadStartParams {
   sandbox?: SandboxMode | null;
   personality?: Personality | null;
   ephemeral?: boolean | null;
+  /** Caller identity recorded on the thread; free-form string chosen by the client. */
+  serviceName?: string | null;
   baseInstructions?: string | null;
   developerInstructions?: string | null;
   config?: Record<string, unknown> | null;
@@ -93,7 +110,7 @@ export type ThreadStartResult = ThreadStartResultV1 | ThreadStartResultV2;
 
 export interface ThreadForkParams {
   threadId: string;
-  approvalPolicy?: ApprovalPolicy | null;
+  approvalPolicy?: AskForApproval | null;
   baseInstructions?: string | null;
   developerInstructions?: string | null;
   model?: string | null;
@@ -115,7 +132,7 @@ export type ThreadForkResult = ThreadForkResultV1 | ThreadForkResultV2;
 
 export interface ThreadResumeParams {
   threadId: string;
-  approvalPolicy?: ApprovalPolicy | null;
+  approvalPolicy?: AskForApproval | null;
   baseInstructions?: string | null;
   developerInstructions?: string | null;
   model?: string | null;
@@ -205,7 +222,7 @@ export interface TurnStartParams {
   threadId: string;
   input: UserInput[];
   model?: string | null;
-  approvalPolicy?: ApprovalPolicy | null;
+  approvalPolicy?: AskForApproval | null;
   sandboxPolicy?: SandboxPolicy | null;
   personality?: Personality | null;
   effort?: ReasoningEffort | null;
@@ -365,6 +382,11 @@ export interface ThreadStateNotificationParams {
   threadId: string;
 }
 
+export interface ThreadNameUpdatedNotificationParams {
+  threadId: string;
+  threadName?: string | null;
+}
+
 export interface TurnNotificationParams {
   threadId: string;
   turn: unknown;
@@ -375,6 +397,49 @@ export interface ErrorNotificationParams {
   turnId: string;
   error: unknown;
   willRetry: boolean;
+}
+
+export type ThreadActiveFlag = "waitingOnApproval" | "waitingOnUserInput";
+
+export type ThreadStatus =
+  | { type: "notLoaded" }
+  | { type: "idle" }
+  | { type: "systemError" }
+  | { type: "active"; activeFlags: ThreadActiveFlag[] };
+
+export interface ThreadStatusChangedNotificationParams {
+  threadId: string;
+  status: ThreadStatus;
+}
+
+/** thread/compacted — schema title ContextCompactedNotification. */
+export interface ContextCompactedNotificationParams {
+  threadId: string;
+  turnId: string;
+}
+
+export interface TextPosition {
+  /** 1-based line number. */
+  line: number;
+  /** 1-based column number (in Unicode scalar values). */
+  column: number;
+}
+
+export interface TextRange {
+  start: TextPosition;
+  end: TextPosition;
+}
+
+export interface DeprecationNoticeNotificationParams {
+  summary: string;
+  details?: string | null;
+}
+
+export interface ConfigWarningNotificationParams {
+  summary: string;
+  details?: string | null;
+  path?: string | null;
+  range?: TextRange | null;
 }
 
 // ── Legacy Approval (deprecated) ───────────────────────────────────
@@ -413,6 +478,9 @@ export const Methods = {
   // Server → Client notifications
   ERROR: "error",
   THREAD_STARTED: "thread/started",
+  THREAD_STATUS_CHANGED: "thread/status/changed",
+  THREAD_CLOSED: "thread/closed",
+  THREAD_COMPACTED: "thread/compacted",
   THREAD_ARCHIVED: "thread/archived",
   THREAD_UNARCHIVED: "thread/unarchived",
   THREAD_NAME_UPDATED: "thread/name/updated",
@@ -423,7 +491,6 @@ export const Methods = {
   TURN_PLAN_UPDATED: "turn/plan/updated",
   ITEM_STARTED: "item/started",
   ITEM_COMPLETED: "item/completed",
-  RAW_RESPONSE_ITEM_COMPLETED: "rawResponseItem/completed",
   AGENT_MESSAGE_DELTA: "item/agentMessage/delta",
   COMMAND_OUTPUT_DELTA: "item/commandExecution/outputDelta",
   COMMAND_TERMINAL_INTERACTION: "item/commandExecution/terminalInteraction",
@@ -438,5 +505,13 @@ export const Methods = {
   FUZZY_FILE_SEARCH_SESSION_COMPLETED: "fuzzyFileSearch/sessionCompleted",
   WINDOWS_WORLD_WRITABLE_WARNING: "windows/worldWritableWarning",
   ACCOUNT_LOGIN_COMPLETED: "account/login/completed",
+  DEPRECATION_NOTICE: "deprecationNotice",
+  CONFIG_WARNING: "configWarning",
+
+  // Synthetic methods — not app-server protocol methods.
+  // ExecClient translates `codex exec --json` event types into notifications so
+  // both clients feed one handler; these two have no app-server counterpart.
+  // tests/protocol-schema.test.ts lists them as the only allowed non-schema values.
+  RAW_RESPONSE_ITEM_COMPLETED: "rawResponseItem/completed",
   SESSION_CONFIGURED: "sessionConfigured",
 } as const;
