@@ -142,9 +142,23 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
       this.emit("spawn", proc.pid, new Date().toISOString());
     }
 
-    // Initialize handshake
+    // Initialize handshake.
+    //
+    // `experimentalApi` defaults to false (codex-schema/v1/InitializeParams.json →
+    // InitializeCapabilities), and off it suppresses two messages this codebase
+    // serves end to end: the `item/tool/requestUserInput` server request
+    // (codex-schema/ServerRequest.json) that drives the whole user-input tract,
+    // and the `item/plan/delta` notification
+    // (codex-schema/v2/PlanDeltaNotification.json).
+    //
+    // Every EXPERIMENTAL marker in the bundle sits on a whole method, a whole
+    // notification, a new `ThreadItem` union variant (PlanThreadItem) or an
+    // optional outgoing field, so the flag only adds messages — it rewrites no
+    // field this client already reads. The one experimental field on an outgoing
+    // message, `TurnStartParams.collaborationMode`, is never populated here.
     const result = await this.request<InitializeResult>(Methods.INITIALIZE, {
       clientInfo: { name: "codex-mcp", version: CLIENT_VERSION },
+      capabilities: { experimentalApi: true },
     } satisfies InitializeParams);
 
     return result;

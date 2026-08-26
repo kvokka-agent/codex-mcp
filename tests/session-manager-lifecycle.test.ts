@@ -542,11 +542,20 @@ describe("SessionManager session operations", () => {
     expect(manager.getSession(started.sessionId).status).toBe("cancelled");
   });
 
-  it("takes the turn id from a legacy turn/start response", async () => {
+  it("takes the turn id from the turn/start response", async () => {
+    client.turnStartResult = { turn: { id: "turn_v2" } };
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    expect(started.progress.activeTurnId).toBe("turn_v2");
+  });
+
+  it("keeps no active turn when turn/start puts the id outside `turn`", async () => {
+    // turn/steer is the one response of the bundle answering a bare `turnId`
+    // (codex-schema/v2/TurnSteerResponse.json), and this server never sends it.
     client.turnStartResult = { turnId: "turn_v1" };
     const started = await manager.createSession("hi", workspace, {}, "medium");
 
-    expect(started.progress.activeTurnId).toBe("turn_v1");
+    expect(started.progress.activeTurnId).toBeUndefined();
   });
 
   it("keeps no active turn when turn/start answers with a non-object", async () => {
@@ -985,8 +994,21 @@ describe("SessionManager notification handling", () => {
   it("adopts the thread id the thread/started notification carries", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
 
+    // Thread.status is a ThreadStatus object, not a string
+    // (codex-schema/v2/ThreadStartedNotification.json → Thread.status).
     client.emitNotification(Methods.THREAD_STARTED, {
-      thread: { id: "thread_real", status: "active" },
+      thread: {
+        id: "thread_real",
+        status: { type: "active", activeFlags: [] },
+        cliVersion: "0.0.0",
+        createdAt: 1,
+        cwd: workspace,
+        modelProvider: "openai",
+        preview: "hi",
+        source: "appServer",
+        turns: [],
+        updatedAt: 1,
+      },
     });
 
     const info = manager.getSession(started.sessionId, true) as { threadId?: string };
@@ -997,6 +1019,32 @@ describe("SessionManager notification handling", () => {
     );
     expect((event!.data as Record<string, unknown>).threadId).toBe("thread_real");
     expect((event!.data as Record<string, unknown>).status).toBe("active");
+  });
+
+  it("reports the idle variant of a thread/started status", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.THREAD_STARTED, {
+      thread: { id: started.threadId, status: { type: "idle" } },
+    });
+
+    const poll = manager.pollEvents(started.sessionId, 0, 50);
+    const event = poll.events.find(
+      (e) => (e.data as Record<string, unknown>)?.method === Methods.THREAD_STARTED
+    );
+    expect((event!.data as Record<string, unknown>).status).toBe("idle");
+  });
+
+  it("reports no status for a thread/started that carries no thread", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.THREAD_STARTED, { threadId: started.threadId });
+
+    const poll = manager.pollEvents(started.sessionId, 0, 50);
+    const event = poll.events.find(
+      (e) => (e.data as Record<string, unknown>)?.method === Methods.THREAD_STARTED
+    );
+    expect((event!.data as Record<string, unknown>).status).toBeUndefined();
   });
 
   it("drops a command output delta that is nothing but shell profile noise", async () => {
@@ -1066,6 +1114,69 @@ describe("SessionManager notification handling", () => {
     });
 
     expect(manager.getLastResult(started.sessionId)?.text).toBe("the answer");
+  });
+
+  it("keeps a completed plan item as progress and out of the final answer", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    // PlanThreadItem requires [id, text, type] (codex-schema/v2/ItemCompletedNotification.json
+    // → ThreadItem), and reaches this server because the client asks for the
+    // experimental API.
+    client.emitNotification(Methods.ITEM_COMPLETED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      item: { id: "item_plan", type: "plan", text: "1. read the file\n2. patch it" },
+    });
+    client.emitNotification(Methods.ITEM_COMPLETED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      item: { id: "item_1", type: "agentMessage", text: "the answer" },
+    });
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { id: "turn_1", status: "completed", items: [] },
+    });
+
+    const events = manager.pollEvents(started.sessionId, 0, 50).events;
+    const planEvent = events.find(
+      (e) => ((e.data as Record<string, unknown>)?.item as { id?: string })?.id === "item_plan"
+    );
+    expect(planEvent!.type).toBe("progress");
+    expect(manager.getLastResult(started.sessionId)?.text).toBe("the answer");
+  });
+
+  it("keeps the final answer of the ThreadItem stream when a raw response item repeats it", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.ITEM_COMPLETED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      item: { id: "item_1", type: "agentMessage", text: "the answer" },
+    });
+    // MessageResponseItem requires [content, role, type] and keeps its text in
+    // content[].text — no `agentMessage` type and no top-level `text`
+    // (codex-schema/v2/RawResponseItemCompletedNotification.json → ResponseItem).
+    client.emitNotification(Methods.RAW_RESPONSE_ITEM_COMPLETED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      item: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "a lower-level copy" }],
+      },
+    });
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { id: "turn_1", status: "completed", items: [] },
+    });
+
+    expect(manager.getLastResult(started.sessionId)?.text).toBe("the answer");
+    const rawEvent = manager
+      .pollEvents(started.sessionId, 0, 50)
+      .events.find(
+        (e) => (e.data as Record<string, unknown>)?.method === Methods.RAW_RESPONSE_ITEM_COMPLETED
+      );
+    expect(rawEvent!.type).toBe("progress");
   });
 
   it("reads the final message as structured output when the turn asked for a schema", async () => {
@@ -1193,28 +1304,22 @@ describe("SessionManager notification handling", () => {
     });
   });
 
-  it("reads a fractional progress value as a percentage", async () => {
+  it("reports the progress a tool-call progress notification carries and no percentage", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
 
+    // McpToolCallProgressNotification carries [itemId, message, threadId, turnId]
+    // (codex-schema/ServerNotification.json). No notification of the bundle carries
+    // a completion percentage, so `progress` reports no such field.
     client.emitNotification(Methods.MCP_TOOL_PROGRESS, {
       itemId: "item_1",
+      message: "fetching",
+      threadId: started.threadId,
       turnId: "turn_1",
-      progress: 0.25,
     });
 
-    expect(manager.getProgress(started.sessionId).percent).toBe(25);
-  });
-
-  it("reads a whole progress value as a percentage", async () => {
-    const started = await manager.createSession("hi", workspace, {}, "medium");
-
-    client.emitNotification(Methods.MCP_TOOL_PROGRESS, {
-      itemId: "item_1",
-      turnId: "turn_1",
-      percent: 42,
-    });
-
-    expect(manager.getProgress(started.sessionId).percent).toBe(42);
+    const progress = manager.getProgress(started.sessionId);
+    expect(progress.lastMethod).toBe(Methods.MCP_TOOL_PROGRESS);
+    expect(Object.keys(progress)).not.toContain("percent");
   });
 
   it("merges reported token usage without letting it become the last method", async () => {
@@ -1222,10 +1327,44 @@ describe("SessionManager notification handling", () => {
 
     client.emitNotification(Methods.REASONING_TEXT_DELTA, { turnId: "turn_mock", delta: "a" });
     client.emitNotification(Methods.THREAD_TOKEN_USAGE_UPDATED, {
-      usage: { inputTokens: 10, outputTokens: 4 },
+      threadId: started.threadId,
+      turnId: "turn_mock",
+      tokenUsage: {
+        total: {
+          cachedInputTokens: 0,
+          inputTokens: 10,
+          outputTokens: 4,
+          reasoningOutputTokens: 0,
+          totalTokens: 14,
+        },
+        last: {
+          cachedInputTokens: 0,
+          inputTokens: 10,
+          outputTokens: 4,
+          reasoningOutputTokens: 0,
+          totalTokens: 14,
+        },
+      },
     });
     client.emitNotification(Methods.THREAD_TOKEN_USAGE_UPDATED, {
-      usage: { outputTokens: 9, totalTokens: 19 },
+      threadId: started.threadId,
+      turnId: "turn_mock",
+      tokenUsage: {
+        total: {
+          cachedInputTokens: 0,
+          inputTokens: 10,
+          outputTokens: 9,
+          reasoningOutputTokens: 3,
+          totalTokens: 19,
+        },
+        last: {
+          cachedInputTokens: 0,
+          inputTokens: 0,
+          outputTokens: 5,
+          reasoningOutputTokens: 3,
+          totalTokens: 5,
+        },
+      },
     });
 
     const progress = manager.getProgress(started.sessionId);
@@ -1234,13 +1373,60 @@ describe("SessionManager notification handling", () => {
     expect(progress.phase).toBe("reasoning");
   });
 
+  it("keeps the token counters a tokenUsage update reports after the turn completed", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    // `usage` on a completed turn is ExecClient's addition, carrying the `usage`
+    // of the exec `turn.completed` record (src/app-server/exec-client.ts).
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: {
+        id: "turn_1",
+        status: "completed",
+        items: [],
+        usage: { input_tokens: 100, cached_input_tokens: 0, output_tokens: 20 },
+      },
+    });
+    client.emitNotification(Methods.THREAD_TOKEN_USAGE_UPDATED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      tokenUsage: {
+        total: {
+          cachedInputTokens: 0,
+          inputTokens: 300,
+          outputTokens: 40,
+          reasoningOutputTokens: 10,
+          totalTokens: 340,
+        },
+        last: {
+          cachedInputTokens: 0,
+          inputTokens: 200,
+          outputTokens: 20,
+          reasoningOutputTokens: 10,
+          totalTokens: 220,
+        },
+      },
+    });
+
+    expect(manager.getProgress(started.sessionId).tokens).toEqual({
+      input: 300,
+      output: 40,
+      total: 340,
+    });
+  });
+
   it("ignores a turn start and an error that arrive after cancellation", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
     await manager.cancelSession(started.sessionId, "by test");
     const before = manager.pollEvents(started.sessionId, 0, 50).events.length;
 
     client.emitNotification(Methods.TURN_STARTED, { turn: { id: "turn_late", status: "active" } });
-    client.emitNotification(Methods.ERROR, { message: "late boom", willRetry: false });
+    client.emitNotification(Methods.ERROR, {
+      threadId: started.threadId,
+      turnId: "turn_late",
+      error: { message: "late boom" },
+      willRetry: false,
+    });
 
     const after = manager.pollEvents(started.sessionId, 0, 50);
     expect(after.events.length).toBe(before);
@@ -1269,7 +1455,7 @@ describe("SessionManager notification handling", () => {
 
     const progress = manager.getProgress(started.sessionId);
     expect(progress.lastMethod).toBe(Methods.MCP_TOOL_PROGRESS);
-    expect(progress.percent).toBeUndefined();
+    expect(progress.tokens).toBeUndefined();
   });
 
   it("turns a subprocess error into a terminal session error", async () => {

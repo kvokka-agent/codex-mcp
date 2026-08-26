@@ -128,7 +128,6 @@ export function createServer(
     activeTurnId: z.string().optional(),
     pendingActionCount: z.number().int(),
     lastMethod: z.string().optional(),
-    percent: z.number().optional(),
     tokens: z
       .object({
         input: z.number().optional(),

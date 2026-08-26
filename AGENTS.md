@@ -43,6 +43,9 @@ If step 3 shows changes, continue with the full checklist in `docs/DESIGN.md` an
 
 ### Codex CLI And Schema Maintenance Rules
 
+- The schema decides. `codex-schema/` records what actually arrives on the wire; `src/app-server/protocol.ts` is only this repo's model of it, and the model is the side that drifts.
+- Before branching on a field of a protocol message, open its definition in `codex-schema/` and read whether the field exists and whether `required` lists it. `AgentMessageThreadItem` requires `id`, `text`, `type` and carries no `status`, so a `status === "completed"` check there matched nothing and returned every foreground answer empty.
+- `tests/protocol-schema.test.ts` holds the two sides together: it reads method names and parameter shapes from `codex-schema/*.json` and the types from the TypeScript compiler, and fails on drift. Methods the schema does not carry are listed there with their reason. A new protocol field gets a check added to that file.
 - Codex CLI upgrades are protocol upgrades: `codex-mcp` spawns `codex app-server` and speaks its JSON-RPC wire format.
 - Any time `codex --version` changes (including pre-releases), re-run the One-Shot Update Commands to detect protocol/schema drift.
 - If `codex-schema/` has diffs, treat it as the source of truth and follow the full upgrade playbook in `docs/DESIGN.md`.
@@ -185,7 +188,9 @@ These patterns are non-negotiable guardrails:
 - If `replyToSession` fails during `turnStart`, restore session state to `error`.
 - Serialize `-c key=value` config values consistently: primitives via `String()`, objects/arrays via `JSON.stringify()`.
 - Call `.unref()` on cleanup/shutdown/force-kill timers to avoid blocking Node.js exit.
-- Keep every persistence call best-effort: wrap it in try/catch so a read-only or locked `STATE_DIR` degrades persistence instead of failing the tool call.
+- Pass through what a dependency answered. The failure surfaces at the point it happened instead of turning into a plausible value: an unreadable directory is not an empty one, an `EPERM` from `process.kill(pid, 0)` means the process lives under another user, and a turn that produced no recognized event did not succeed.
+- Ask a path for the value you need rather than for its existence: `existsSync` answers `false` on `EACCES` too, so the check itself hides the permission denial.
+- Best-effort covers work whose outcome the caller cannot act on: clearing a timer, signalling an already-dead process, losing a race with a concurrent unlink. A failure the caller would act on stays visible. Keep every persistence call in try/catch so a read-only or locked `STATE_DIR` degrades persistence instead of failing the tool call, and log what failed with `console.error`.
 - Call `notifyWaiters(sessionId)` after any state change, or long-poll callers block until their `waitMs` budget expires.
 - Verify a PID's recorded spawn time before signalling it in the orphan reaper; an unverified PID is skipped, never killed.
 

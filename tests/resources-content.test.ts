@@ -29,6 +29,7 @@ vi.mock("child_process", async (importOriginal) => {
 });
 
 const { createServer } = await import("../src/server.js");
+const { Methods } = await import("../src/app-server/protocol.js");
 const { registerResources, RESOURCE_URIS } = await import("../src/resources/register-resources.js");
 const { SessionManager } = await import("../src/session/manager.js");
 const {
@@ -80,8 +81,126 @@ function scanEnvVarNames(dir: string, found = new Set<string>()): Set<string> {
 
 const SRC_ENV_VARS = scanEnvVarNames(fileURLToPath(new URL("../src", import.meta.url)));
 
+type SchemaNode = Record<string, unknown>;
+
+/**
+ * Every message of the vendored codex-schema bundle, as name -> its property names.
+ *
+ * Keyed by message rather than pooled into one bag of names: `output` is a property of
+ * several exec payloads and of no `Turn`, so a document claiming `turn.output` has to be
+ * measured against `Turn` alone.
+ */
+function loadProtocolMessages(
+  dir: string,
+  index = new Map<string, Set<string>>()
+): Map<string, Set<string>> {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) loadProtocolMessages(full, index);
+    else if (entry.name.endsWith(".json")) {
+      const doc = JSON.parse(readFileSync(full, "utf8")) as SchemaNode;
+      indexMessage(doc, typeof doc.title === "string" ? doc.title : undefined, index);
+    }
+  }
+  return index;
+}
+
+function indexMessage(
+  node: unknown,
+  name: string | undefined,
+  index: Map<string, Set<string>>
+): void {
+  if (Array.isArray(node)) {
+    for (const item of node) indexMessage(item, name, index);
+    return;
+  }
+  if (!node || typeof node !== "object") return;
+  const record = node as SchemaNode;
+  const properties = record.properties as SchemaNode | undefined;
+  if (name && properties) {
+    const key = name.toLowerCase();
+    const known = index.get(key) ?? new Set<string>();
+    for (const property of Object.keys(properties)) known.add(property);
+    index.set(key, known);
+  }
+  for (const [key, value] of Object.entries(record)) {
+    if ((key === "definitions" || key === "properties") && value && typeof value === "object") {
+      for (const [child, body] of Object.entries(value as SchemaNode))
+        indexMessage(body, child, index);
+    } else {
+      indexMessage(value, name, index);
+    }
+  }
+}
+
+const PROTOCOL_MESSAGES = loadProtocolMessages(
+  fileURLToPath(new URL("../codex-schema", import.meta.url))
+);
+
+/** Schemas reachable at `node`, looking through arrays and anyOf/oneOf/allOf branches. */
+function branchesOf(node: unknown): SchemaNode[] {
+  if (!node || typeof node !== "object") return [];
+  const record = node as SchemaNode;
+  const branches = [record];
+  const nested = [
+    record.items,
+    ...(Array.isArray(record.anyOf) ? record.anyOf : []),
+    ...(Array.isArray(record.oneOf) ? record.oneOf : []),
+    ...(Array.isArray(record.allOf) ? record.allOf : []),
+  ];
+  for (const child of nested) branches.push(...branchesOf(child));
+  return branches;
+}
+
+/** Whether every segment of `path` names a property, segment by segment, under `node`. */
+function resolvesInSchema(node: unknown, path: string[]): boolean {
+  if (path.length === 0) return true;
+  for (const branch of branchesOf(node)) {
+    const properties = branch.properties as SchemaNode | undefined;
+    const child = properties?.[path[0]];
+    if (child !== undefined && resolvesInSchema(child, path.slice(1))) return true;
+  }
+  return false;
+}
+
+/** Whether `path` names a field of a codex-schema message, following it segment by segment. */
+function resolvesInProtocol(path: string[]): boolean {
+  const [root, ...rest] = path;
+  let owner = PROTOCOL_MESSAGES.get(root.toLowerCase());
+  if (!owner) return false;
+  for (const segment of rest) {
+    if (!owner?.has(segment)) return false;
+    owner = PROTOCOL_MESSAGES.get(segment.toLowerCase());
+  }
+  return true;
+}
+
+/** One file of the vendored bundle, for a claim that names a single message. */
+function readSchemaFile(file: string): SchemaNode {
+  return JSON.parse(
+    readFileSync(fileURLToPath(new URL(`../codex-schema/${file}`, import.meta.url)), "utf8")
+  ) as SchemaNode;
+}
+
+/** The fenced JSON examples of a document, parsed. */
+function jsonExamples(text: string): SchemaNode[] {
+  return Array.from(
+    text.matchAll(/```json\n([\s\S]*?)```/g),
+    (match) => JSON.parse(match[1]) as SchemaNode
+  );
+}
+
+/** Backticked dotted paths of the documents: `turn.status`, `advanced.images`, `result.text`. */
+function documentedFieldPaths(text: string): string[][] {
+  return collectMatches(text, /`([a-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+)`/g).map((path) =>
+    path.split(".")
+  );
+}
+
 /** Minimal ICodexClient stand-in: SessionManager drives it, the tests read what it was asked. */
 class StubCodexClient extends EventEmitter {
+  /** Handler the manager registered, so a test can play backend notifications into it. */
+  private notify: ((method: string, params: unknown) => void) | null = null;
   destroyed = false;
   supportsTurnOverrides = true;
   childPid: number | undefined = undefined;
@@ -107,8 +226,14 @@ class StubCodexClient extends EventEmitter {
   destroy = async () => {
     this.destroyed = true;
   };
-  onNotification(): void {}
+  onNotification(handler: (method: string, params: unknown) => void): void {
+    this.notify = handler;
+  }
   onServerRequest(): void {}
+
+  notifyManager(method: string, params: unknown): void {
+    this.notify?.(method, params);
+  }
 }
 
 type OpenedServer = {
@@ -354,10 +479,10 @@ describe("resource documents served over MCP", () => {
     );
     const replyProps = Object.keys(tools.get("codex_reply")!.inputSchema!.properties ?? {});
 
-    expect(configText).toContain("`codex_reply.outputSchema` is top-level.");
+    expect(configText).toContain(
+      "`codex_reply.outputSchema` is top-level; `codex` takes the same schema as `advanced.outputSchema`."
+    );
     expect(replyProps).toContain("outputSchema");
-
-    expect(configText).toContain("`codex.outputSchema` lives under `advanced.outputSchema`.");
     expect(codexProps).not.toContain("outputSchema");
     expect(codexAdvancedProps).toContain("outputSchema");
   });
@@ -568,6 +693,190 @@ describe("resource documents served over MCP", () => {
       `Running/waiting sessions are auto-cleaned after ${DEFAULT_RUNNING_CLEANUP_MS / 60_000} minutes`
     );
     expect(gotchas).toContain(`retained for about ${DEFAULT_TERMINAL_CLEANUP_MS / 60_000} minutes`);
+  });
+
+  it("resolves every documented field path in a tool schema or in the codex-schema bundle", () => {
+    /** Subschemas of the served tool schemas, keyed by the tool and by the property that opens them. */
+    const byRoot = new Map<string, unknown[]>();
+    const register = (key: string, node: unknown): void => {
+      byRoot.set(key, [...(byRoot.get(key) ?? []), node]);
+    };
+    const walk = (node: unknown): void => {
+      for (const branch of branchesOf(node)) {
+        const properties = branch.properties as SchemaNode | undefined;
+        if (!properties) continue;
+        for (const [name, child] of Object.entries(properties)) {
+          register(name, child);
+          walk(child);
+        }
+      }
+    };
+    for (const [name, tool] of tools) {
+      register(name, tool.inputSchema);
+      register(name, tool.outputSchema);
+      walk(tool.inputSchema);
+      walk(tool.outputSchema);
+    }
+
+    const viaProtocol: string[] = [];
+    const unresolved: string[] = [];
+    const paths = documentedFieldPaths(allText);
+    for (const path of paths) {
+      const roots = byRoot.get(path[0]) ?? [];
+      if (roots.some((root) => resolvesInSchema(root, path.slice(1)))) continue;
+      if (resolvesInProtocol(path)) viaProtocol.push(path.join("."));
+      else unresolved.push(path.join("."));
+    }
+
+    expect(paths.length).toBeGreaterThan(20);
+    expect(
+      unresolved,
+      "documented field paths that neither a tool schema nor codex-schema defines"
+    ).toEqual([]);
+    // The bundle has to be a live side of the comparison: the documents describe backend
+    // messages, and a claim about one must fail here once the schema stops carrying it.
+    expect(
+      viaProtocol.length,
+      "no documented path was checked against codex-schema"
+    ).toBeGreaterThan(0);
+  });
+
+  it("leaves an app-server turn no text field to promise", async () => {
+    const client = new StubCodexClient();
+    const manager = new SessionManager({
+      disableCleanup: true,
+      createClient: () => client as never,
+    });
+
+    try {
+      const { sessionId } = await manager.createSession("hi", process.cwd(), {}, "low");
+      client.notifyManager(Methods.ITEM_COMPLETED, {
+        threadId: "thread_stub",
+        turnId: "turn_stub",
+        item: { id: "item_1", type: "agentMessage", text: "the answer" },
+      });
+      // `turn/completed` carrying a Turn exactly as codex-schema defines it: no text field.
+      client.notifyManager(Methods.TURN_COMPLETED, {
+        turn: { id: "turn_stub", items: [], status: "completed" },
+      });
+      const result = manager.getLastResult(sessionId)!;
+
+      expect(PROTOCOL_MESSAGES.get("turn")!.has("output")).toBe(false);
+      expect(result.text).toBe("the answer");
+      expect(result.output).toBeUndefined();
+      expect(docs.get(RESOURCE_URIS.gotchas)).toContain("`result.output` is exec-mode only");
+    } finally {
+      manager.destroy();
+    }
+  });
+
+  it("names on the reconnect event only fields the backend really sends", async () => {
+    const gotchas = docs.get(RESOURCE_URIS.gotchas)!;
+    const bullet = gotchas.match(/^- Retryable interruptions .+$/m)![0];
+    const named = collectMatches(bullet, /`([a-z][A-Za-z]+)`/g).filter(
+      (name) => name !== "progress"
+    );
+    const errorNotification = PROTOCOL_MESSAGES.get("errornotification")!;
+    const client = new StubCodexClient();
+    const manager = new SessionManager({
+      disableCleanup: true,
+      createClient: () => client as never,
+    });
+
+    try {
+      const { sessionId } = await manager.createSession("hi", process.cwd(), {}, "low");
+      client.notifyManager(Methods.ERROR, {
+        threadId: "thread_stub",
+        turnId: "turn_stub",
+        error: { message: "stream reset" },
+        willRetry: true,
+      });
+      const events = manager.pollEvents(sessionId, 0).events ?? [];
+      const reconnect = events.find(
+        (event) => (event.data as { method?: string }).method === "codex-mcp/reconnect"
+      )!;
+
+      expect(named).toContain("willRetry");
+      for (const field of named) {
+        expect(errorNotification.has(field), `codex-schema ErrorNotification has no ${field}`).toBe(
+          true
+        );
+        expect(Object.keys(reconnect.data as SchemaNode)).toContain(field);
+      }
+      // Nothing in the bundle counts attempts, so no document may tell a client to read one.
+      const counters = Array.from(PROTOCOL_MESSAGES.values()).filter(
+        (properties) => properties.has("retryCount") || properties.has("maxRetries")
+      );
+      expect(counters).toEqual([]);
+      expect(allText).not.toContain("retryCount");
+      expect(allText).not.toContain("maxRetries");
+    } finally {
+      manager.destroy();
+    }
+  });
+
+  it("lists the event types the codex_check output schema declares", () => {
+    const gotchas = docs.get(RESOURCE_URIS.gotchas)!;
+    const events = (tools.get("codex_check")!.outputSchema!.properties!.events as SchemaNode)
+      .items as SchemaNode;
+    const declared = ((events.properties as SchemaNode).type as { enum: string[] }).enum;
+    const listed = collectMatches(
+      gotchas.match(/^- Top-level `events\[\]\.type` is one of: (.+)$/m)![1],
+      /`([a-z_]+)`/g
+    );
+
+    expect(listed).toEqual(declared);
+  });
+
+  it("promises `progress` on exactly the tools whose output schema carries it", () => {
+    const configText = docs.get(RESOURCE_URIS.config)!;
+    const claimed = collectMatches(
+      configText.match(/^- `progress` is included on (.+)$/m)![1],
+      /`([a-z_]+)`/g
+    );
+    const declaring = Array.from(tools)
+      .filter(([, tool]) => Boolean(tool.outputSchema?.properties?.progress))
+      .map(([name]) => name);
+
+    expect(claimed.sort()).toEqual(declaring.sort());
+  });
+
+  it("answers approvals with a decision both the tool and the backend accept", () => {
+    const response = readSchemaFile("CommandExecutionRequestApprovalResponse.json");
+    const variants = (
+      (response.definitions as SchemaNode).CommandExecutionApprovalDecision as {
+        oneOf: SchemaNode[];
+      }
+    ).oneOf;
+    const backend = variants.flatMap((variant) =>
+      Array.isArray(variant.enum)
+        ? (variant.enum as string[])
+        : Object.keys((variant.properties ?? {}) as SchemaNode)
+    );
+    const toolDecisions = (tools.get("codex_check")!.inputSchema!.properties!.decision.enum ??
+      []) as string[];
+    const used = collectMatches(allText, /"decision": "([A-Za-z]+)"/g);
+
+    expect(used.length).toBeGreaterThan(0);
+    for (const decision of used) {
+      expect(toolDecisions, `codex_check rejects decision ${decision}`).toContain(decision);
+      expect(backend, `codex-schema has no approval decision ${decision}`).toContain(decision);
+    }
+  });
+
+  it("shapes the user-input example the way the backend takes an answer", () => {
+    const answerShape = (
+      readSchemaFile("ToolRequestUserInputResponse.json").definitions as {
+        ToolRequestUserInputAnswer: { required: string[] };
+      }
+    ).ToolRequestUserInputAnswer;
+    const example = jsonExamples(docs.get(RESOURCE_URIS.quickstart)!).find(
+      (block) => block.action === "respond_user_input"
+    )!;
+    const answers = Object.values(example.answers as Record<string, SchemaNode>);
+
+    expect(answers.length).toBeGreaterThan(0);
+    for (const answer of answers) expect(Object.keys(answer)).toEqual(answerShape.required);
   });
 
   it("keeps the EXEC_NOT_SUPPORTED story consistent between gotchas and the error hints", () => {

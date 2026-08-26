@@ -100,13 +100,13 @@ export interface ThreadStartParams {
   persistExtendedHistory?: boolean;
 }
 
-export interface ThreadStartResultV1 {
-  threadId: string;
-}
-export interface ThreadStartResultV2 {
+/**
+ * thread/start response — schema v2/ThreadStartResponse.json.
+ * Only `thread.id` is modelled: no caller reads another field off the response.
+ */
+export interface ThreadStartResult {
   thread: { id: string };
 }
-export type ThreadStartResult = ThreadStartResultV1 | ThreadStartResultV2;
 
 export interface ThreadForkParams {
   threadId: string;
@@ -122,13 +122,10 @@ export interface ThreadForkParams {
   persistExtendedHistory?: boolean;
 }
 
-export interface ThreadForkResultV1 {
-  threadId: string;
-}
-export interface ThreadForkResultV2 {
+/** thread/fork response — schema v2/ThreadForkResponse.json. */
+export interface ThreadForkResult {
   thread: { id: string };
 }
-export type ThreadForkResult = ThreadForkResultV1 | ThreadForkResultV2;
 
 export interface ThreadResumeParams {
   threadId: string;
@@ -146,13 +143,10 @@ export interface ThreadResumeParams {
   persistExtendedHistory?: boolean;
 }
 
-export interface ThreadResumeResultV1 {
-  threadId: string;
-}
-export interface ThreadResumeResultV2 {
+/** thread/resume response — schema v2/ThreadResumeResponse.json. */
+export interface ThreadResumeResult {
   thread: { id: string };
 }
-export type ThreadResumeResult = ThreadResumeResultV1 | ThreadResumeResultV2;
 
 export interface ThreadBackgroundTerminalsCleanParams {
   threadId: string;
@@ -232,13 +226,10 @@ export interface TurnStartParams {
   collaborationMode?: CollaborationMode | null;
 }
 
-export interface TurnStartResultV1 {
-  turnId: string;
-}
-export interface TurnStartResultV2 {
+/** turn/start response — schema v2/TurnStartResponse.json. */
+export interface TurnStartResult {
   turn: { id: string };
 }
-export type TurnStartResult = TurnStartResultV1 | TurnStartResultV2;
 
 export interface TurnInterruptParams {
   threadId: string;

@@ -1531,7 +1531,7 @@ export class SessionManager {
         requestId,
         kind: "user_input",
         approvalId: req.approvalId,
-        answers,
+        answers: loggableAnswers(req.params, answers),
       },
       true
     );
@@ -1640,11 +1640,16 @@ export class SessionManager {
           if (notifiedThreadId && notifiedThreadId !== session.threadId) {
             session.threadId = notifiedThreadId;
           }
+          // Thread.status is a ThreadStatus union object whose variant is named
+          // by `type` — "notLoaded" | "idle" | "systemError" | "active"
+          // (codex-schema/v2/ThreadStartedNotification.json → Thread.status →
+          // ThreadStatus), the same shape `thread/status/changed` carries.
+          const threadStatus = isRecord(thread?.status) ? thread.status : undefined;
           pushEvent(session.eventBuffer, "progress", {
             method,
             ...p,
             threadId: notifiedThreadId,
-            status: normalizeOptionalString(thread?.status),
+            status: normalizeOptionalString(threadStatus?.type),
           });
           break;
         }
@@ -1688,6 +1693,11 @@ export class SessionManager {
             );
           }
           const completedTurnId = knownTurnId ?? "";
+          // The protocol Turn carries `{error, id, items, status}` and no final
+          // text (codex-schema/ServerNotification.json → definitions.Turn), so
+          // app-server mode always answers from `lastAgentMessageText`. `output`
+          // is ExecClient's own addition, set from the last `item.completed`
+          // agentMessage of the turn (src/app-server/exec-client.ts).
           const rawTurnOutput = normalizeOptionalString(turnObj?.output);
           const finalText = rawTurnOutput ?? session.lastAgentMessageText;
           const askedForSchema = this.schemaConstrainedTurns.delete(sessionId);
@@ -1703,6 +1713,10 @@ export class SessionManager {
             turnError: turnObj?.error,
             completedAt: new Date().toISOString(),
           };
+          // Like `output`, `usage` is ExecClient's addition — it forwards the
+          // `usage` of the exec `turn.completed` record. App-server mode counts
+          // tokens through `thread/tokenUsage/updated` only, so this merge adds
+          // nothing there.
           mergeProgressTokens(session, extractTokens(turnObj?.usage));
           pushEvent(
             session.eventBuffer,
@@ -1729,7 +1743,8 @@ export class SessionManager {
           }
           {
             const data: Record<string, unknown> = { method, ...p };
-            if (typeof data.message === "string") data.message = redactPaths(data.message);
+            // The notification carries `[error, threadId, turnId, willRetry]` and
+            // no text of its own (codex-schema/v2/ErrorNotification.json).
             // ErrorNotification.error is a TurnError object whose `message` carries the
             // text; a bare string arrives from builds predating that shape.
             if (typeof data.error === "string") {
@@ -1769,8 +1784,13 @@ export class SessionManager {
             const item = p.item as Record<string, unknown> | undefined;
             const itemType = item && typeof item.type === "string" ? item.type : undefined;
             const status = normalizeOptionalString(item?.status);
-            const completedItem =
-              method === Methods.ITEM_COMPLETED || method === Methods.RAW_RESPONSE_ITEM_COMPLETED;
+            // Only `item/completed` carries a ThreadItem. `rawResponseItem/completed`
+            // carries a ResponseItem — `message` (text in `content[].text`),
+            // `reasoning`, `function_call` and so on
+            // (codex-schema/v2/RawResponseItemCompletedNotification.json → ResponseItem)
+            // — a second, lower-level view of the same turn, so the final answer is
+            // read from the ThreadItem stream alone.
+            const completedItem = method === Methods.ITEM_COMPLETED;
             // AgentMessageThreadItem carries `id`, `text` and an optional `phase`
             // and no status (codex-schema/v2/ItemCompletedNotification.json), so
             // the notification method is what marks the message finished. `phase`
@@ -1779,7 +1799,11 @@ export class SessionManager {
             if (itemType === "agentMessage" && completedItem && typeof item?.text === "string") {
               session.lastAgentMessageText = item.text;
             }
-            // Keep user/agent message-like items as output; everything else is progress.
+            // Keep user/agent message-like items as output; everything else is
+            // progress. A PlanThreadItem (`type: "plan"`, EXPERIMENTAL, reaching
+            // this server now that the client asks for `experimentalApi`) states
+            // what the agent means to do rather than what it answers, and it
+            // stays progress like the `item/plan/delta` that builds it.
             const eventType: SessionEventType =
               itemType === "agentMessage" || itemType === "userMessage" ? "output" : "progress";
             pushEvent(session.eventBuffer, eventType, {
@@ -2353,16 +2377,17 @@ function restoreEventBuffer(
 }
 
 function buildProgressInfo(session: SessionInfo): ProgressInfo {
-  const storedTokens = session.progressState?.tokens;
-  const resultTokens = extractTokens(session.lastResult?.turn);
   return {
     phase: deriveProgressPhase(session),
     lastEventAt: session.progressState?.lastEventAt ?? session.lastActiveAt,
     activeTurnId: session.activeTurnId,
     pendingActionCount: countPendingRequests(session),
     lastMethod: session.progressState?.lastMethod,
-    percent: session.progressState?.percent,
-    tokens: mergeTokens(storedTokens, resultTokens),
+    // Every counter the wire carries is merged into progressState as it arrives —
+    // by `thread/tokenUsage/updated`, by the exec turn's `usage`, and by the
+    // restore path. Re-reading the finished turn here would let those older
+    // counters win over a later update.
+    tokens: session.progressState?.tokens,
   };
 }
 
@@ -2430,8 +2455,6 @@ function recordProgressObservation(
   if (method !== Methods.THREAD_TOKEN_USAGE_UPDATED) {
     next.lastMethod = method;
   }
-  const percent = extractPercent(params);
-  if (typeof percent === "number") next.percent = percent;
   mergeProgressTokens(session, extractTokens(params));
   session.progressState = next;
 }
@@ -2469,17 +2492,6 @@ function parseStructuredOutput(text?: string): unknown {
   } catch {
     return undefined;
   }
-}
-
-function extractPercent(value: unknown): number | undefined {
-  if (!isRecord(value)) return undefined;
-  const candidates = [value.percent, value.percentage, value.progress, value.fractionComplete];
-  for (const candidate of candidates) {
-    if (typeof candidate !== "number" || !Number.isFinite(candidate)) continue;
-    if (candidate >= 0 && candidate <= 1) return Math.round(candidate * 100);
-    if (candidate >= 0 && candidate <= 100) return candidate;
-  }
-  return undefined;
 }
 
 /**
@@ -2691,6 +2703,36 @@ function respondOrReport(sessionId: string, method: string, send: () => void): v
  * back on the JSON-RPC id the request arrived with, and the caller names the request by
  * its `requestId`.
  */
+/**
+ * The answers to keep in the event buffer and in events.jsonl.
+ *
+ * A question marked `isSecret` is answered with something that must not be
+ * written down — a token, a password (codex-schema/ToolRequestUserInputParams.json
+ * → ToolRequestUserInputQuestion.isSecret). Codex still receives the answer as
+ * given; the log keeps only the fact that the question was answered.
+ */
+function loggableAnswers(
+  params: unknown,
+  answers: Record<string, { answers: string[] }>
+): Record<string, { answers: string[] }> {
+  const questions = isRecord(params) && Array.isArray(params.questions) ? params.questions : [];
+  const secretIds = new Set<string>();
+  for (const question of questions) {
+    if (isRecord(question) && question.isSecret === true && typeof question.id === "string") {
+      secretIds.add(question.id);
+    }
+  }
+  if (secretIds.size === 0) return answers;
+
+  const loggable: Record<string, { answers: string[] }> = {};
+  for (const [id, value] of Object.entries(answers)) {
+    loggable[id] = secretIds.has(id)
+      ? { answers: (value?.answers ?? []).map(() => "<secret>") }
+      : value;
+  }
+  return loggable;
+}
+
 function correlationIds(
   params: Record<string, unknown>,
   method: string,
@@ -2872,6 +2914,10 @@ function compactEventData(data: unknown, minimal: boolean): unknown {
     compact.method = data.method;
   }
 
+  // Top-level keys the payloads this server buffers actually carry: `phase` comes
+  // from the synthetic `codex-mcp/reconnect` event, `decision`/`timeout` from the
+  // approval events this manager writes, and the rest from the notification
+  // params of codex-schema/ServerNotification.json.
   const preferredKeys = minimal
     ? [
         "delta",
@@ -2886,8 +2932,6 @@ function compactEventData(data: unknown, minimal: boolean): unknown {
         "decision",
         "timeout",
         "willRetry",
-        "retryCount",
-        "maxRetries",
       ]
     : [
         "delta",
@@ -2902,8 +2946,6 @@ function compactEventData(data: unknown, minimal: boolean): unknown {
         "decision",
         "timeout",
         "willRetry",
-        "retryCount",
-        "maxRetries",
         "reason",
         "command",
         "cwd",
@@ -3184,16 +3226,18 @@ function parseAvailableDecisionSet(available: unknown[] | null | undefined): Set
 }
 
 /**
- * Extract thread id from either v1 ({threadId}) or v2 ({thread:{id}}) responses.
- * threadId is mandatory for session correctness, so invalid shape throws.
+ * Read the thread id of a `thread/start` or `thread/fork` response.
+ *
+ * Both answer `{thread: Thread}` (codex-schema/v2/ThreadStartResponse.json,
+ * v2/ThreadForkResponse.json), and so does ExecClient. No response of the bundle
+ * puts a thread id anywhere else, so a differently shaped answer is a backend
+ * this server cannot drive: the session needs the id, so it throws rather than
+ * carrying on with an id it made up.
  */
 function extractThreadId(result: unknown): string {
   if (!isRecord(result)) {
     throw new Error(`Error [${ErrorCode.INTERNAL}]: Invalid thread response: expected object`);
   }
-
-  const direct = result.threadId;
-  if (typeof direct === "string" && direct.length > 0) return direct;
 
   const thread = result.thread;
   if (isRecord(thread) && typeof thread.id === "string" && thread.id.length > 0) return thread.id;
@@ -3202,14 +3246,15 @@ function extractThreadId(result: unknown): string {
 }
 
 /**
- * Extract turn id from either v1 ({turnId}) or v2 ({turn:{id}}) responses.
- * turnId is optional because turn/started notifications are authoritative.
+ * Read the turn id of a `turn/start` response, which answers `{turn: Turn}`
+ * (codex-schema/v2/TurnStartResponse.json).
+ *
+ * Optional: the id is a seed for `activeTurnId` and the `turn/started`
+ * notification is what settles it. The one response of the bundle carrying a
+ * bare `turnId` answers `turn/steer`, which this server never sends.
  */
 function extractTurnId(result: unknown): string | undefined {
   if (!isRecord(result)) return undefined;
-
-  const direct = result.turnId;
-  if (typeof direct === "string" && direct.length > 0) return direct;
 
   const turn = result.turn;
   if (isRecord(turn) && typeof turn.id === "string" && turn.id.length > 0) return turn.id;

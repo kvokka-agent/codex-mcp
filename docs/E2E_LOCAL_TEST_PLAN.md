@@ -474,7 +474,7 @@ Validate:
 4. `action="interrupt"` works only while active turn is running.
 5. `action="fork"` creates a new session/thread branch.
 6. `action="clean"` batch-removes terminal sessions. Run it first with `dryRun: true` and confirm `matchedSessionIds` lists only `idle`/`error`/`cancelled` sessions, then run it for real and confirm `removedCount` matches and `codex_session(action="list")` no longer shows them.
-7. `action="clean_background_terminals"` returns success and does not crash the session. **Note:** This action requires the `experimentalApi` capability in the codex CLI backend. If your codex version does not support it, expect `Error [INTERNAL]` with a message about `experimentalApi`. This is a known limitation, not a test failure — record the error and continue.
+7. `action="clean_background_terminals"` returns success and does not crash the session. **Note:** codex-mcp asks for the `experimentalApi` capability during `initialize`, so a CLI build that carries this method serves it. An older build that does not know the capability answers `Error [INTERNAL]` naming `experimentalApi` — record the error and continue.
 
 Example payload:
 
@@ -511,7 +511,7 @@ Pass criteria:
 2. No transport crash on management operations.
 3. `interrupt` successfully stops a running turn (or is documented as missed due to timing).
 4. `clean` reports `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }`, and the dry run removes nothing.
-5. `clean_background_terminals` returns `{ success: true, message }`, or `Error [INTERNAL]` if the codex CLI lacks `experimentalApi` capability (see note in step 7 above).
+5. `clean_background_terminals` returns `{ success: true, message }`, or `Error [INTERNAL]` on a CLI build that does not know the `experimentalApi` capability (see note in step 7 above).
 
 ## TC6 (Optional): Structured Output
 

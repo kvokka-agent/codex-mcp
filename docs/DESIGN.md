@@ -289,7 +289,7 @@ Takes an optional `cwd` and returns:
 - `interrupt`: sends `turn/interrupt` with `threadId` + `activeTurnId` and keeps the session; the interrupted turn ends as `idle`.
 - `fork`: sends `thread/fork` on the original client, then runs the forked thread in a new session with its own child process. The source session is unchanged.
 - `clean`: batch-removes sessions matching `statuses` and `olderThanMs`, returning `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }`. `dryRun` fills `matchedSessionIds` only.
-- `clean_background_terminals`: sends `thread/backgroundTerminals/clean` for the thread. It needs the `experimentalApi` capability in the backend and returns `INTERNAL` on CLI builds without it.
+- `clean_background_terminals`: sends `thread/backgroundTerminals/clean` for the thread. The client asks for the `experimentalApi` capability during `initialize`, so a backend that carries the method serves it; a CLI build that does not know the capability answers `INTERNAL`.
 
 ### Tool 5: `codex_check` — Poll Events And Answer Requests
 
@@ -437,8 +437,7 @@ Every `codex`, `codex_reply`, and `codex_check` response carries three orchestra
 | `activeTurnId`       | The turn id tracked from `turn/started`                                                             |
 | `pendingActionCount` | Unresolved pending requests                                                                         |
 | `lastMethod`         | The last observed JSON-RPC method, ignoring `thread/tokenUsage/updated`                             |
-| `percent`            | `percent`/`percentage`/`progress`/`fractionComplete` from notification params, normalized to 0-100   |
-| `tokens`             | Merged from notification params and `turn.usage`, accepting both camelCase and snake_case key names  |
+| `tokens`             | Merged from `thread/tokenUsage/updated` and the exec turn's `usage`, accepting both camelCase and snake_case key names |
 
 `reasoning` covers `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`, and `item/plan/delta`. `acting` covers `item/commandExecution/outputDelta`, `item/commandExecution/terminalInteraction`, `item/fileChange/outputDelta`, `item/mcpToolCall/progress`, `turn/diff/updated`, and `turn/plan/updated`.
 
@@ -472,7 +471,7 @@ interface SessionEvent {
 | `item/agentMessage/delta`               | output               | No     | Agent text increment                                                        |
 | `item/completed` (ThreadItem)           | output/progress      | No     | By `item.type`: `agentMessage`/`userMessage` → output; everything else → progress |
 | `item/started`                          | progress             | No     | Item started                                                                |
-| `rawResponseItem/completed`             | output/progress      | No     | Same classification as `item/completed`                                     |
+| `rawResponseItem/completed` (ResponseItem) | progress          | No     | ExecClient's `raw_response_item`; a ResponseItem, so no `agentMessage` type and no final answer to read |
 | `item/commandExecution/outputDelta`     | progress             | No     | Command output increment, after shell-noise filtering                       |
 | `item/commandExecution/terminalInteraction` | progress         | No     | Terminal interaction                                                        |
 | `item/fileChange/outputDelta`           | progress             | No     | File-change increment                                                       |
@@ -856,8 +855,8 @@ input: [..., { type: "localImage", path: imagePath }]
 - `threadId` from the `thread/start` response (whitelist compatibility: v1 `{threadId}` and v2 `{thread: {id}}`), refreshed by a `thread/started` notification that carries a different id
 - `activeTurnId` from the `turn.id` of the `turn/started` notification, needed by `turn/interrupt`
 - `pendingRequests`, mapping requestId to the record that backs both `actions[]` and the response to the server-initiated request
-- `lastAgentMessageText`, the last completed `agentMessage` item text, used as `result.text` when the backend omits `turn.output`
-- `progressState`, the running `lastEventAt`, `lastMethod`, `percent`, and token counters
+- `lastAgentMessageText`, the last completed `agentMessage` item text, used as `result.text`: the app-server `Turn` carries no final text, and `turn.output` is sent by `codex exec` alone
+- `progressState`, the running `lastEventAt`, `lastMethod`, and token counters
 
 ## Security Considerations
 
@@ -879,10 +878,12 @@ input: [..., { type: "localImage", path: imagePath }]
 - `codex_session(action="get")` returns redacted info by default; `includeSensitive=true` adds `cwd`, `profile`, `config`, and `threadId`.
 - Approval requests carry the command text verbatim, and the client decides how to show it.
 - `INTERNAL` error messages pass through path redaction.
+- The answer to a user-input question marked `isSecret` reaches codex as given and enters the event buffer and `events.jsonl` as `<secret>`.
 
 ### Approval Timeout
 
 - The default 60-second timeout auto-declines, which stops a session from hanging forever.
+- A user-input request that times out is answered with an empty `answers` map, which says the caller answered nothing.
 - A timeout declines the operation without interrupting the agent.
 
 ## Client Polling Guide

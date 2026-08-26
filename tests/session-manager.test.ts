@@ -78,19 +78,21 @@ describe("SessionManager protocol compatibility + approvals", () => {
     expect(res.threadId).toBe("thread_v2");
   });
 
-  it("extracts threadId from legacy v1 thread/start response shape", async () => {
+  it("refuses a thread/start response that puts the id outside `thread`", async () => {
+    // Every response of the bundle carrying a thread id carries it as
+    // `thread.id` (codex-schema/v2/ThreadStartResponse.json). An id found
+    // anywhere else belongs to no known backend, and adopting it would start a
+    // session against a thread this server cannot address.
     client.threadStartResult = { threadId: "thread_v1" };
-    const res = await manager.createSession("hi", workspace, {}, "medium");
-    expect(res.threadId).toBe("thread_v1");
+    await expect(manager.createSession("hi", workspace, {}, "medium")).rejects.toThrow(
+      /missing thread id/
+    );
   });
 
-  it("extracts threadId from legacy v1 thread/fork response shape", async () => {
-    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+  it("refuses a thread/fork response that puts the id outside `thread`", async () => {
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
     client.threadForkResult = { threadId: "thread_fork_v1" };
-    const forked = await manager.forkSession(sessionId);
-    expect(forked.threadId).toBe("thread_fork_v1");
-    // original threadId still present
-    expect(threadId).toBeDefined();
+    await expect(manager.forkSession(sessionId)).rejects.toThrow(/missing thread id/);
   });
 
   it("cleans up forked session resources when the new app-server fails to start", async () => {
@@ -707,6 +709,37 @@ describe("SessionManager protocol compatibility + approvals", () => {
     expect((poll2 as { isError?: boolean }).isError).not.toBe(true);
     expect(client.respondToServer).toHaveBeenCalledWith(12, { answers });
     expect(manager.getSession(sessionId).pendingRequestCount).toBe(0);
+  });
+
+  it("keeps a secret answer out of the event log and sends it to codex unchanged", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+    // ToolRequestUserInputQuestion marks a question whose answer must not be
+    // written down (codex-schema/ToolRequestUserInputParams.json).
+    client.emitServerRequest(120, Methods.USER_INPUT_REQUEST, {
+      itemId: "item_ui_secret",
+      threadId,
+      turnId: "turn_1",
+      questions: [
+        { id: "token", header: "Auth", question: "API key?", isSecret: true },
+        { id: "env", header: "Env", question: "Which environment?" },
+      ],
+    });
+
+    const requestId = manager.pollEvents(sessionId).actions![0].requestId;
+    const answers = { token: { answers: ["sk-live-123"] }, env: { answers: ["staging"] } };
+    manager.resolveUserInput(sessionId, requestId, answers);
+
+    expect(client.respondToServer).toHaveBeenCalledWith(120, { answers });
+    const logged = manager
+      .pollEvents(sessionId, 0, 200)
+      .events.find(
+        (event) =>
+          event.type === "approval_result" &&
+          (event.data as { kind?: string }).kind === "user_input"
+      )!.data as { answers: Record<string, { answers: string[] }> };
+    expect(logged.answers.token.answers).toEqual(["<secret>"]);
+    expect(logged.answers.env.answers).toEqual(["staging"]);
+    expect(JSON.stringify(logged)).not.toContain("sk-live-123");
   });
 
   it("returns INTERNAL and keeps user_input pending when forwarding response fails", async () => {
@@ -1841,11 +1874,13 @@ describe("SessionManager protocol compatibility + approvals", () => {
   it("emits reconnect progress for retryable app-server errors", async () => {
     const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
 
+    // ErrorNotification carries [error, threadId, turnId, willRetry]
+    // (codex-schema/v2/ErrorNotification.json); the text lives in error.message.
     client.emitNotification(Methods.ERROR, {
-      message: "temporary disconnect",
+      threadId: "thread_mock",
+      turnId: "turn_mock",
+      error: { message: "temporary disconnect" },
       willRetry: true,
-      retryCount: 1,
-      maxRetries: 5,
     });
 
     const poll = manager.pollEvents(sessionId, 0, 200);
@@ -1865,7 +1900,9 @@ describe("SessionManager protocol compatibility + approvals", () => {
     const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
 
     client.emitNotification(Methods.ERROR, {
-      message: "fatal error",
+      threadId: "thread_mock",
+      turnId: "turn_mock",
+      error: { message: "fatal error" },
       willRetry: false,
     });
 

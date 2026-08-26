@@ -7,12 +7,21 @@
  * `codex` CLI therefore fails this file wherever the model drifted.
  */
 
+import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { AppServerSpawnOptions } from "../src/app-server/lifecycle.js";
 import { Methods } from "../src/app-server/protocol.js";
+
+const spawnMock = vi.fn();
+
+vi.mock("child_process", async () => {
+  const actual = await vi.importActual<typeof import("child_process")>("child_process");
+  return { ...actual, spawn: spawnMock };
+});
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SCHEMA_DIR = resolve(REPO_ROOT, "codex-schema");
@@ -34,6 +43,8 @@ interface SchemaMethod {
   method: string;
   /** Definition name the envelope points `params` at, if the method carries params. */
   paramsRef?: string;
+  /** Doc text of the envelope variant; the bundle marks a gated method "EXPERIMENTAL". */
+  description: string;
 }
 
 function readSchema(file: string): JsonObject {
@@ -53,6 +64,7 @@ function readEnvelope(file: string): { methods: SchemaMethod[]; definitions: Jso
       file,
       method: methodEnum[0],
       paramsRef: params?.$ref?.split("/").pop(),
+      description: typeof variant.description === "string" ? variant.description : "",
     };
   });
   return { methods, definitions };
@@ -210,6 +222,156 @@ function findDefinition(name: string): JsonObject {
     if (found) return found as JsonObject;
   }
   throw new Error(`definition ${name} is in no codex-schema envelope file`);
+}
+
+/**
+ * protocol.ts result type → the bundle file whose root object is that response.
+ * The bundle binds no response to a method name, so the pairing is the wiring;
+ * every field compared below is read from one side or the other.
+ *
+ * A response is read and never constructed, so protocol.ts models only what a
+ * caller uses: field existence is checked one way, every field protocol.ts
+ * declares against the schema, at every level.
+ */
+const MODELLED_RESULTS: Record<string, string> = {
+  InitializeResult: "v1/InitializeResponse.json",
+  ThreadStartResult: "v2/ThreadStartResponse.json",
+  ThreadForkResult: "v2/ThreadForkResponse.json",
+  ThreadResumeResult: "v2/ThreadResumeResponse.json",
+  TurnStartResult: "v2/TurnStartResponse.json",
+};
+
+/**
+ * Methods the schema gates behind `capabilities.experimentalApi` and this
+ * codebase nevertheless serves end to end, which is why the client opts in.
+ */
+const EXPERIMENTAL_METHODS_IN_USE = [Methods.USER_INPUT_REQUEST, Methods.PLAN_DELTA];
+
+/** Follow `$ref` inside one bundle file and drop the `null` branch of an `anyOf`. */
+function resolveNode(node: JsonObject, doc: JsonObject): JsonObject {
+  let current = node;
+  for (let hop = 0; hop < 16; hop++) {
+    const ref = current.$ref as string | undefined;
+    if (ref) {
+      const name = ref.split("/").pop() as string;
+      const found = ((doc.definitions ?? {}) as JsonObject)[name] as JsonObject | undefined;
+      if (!found) throw new Error(`definition ${name} is not in this bundle file`);
+      current = found;
+      continue;
+    }
+    const anyOf = current.anyOf as JsonObject[] | undefined;
+    if (anyOf) {
+      const branch = anyOf.find((b) => b.type !== "null");
+      if (!branch) return current;
+      current = branch;
+      continue;
+    }
+    return current;
+  }
+  throw new Error("$ref chain did not terminate");
+}
+
+/**
+ * Assert every property `type` declares exists in the schema object `node` and
+ * carries the same optionality the schema gives it. Recurses into a property
+ * only where the schema itself describes an object, so a string never gets
+ * walked as one.
+ */
+function assertDeclaredFieldsExist(
+  type: ts.Type,
+  node: JsonObject,
+  doc: JsonObject,
+  file: string,
+  path: string
+): void {
+  if (type.isUnion()) {
+    for (const member of type.types) {
+      if (member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null)) continue;
+      assertDeclaredFieldsExist(member, node, doc, file, path);
+    }
+    return;
+  }
+
+  const properties = (node.properties ?? {}) as JsonObject;
+  const known = Object.keys(properties);
+  const required = new Set((node.required ?? []) as string[]);
+  const declared = checker.getPropertiesOfType(type);
+  expect(declared.length, `${path} declares no field at all`).toBeGreaterThan(0);
+
+  for (const prop of declared) {
+    const name = prop.getName();
+    expect(
+      known,
+      `${path}.${name} is declared in protocol.ts but ${file} defines no such field`
+    ).toContain(name);
+    const optional = Boolean(prop.flags & ts.SymbolFlags.Optional);
+    expect(
+      optional,
+      required.has(name)
+        ? `${path}.${name} is required by ${file} but optional in protocol.ts`
+        : `${path}.${name} is optional in ${file} but non-optional in protocol.ts`
+    ).toBe(!required.has(name));
+
+    const declaration = prop.valueDeclaration ?? prop.declarations?.[0];
+    if (!declaration) continue;
+    const child = resolveNode(properties[name] as JsonObject, doc);
+    if (!child.properties) continue;
+    const childType = checker.getTypeOfSymbolAtLocation(prop, declaration);
+    if (!(childType.flags & ts.TypeFlags.Object) && !childType.isUnion()) continue;
+    assertDeclaredFieldsExist(childType, child, doc, file, `${path}.${name}`);
+  }
+}
+
+class MockStdin extends EventEmitter {
+  writable = true;
+  writes: string[] = [];
+  end(): void {}
+  write(chunk: unknown): boolean {
+    this.writes.push(String(chunk));
+    return true;
+  }
+}
+
+class MockProc extends EventEmitter {
+  stdout = new EventEmitter();
+  stderr = new EventEmitter();
+  stdin = new MockStdin();
+  killed = false;
+  exitCode: number | null = null;
+  pid = 4242;
+  kill(): boolean {
+    this.killed = true;
+    return true;
+  }
+}
+
+/**
+ * The `initialize` params AppServerClient puts on the child's stdin, answered by
+ * a stand-in process so the captured object is the one the client produced.
+ */
+async function captureInitializeParams(): Promise<JsonObject> {
+  const proc = new MockProc();
+  spawnMock.mockReset();
+  spawnMock.mockReturnValue(proc);
+  const { AppServerClient } = await import("../src/app-server/client.js");
+  const client = new AppServerClient();
+  const started = client.start({} as AppServerSpawnOptions);
+
+  const line = JSON.parse(proc.stdin.writes.join("").trim()) as {
+    method: string;
+    id: number;
+    params: JsonObject;
+  };
+  expect(line.method).toBe(Methods.INITIALIZE);
+  proc.stdout.emit(
+    "data",
+    Buffer.from(
+      JSON.stringify({ jsonrpc: "2.0", id: line.id, result: { userAgent: "mock" } }) + "\n",
+      "utf8"
+    )
+  );
+  await started;
+  return line.params;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -393,5 +555,67 @@ describe("AskForApproval union", () => {
       .map((p) => p.getName())
       .sort();
     expect(declared).toEqual([...(inner.required as string[])].sort());
+  });
+});
+
+describe("initialize capabilities against the schema", () => {
+  const definition = findDefinition("InitializeParams");
+  const capabilityDefinition = findDefinition("InitializeCapabilities");
+
+  it("sends only fields the schema's InitializeParams defines", async () => {
+    const params = await captureInitializeParams();
+    const known = Object.keys(definition.properties as JsonObject);
+    for (const field of Object.keys(params)) {
+      expect(
+        known,
+        `initialize sends "${field}", which schema InitializeParams does not define`
+      ).toContain(field);
+    }
+    for (const field of (definition.required ?? []) as string[]) {
+      expect(Object.keys(params), `schema InitializeParams requires "${field}"`).toContain(field);
+    }
+  });
+
+  it("sends only capabilities the schema's InitializeCapabilities defines", async () => {
+    const params = await captureInitializeParams();
+    const capabilities = params.capabilities as JsonObject | undefined;
+    expect(capabilities, "initialize sends no capabilities object").toBeDefined();
+    const known = Object.keys(capabilityDefinition.properties as JsonObject);
+    for (const field of Object.keys(capabilities as JsonObject)) {
+      expect(
+        known,
+        `initialize declares capability "${field}", which schema InitializeCapabilities does not define`
+      ).toContain(field);
+    }
+  });
+
+  it("opts into the experimental API the schema defaults to off", async () => {
+    const experimentalApi = (capabilityDefinition.properties as JsonObject)
+      .experimentalApi as JsonObject;
+    expect(experimentalApi.default, "schema InitializeCapabilities.experimentalApi").toBe(false);
+
+    const params = await captureInitializeParams();
+    expect((params.capabilities as JsonObject).experimentalApi).toBe(true);
+  });
+
+  it.each(EXPERIMENTAL_METHODS_IN_USE)(
+    "%s is served here and is EXPERIMENTAL in the bundle, so the opt-in is what delivers it",
+    (method) => {
+      const schemaMethod = SCHEMA_METHODS.get(method);
+      expect(schemaMethod, `${method} is in no codex-schema envelope`).toBeDefined();
+      expect(
+        (schemaMethod as SchemaMethod).description,
+        `${method} is no longer marked EXPERIMENTAL; recheck why initialize opts in`
+      ).toContain("EXPERIMENTAL");
+    }
+  );
+});
+
+describe("response shapes against the schema", () => {
+  it.each(Object.entries(MODELLED_RESULTS))("%s declares only fields of %s", (tsName, file) => {
+    const doc = readSchema(file);
+    const tsInterface = TS_INTERFACES.get(tsName);
+    expect(tsInterface, `protocol.ts must export type ${tsName}`).toBeDefined();
+    assertDeclaredFieldsExist((tsInterface as TsInterface).type, doc, doc, file, tsName);
   });
 });

@@ -123,6 +123,22 @@ describe("AppServerClient JSON-RPC", () => {
     expect(client.supportsTurnOverrides).toBe(true);
   });
 
+  it("opts into the experimental API in the initialize handshake", async () => {
+    const client = new AppServerClient();
+    const started = client.start({} as AppServerSpawnOptions);
+
+    // Off (the schema default), codex sends neither item/tool/requestUserInput
+    // nor item/plan/delta, and the session manager's handlers for both never run.
+    const init = lastWritten();
+    expect(init.method).toBe(Methods.INITIALIZE);
+    expect((init.params as { capabilities?: { experimentalApi?: boolean } }).capabilities).toEqual({
+      experimentalApi: true,
+    });
+
+    reply(init.id!, { userAgent: "mock-app-server" });
+    await started;
+  });
+
   it("reports the spawned pid before the initialize handshake is answered", async () => {
     const client = new AppServerClient();
     const spawns: Array<{ pid: number; spawnedAt: string }> = [];

@@ -422,7 +422,7 @@ Query a running session for events, respond to approval requests, or answer user
 
 Event types include `output`, `progress`, `approval_request`, `approval_result`, `result`, `error`.
 Approvals/results/errors are pinned to reduce eviction risk.
-When a turn completes, `result.text` provides a stable final assistant message. It falls back to the last completed `agentMessage` item when the backend omits `turn.output`. `result.output` remains the raw backend `turn.output` value when present.
+When a turn completes, `result.text` provides a stable final assistant message: `turn.output` when the backend sent one, else the last completed `agentMessage` item. Only `codex exec` sends `turn.output`, which `result.output` carries as sent; the app-server turn has no such field, so app-server sessions answer from the agent message.
 
 ## Approvals & User Input
 

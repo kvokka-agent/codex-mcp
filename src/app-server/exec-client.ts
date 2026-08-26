@@ -107,28 +107,27 @@ function sandboxPolicyToMode(policy: SandboxPolicy): string | undefined {
 
 /**
  * Map exec JSONL event type (snake_case) to app-server notification method.
- * Covers all events from codex-schema/EventMsg.json that have corresponding
- * app-server notification methods in SessionManager.registerHandlers().
+ * Every key is a `type` of codex-schema/EventMsg.json, and every EventMsg type
+ * an app-server notification carries is a key here. The types the app-server
+ * delivers as thread items rather than as notifications — `agent_message`,
+ * `user_message`, `agent_reasoning`, `exec_command_begin`/`_end`,
+ * `patch_apply_begin`/`_end`, `web_search_begin`/`_end`, `collab_*` — have no
+ * notification method to map onto and are handled, or dropped, elsewhere.
  */
-const EXEC_EVENT_TO_METHOD: Record<string, string> = {
+export const EXEC_EVENT_TO_METHOD: Record<string, string> = {
   // Agent message deltas
   agent_message_delta: Methods.AGENT_MESSAGE_DELTA,
   agent_message_content_delta: Methods.AGENT_MESSAGE_DELTA,
 
   // Command execution
   exec_command_output_delta: Methods.COMMAND_OUTPUT_DELTA,
-  command_output_delta: Methods.COMMAND_OUTPUT_DELTA,
   terminal_interaction: Methods.COMMAND_TERMINAL_INTERACTION,
-
-  // File changes
-  file_change_output_delta: Methods.FILE_CHANGE_OUTPUT_DELTA,
 
   // Reasoning
   reasoning_content_delta: Methods.REASONING_TEXT_DELTA,
   reasoning_raw_content_delta: Methods.REASONING_TEXT_DELTA,
   agent_reasoning_delta: Methods.REASONING_TEXT_DELTA,
   agent_reasoning_raw_content_delta: Methods.REASONING_TEXT_DELTA,
-  reasoning_summary_delta: Methods.REASONING_SUMMARY_DELTA,
   agent_reasoning_section_break: Methods.REASONING_SUMMARY_PART_ADDED,
 
   // Plan
@@ -137,7 +136,6 @@ const EXEC_EVENT_TO_METHOD: Record<string, string> = {
 
   // Turn-level
   turn_diff: Methods.TURN_DIFF_UPDATED,
-  diff_update: Methods.TURN_DIFF_UPDATED,
 
   // MCP
   mcp_tool_call_begin: Methods.MCP_TOOL_PROGRESS,
@@ -152,6 +150,8 @@ const EXEC_EVENT_TO_METHOD: Record<string, string> = {
   thread_name_updated: Methods.THREAD_NAME_UPDATED,
   token_count: Methods.THREAD_TOKEN_USAGE_UPDATED,
   session_configured: Methods.SESSION_CONFIGURED,
+  context_compacted: Methods.THREAD_COMPACTED,
+  deprecation_notice: Methods.DEPRECATION_NOTICE,
 
   // Item lifecycle (in case exec emits these outside the dot-notation variants)
   item_started: Methods.ITEM_STARTED,
@@ -167,6 +167,62 @@ const EXEC_EVENT_TO_METHOD: Record<string, string> = {
   task_complete: Methods.TURN_COMPLETED,
   turn_aborted: Methods.TURN_COMPLETED,
 };
+
+/**
+ * Per-event field renames that put an exec JSONL payload into the shape the
+ * app-server notification of the same method declares, so both clients feed the
+ * session handler one form.
+ *
+ * `exec_command_output_delta` names the chunk `chunk` and the execution
+ * `call_id` (codex-schema/EventMsg.json → ExecCommandOutputDeltaEventMsg);
+ * `item/commandExecution/outputDelta` names the same two `delta` and `itemId`
+ * (codex-schema/v2/CommandExecutionOutputDeltaNotification.json). The delta
+ * events that carry `item_id` name it `itemId` on the app-server side, which is
+ * the key the session handler groups a delta stream by.
+ */
+const EXEC_EVENT_FIELD_RENAMES: Record<string, Record<string, string>> = {
+  exec_command_output_delta: { chunk: "delta", call_id: "itemId" },
+  agent_message_content_delta: { item_id: "itemId" },
+  plan_delta: { item_id: "itemId" },
+  reasoning_content_delta: { item_id: "itemId" },
+  reasoning_raw_content_delta: { item_id: "itemId", content_index: "contentIndex" },
+  agent_reasoning_section_break: { item_id: "itemId", summary_index: "summaryIndex" },
+};
+
+/**
+ * Apply the renames of `EXEC_EVENT_FIELD_RENAMES` to one event.
+ *
+ * A field the event does not carry stays absent: the app-server form declares
+ * `itemId` on every delta, but `agent_message_delta` carries no item id at all
+ * (codex-schema/EventMsg.json → AgentMessageDeltaEventMsg has only `delta` and
+ * `type`), and one is not minted to fill the field.
+ *
+ * `chunk` is renamed only when the CLI sent a string. The schema types it as
+ * one, describing it as "Raw bytes from the stream (may not be valid UTF-8)";
+ * anything else keeps its own name rather than being decoded into a `delta` the
+ * CLI did not send.
+ */
+function renameExecEventFields(
+  type: string,
+  event: Record<string, unknown>
+): Record<string, unknown> {
+  const renames = EXEC_EVENT_FIELD_RENAMES[type];
+  if (!renames) return event;
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(event)) {
+    const renamed = renames[key];
+    if (renamed === undefined) {
+      result[key] = value;
+      continue;
+    }
+    if (renamed === "delta" && typeof value !== "string") {
+      result[key] = value;
+      continue;
+    }
+    result[renamed] = value;
+  }
+  return result;
+}
 
 export class ExecClient extends EventEmitter implements ICodexClient {
   private _destroyed = false;
@@ -706,6 +762,19 @@ export class ExecClient extends EventEmitter implements ICodexClient {
         return;
       }
 
+      case "agent_message": {
+        // The v1 stream's finished assistant message
+        // (codex-schema/EventMsg.json → AgentMessageEventMsg, `message`
+        // required). The app-server delivers the same text as an `item/completed`
+        // carrying an AgentMessageThreadItem, whose required `id` this event does
+        // not carry, so the text becomes this turn's answer instead of being
+        // republished under an item id that would have to be invented.
+        if (typeof event.message === "string") {
+          this.lastAgentMessageText = event.message;
+        }
+        return;
+      }
+
       case "error": {
         this.emitError(event, type);
         return;
@@ -726,15 +795,26 @@ export class ExecClient extends EventEmitter implements ICodexClient {
           turn: { id: this.turnId, status: "inProgress" },
         });
       } else if (type === "task_complete") {
+        // `task_complete` states the turn's answer itself in `last_agent_message`
+        // (codex-schema/EventMsg.json → TaskCompleteEventMsg); the messages seen
+        // during the turn stand in only when it did not.
+        const lastAgentMessage = event.last_agent_message;
+        const output =
+          typeof lastAgentMessage === "string" && lastAgentMessage.length > 0
+            ? lastAgentMessage
+            : this.lastAgentMessageText;
         this.emitTurnCompleted({
           id: this.turnId ?? "",
           status: "completed",
-          output: this.lastAgentMessageText || undefined,
+          output: output || undefined,
         });
       } else if (type === "turn_aborted") {
         this.emitTurnCompleted({
           id: this.turnId ?? "",
-          status: "cancelled",
+          // TurnStatus (codex-schema/v2/TurnCompletedNotification.json) is
+          // completed | interrupted | failed | inProgress, and an aborted turn —
+          // whatever its TurnAbortReason — neither completed nor failed.
+          status: "interrupted",
           error: toTurnError(event.reason, "Turn aborted"),
         });
       } else if (mappedMethod === Methods.ERROR) {
@@ -743,7 +823,7 @@ export class ExecClient extends EventEmitter implements ICodexClient {
         this.emitNotification(mappedMethod, {
           threadId: this.threadId,
           turnId: this.turnId,
-          ...event,
+          ...renameExecEventFields(type, event),
         });
       }
       return;
@@ -775,16 +855,19 @@ export class ExecClient extends EventEmitter implements ICodexClient {
   /**
    * Emit the turn's final `turn/completed` notification.
    *
-   * `codex exec` puts the agent's answer in an `item.completed` record rather
-   * than in the completion event, so the output reported here is the last such
-   * record of the turn. An unparsed record of the same turn could have been
-   * that message, which would make an earlier one the reported final answer —
-   * so a turn whose stream lost a record completes as failed instead.
+   * `codex exec` states the agent's answer outside the completion event on both
+   * wire formats — in an `item.completed` record on the v2 one, in an
+   * `agent_message` event on the v1 one — so the output reported here is the
+   * last such record of the turn, unless `task_complete` named the answer in its
+   * own `last_agent_message`. An unparsed record of the same turn could have
+   * been that message, which would make an earlier one the reported final
+   * answer — so a completed turn whose stream lost a record fails instead, and
+   * an interrupted one, which reports no answer, carries the loss in its reason.
    */
   private emitTurnCompleted(turn: Record<string, unknown>): void {
     this.turnCompleted = true;
     let finalTurn = turn;
-    if (turn.status === "completed" && this.unparsedLines > 0) {
+    if (this.unparsedLines > 0 && turn.status === "completed") {
       const withoutOutput = { ...turn };
       delete withoutOutput.output;
       finalTurn = {
@@ -792,6 +875,18 @@ export class ExecClient extends EventEmitter implements ICodexClient {
         status: "failed",
         error: {
           message: `exec output stream lost ${this.unparsedLines} unparseable record(s); the agent's final message cannot be determined`,
+        },
+      };
+    } else if (this.unparsedLines > 0 && turn.status === "interrupted") {
+      // An interrupted turn reports no answer, so a lost record cannot make an
+      // older message pass for the final one and the outcome the CLI stated
+      // stands. The loss still travels, appended to the reason the turn carries.
+      const reason = toTurnError(turn.error, "Turn aborted");
+      finalTurn = {
+        ...turn,
+        error: {
+          ...reason,
+          message: `${String(reason.message)} (exec output stream lost ${this.unparsedLines} unparseable record(s))`,
         },
       };
     }

@@ -120,7 +120,6 @@ export interface ProgressInfo {
   activeTurnId?: string;
   pendingActionCount: number;
   lastMethod?: string;
-  percent?: number;
   tokens?: ProgressTokens;
 }
 
@@ -234,9 +233,9 @@ export interface SensitiveSessionInfo extends PublicSessionInfo {
 
 export interface TurnResult {
   turnId: string;
-  /** Stable final assistant text for this turn, derived from turn output or the last completed agent message. */
+  /** Stable final assistant text for this turn: `output` when the backend sent one, else the last completed agent message. */
   text?: string;
-  /** Raw backend turn.output value when present. */
+  /** `turn.output` as sent. Only `codex exec` sends one; the app-server Turn has no such field. */
   output?: string;
   structuredOutput?: unknown;
   /** Raw turn object from app-server notifications/responses (shape depends on schema version). */

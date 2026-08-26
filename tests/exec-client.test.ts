@@ -1,11 +1,30 @@
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ExecClient } from "../src/app-server/exec-client.js";
+import { EXEC_EVENT_TO_METHOD, ExecClient } from "../src/app-server/exec-client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { _resetForTesting } from "../src/utils/codex-executable.js";
+
+/** Read a file of the vendored schema bundle, the contract the CLI stream follows. */
+function readSchema(file: string): Record<string, unknown> {
+  return JSON.parse(
+    readFileSync(new URL(`../codex-schema/${file}`, import.meta.url), "utf8")
+  ) as Record<string, unknown>;
+}
+
+/** Every `type` codex-schema/EventMsg.json declares. */
+const EVENT_MSG_TYPES: string[] = (
+  readSchema("EventMsg.json").oneOf as Array<{ properties: { type: { enum: string[] } } }>
+).map((variant) => variant.properties.type.enum[0]!);
+
+/** The TurnStatus values codex-schema/v2/TurnCompletedNotification.json allows. */
+const TURN_STATUSES: string[] = (
+  readSchema("v2/TurnCompletedNotification.json").definitions as {
+    TurnStatus: { enum: string[] };
+  }
+).TurnStatus.enum;
 
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
 
@@ -645,7 +664,7 @@ describe("ExecClient event translation", () => {
     ]);
   });
 
-  it("translates an aborted turn into a cancelled completion", async () => {
+  it("reports an aborted turn with the interrupted status of the protocol", async () => {
     const { notifications, proc, turnId } = await runningTurn();
     emitLine(proc, { type: "turn_aborted", reason: { message: "user interrupted" } });
 
@@ -653,9 +672,141 @@ describe("ExecClient event translation", () => {
       Methods.TURN_COMPLETED,
       {
         threadId: expect.any(String),
-        turn: { id: turnId, status: "cancelled", error: { message: "user interrupted" } },
+        turn: { id: turnId, status: "interrupted", error: { message: "user interrupted" } },
       },
     ]);
+    expect(TURN_STATUSES).toContain("interrupted");
+    expect(TURN_STATUSES).not.toContain("cancelled");
+  });
+
+  it("carries the answer of the v1 agent_message event into the turn output", async () => {
+    const errorSpy = vi.mocked(console.error);
+    const { notifications, proc } = await runningTurn();
+    emitLine(proc, { type: "task_started", turn_id: "legacy_turn" });
+    emitLine(proc, { type: "agent_message", message: "the v1 answer" });
+    emitLine(proc, { type: "task_complete", turn_id: "legacy_turn" });
+
+    expect(notifications).toContainEqual([
+      Methods.TURN_COMPLETED,
+      {
+        threadId: expect.any(String),
+        turn: { id: "legacy_turn", status: "completed", output: "the v1 answer" },
+      },
+    ]);
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Unmapped exec event type"));
+  });
+
+  it("prefers the last_agent_message task_complete names over the messages it saw", async () => {
+    const { notifications, proc } = await runningTurn();
+    emitLine(proc, { type: "agent_message", message: "an earlier message" });
+    emitLine(proc, {
+      type: "task_complete",
+      turn_id: "legacy_turn",
+      last_agent_message: "the final answer",
+    });
+
+    const [, params] = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    expect(params).toMatchObject({ turn: { status: "completed", output: "the final answer" } });
+  });
+
+  it("falls back to the message it saw when task_complete carries a null one", async () => {
+    const { notifications, proc } = await runningTurn();
+    emitLine(proc, { type: "agent_message", message: "the only message" });
+    emitLine(proc, { type: "task_complete", turn_id: "legacy_turn", last_agent_message: null });
+
+    const [, params] = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    expect(params).toMatchObject({ turn: { status: "completed", output: "the only message" } });
+  });
+
+  it("ignores an agent_message whose text the CLI did not send", async () => {
+    const { notifications, proc } = await runningTurn();
+    emitLine(proc, { type: "agent_message" });
+    emitLine(proc, { type: "task_complete", turn_id: "legacy_turn" });
+
+    const [, params] = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    expect((params as { turn: Record<string, unknown> }).turn.output).toBeUndefined();
+  });
+
+  it("names the command output chunk the way the app-server notification does", async () => {
+    const { notifications, proc, turnId } = await runningTurn();
+    emitLine(proc, {
+      type: "exec_command_output_delta",
+      call_id: "call_9",
+      stream: "stdout",
+      chunk: "hello from the shell",
+    });
+
+    expect(notifications).toContainEqual([
+      Methods.COMMAND_OUTPUT_DELTA,
+      {
+        threadId: expect.any(String),
+        turnId,
+        type: "exec_command_output_delta",
+        itemId: "call_9",
+        stream: "stdout",
+        delta: "hello from the shell",
+      },
+    ]);
+  });
+
+  it("leaves a command output chunk that is not text under its own name", async () => {
+    const { notifications, proc } = await runningTurn();
+    emitLine(proc, {
+      type: "exec_command_output_delta",
+      call_id: "call_10",
+      stream: "stderr",
+      chunk: [104, 105],
+    });
+
+    const [, params] = notifications.find(([m]) => m === Methods.COMMAND_OUTPUT_DELTA)!;
+    expect(params).toMatchObject({ itemId: "call_10", chunk: [104, 105] });
+    expect(params).not.toHaveProperty("delta");
+  });
+
+  it("names the item of a content delta the way the app-server notification does", async () => {
+    const { notifications, proc, turnId } = await runningTurn();
+    emitLine(proc, {
+      type: "agent_message_content_delta",
+      thread_id: "cli_thread_1",
+      turn_id: "cli_turn_1",
+      item_id: "item_4",
+      delta: "lo",
+    });
+
+    const [, params] = notifications.find(([m]) => m === Methods.AGENT_MESSAGE_DELTA)!;
+    expect(params).toMatchObject({ turnId, itemId: "item_4", delta: "lo" });
+    expect(params).not.toHaveProperty("item_id");
+  });
+
+  it("mints no item id for a delta event that carries none", async () => {
+    const { notifications, proc } = await runningTurn();
+    emitLine(proc, { type: "agent_message_delta", delta: "he" });
+
+    const [, params] = notifications.find(([m]) => m === Methods.AGENT_MESSAGE_DELTA)!;
+    expect(params).not.toHaveProperty("itemId");
+  });
+
+  it("republishes the compaction and deprecation events of the schema", async () => {
+    const errorSpy = vi.mocked(console.error);
+    const { notifications, proc, turnId } = await runningTurn();
+    emitLine(proc, { type: "context_compacted" });
+    emitLine(proc, { type: "deprecation_notice", summary: "model retired", details: "use gpt-6" });
+
+    expect(notifications).toContainEqual([
+      Methods.THREAD_COMPACTED,
+      { threadId: expect.any(String), turnId, type: "context_compacted" },
+    ]);
+    expect(notifications).toContainEqual([
+      Methods.DEPRECATION_NOTICE,
+      {
+        threadId: expect.any(String),
+        turnId,
+        type: "deprecation_notice",
+        summary: "model retired",
+        details: "use gpt-6",
+      },
+    ]);
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Unmapped exec event type"));
   });
 
   it("buffers a JSONL line split across chunks and skips noise", async () => {
@@ -809,6 +960,19 @@ describe("ExecClient process exit", () => {
     expect(turn).not.toHaveProperty("output");
     expect(String((turn.error as { message: string }).message)).toContain(
       "lost 1 unparseable record(s)"
+    );
+  });
+
+  it("keeps the interrupted status of an aborted turn whose stream lost a record", async () => {
+    const { notifications, proc } = await runningTurn();
+    proc.stdout.emit("data", Buffer.from('{"type":"item.compl\n'));
+    emitLine(proc, { type: "turn_aborted", reason: "interrupted" });
+
+    const completion = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const turn = (completion[1] as { turn: Record<string, unknown> }).turn;
+    expect(turn.status).toBe("interrupted");
+    expect(String((turn.error as { message: string }).message)).toBe(
+      "interrupted (exec output stream lost 1 unparseable record(s))"
     );
   });
 
@@ -967,11 +1131,24 @@ describe("ExecClient error shape", () => {
     const { client, notifications } = await startedClient();
     await client.turnStart({ threadId: "t", input: [{ type: "text", text: "go" }] });
 
-    emitLine(lastProc(), { type: "turn_aborted", reason: "interrupted by user" });
+    // TurnAbortReason of codex-schema/EventMsg.json is a bare enum string.
+    emitLine(lastProc(), { type: "turn_aborted", reason: "review_ended" });
 
     const [, params] = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
     expect(params).toMatchObject({
-      turn: { status: "cancelled", error: { message: "interrupted by user" } },
+      turn: { status: "interrupted", error: { message: "review_ended" } },
     });
+  });
+});
+
+describe("ExecClient event table", () => {
+  it("maps only event types the schema declares", () => {
+    expect(EVENT_MSG_TYPES).toContain("task_complete");
+    for (const type of Object.keys(EXEC_EVENT_TO_METHOD)) {
+      expect(
+        EVENT_MSG_TYPES,
+        `${type} is mapped but EventMsg.json declares no such type`
+      ).toContain(type);
+    }
   });
 });

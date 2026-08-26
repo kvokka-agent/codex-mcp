@@ -57,8 +57,11 @@ function setBufferLimits(
   session.eventBuffer.hardMaxSize = hardMaxSize;
 }
 
+/** The text of each error event, which ErrorNotification carries as `error.message`. */
 function messagesOf(events: Array<{ data: unknown }>): unknown[] {
-  return events.map((event) => (event.data as Record<string, unknown>)?.message);
+  return events.map(
+    (event) => ((event.data as Record<string, unknown>)?.error as { message?: string })?.message
+  );
 }
 
 describe("SessionManager event buffer eviction", () => {
@@ -85,7 +88,12 @@ describe("SessionManager event buffer eviction", () => {
     setBufferLimits(manager, started.sessionId, 1, 2);
 
     for (const message of ["boom-1", "boom-2", "boom-3", "boom-4"]) {
-      client.emitNotification(Methods.ERROR, { message, willRetry: false });
+      client.emitNotification(Methods.ERROR, {
+        threadId: started.threadId,
+        turnId: "turn_1",
+        error: { message },
+        willRetry: false,
+      });
     }
 
     const poll = manager.pollEvents(started.sessionId, 0, 50);
@@ -135,8 +143,14 @@ describe("SessionManager event buffer eviction", () => {
     setBufferLimits(manager, started.sessionId, 1, 2);
 
     client.emitNotification(Methods.THREAD_CLOSED, { threadId: started.threadId });
-    client.emitNotification(Methods.ERROR, { message: "boom-1", willRetry: false });
-    client.emitNotification(Methods.ERROR, { message: "boom-2", willRetry: false });
+    for (const message of ["boom-1", "boom-2"]) {
+      client.emitNotification(Methods.ERROR, {
+        threadId: started.threadId,
+        turnId: "turn_1",
+        error: { message },
+        willRetry: false,
+      });
+    }
 
     const poll = manager.pollEvents(started.sessionId, 0, 50);
     expect(poll.events.map((event) => event.type)).toEqual(["error", "error"]);
@@ -401,7 +415,12 @@ describe("SessionManager poll shaping", () => {
       command: `echo ${"x".repeat(2000)}`,
       cwd: workspace,
     });
-    client.emitNotification(Methods.ERROR, { message: "fatal", willRetry: false });
+    client.emitNotification(Methods.ERROR, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      error: { message: "fatal" },
+      willRetry: false,
+    });
     expect(manager.getSession(started.sessionId).status).toBe("error");
 
     const poll = manager.pollEvents(started.sessionId, 0, 50, {
