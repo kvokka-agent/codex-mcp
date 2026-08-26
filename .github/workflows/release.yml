@@ -5,22 +5,32 @@ on:
     branches: [main, master]
 
 # One release at a time: a second merge waits for the first to finish rather than
-# racing it for the version commit.
+# racing it for the branch tip. GitHub keeps at most one run waiting per group, so a
+# third merge arriving while one waits cancels the waiting run.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  bump:
+  # Builds the commit the release would ship and parks it on a branch of its own.
+  # The release branch does not move here.
+  prepare:
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: read
     outputs:
-      version: ${{ steps.bump.outputs.version }}
-      sha: ${{ steps.bump.outputs.sha }}
+      version: ${{ steps.candidate.outputs.version }}
+      sha: ${{ steps.candidate.outputs.sha }}
+      base: ${{ steps.candidate.outputs.base }}
+      branch: ${{ steps.candidate.outputs.branch }}
     steps:
+      # The tip of the release branch, not the merge commit that triggered the run: a
+      # merge that landed while this run waited for the one before it is already on the
+      # branch, and the version is raised from what the branch carries now.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -41,49 +51,75 @@ jobs:
             echo "Releasing a $level version."
           fi
           echo "level=$level" >> "$GITHUB_OUTPUT"
-      - name: Write the new version and commit it
-        id: bump
+      - name: Commit the new version onto a candidate branch
+        id: candidate
         if: steps.level.outputs.level != ''
         env:
           LEVEL: ${{ steps.level.outputs.level }}
+          # The run attempt is part of the name so a re-run pushes its own candidate
+          # rather than a non-fast-forward update of the one the attempt before it left.
+          BRANCH: release-candidate/${{ github.run_id }}-${{ github.run_attempt }}
         run: |
+          base=$(git rev-parse HEAD)
           version=$(node scripts/release.mjs bump "$LEVEL")
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Only the version files changed, and the release refuses to run on a tree where
+          # Only the version files changed, and the bump refuses to run on a tree where
           # one of them no longer carries the version.
           git commit -am "chore(release): v$version"
-          git push origin "HEAD:${{ github.ref_name }}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          {
+            echo "version=$version"
+            echo "sha=$(git rev-parse HEAD)"
+            echo "base=$base"
+            echo "branch=$BRANCH"
+          } >> "$GITHUB_OUTPUT"
 
-  # The full matrix, run once, against the commit that carries the new version.
+  # The full matrix, run once, against the candidate commit — the tree that ships.
   verify:
-    needs: bump
-    if: needs.bump.outputs.version != ''
+    needs: prepare
+    if: needs.prepare.outputs.version != ''
     uses: ./.github/workflows/ci.yml
     with:
-      ref: ${{ needs.bump.outputs.sha }}
+      ref: ${{ needs.prepare.outputs.sha }}
 
-  tag:
-    needs: [bump, verify]
+  promote:
+    needs: [prepare, verify]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.bump.outputs.sha }}
-      - name: Tag the verified version commit
+          ref: ${{ needs.prepare.outputs.sha }}
+      - name: Move the release branch to the verified commit and tag it
         env:
-          VERSION: ${{ needs.bump.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          BASE: ${{ needs.prepare.outputs.base }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+          CANDIDATE: ${{ needs.prepare.outputs.branch }}
         run: |
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
+          git fetch --no-tags --depth=1 origin "refs/heads/$RELEASE_BRANCH"
+          tip=$(git rev-parse FETCH_HEAD)
+          if [ "$tip" != "$BASE" ]; then
+            echo "$RELEASE_BRANCH moved to $tip while the matrix ran, so v$VERSION was" \
+                 "checked against a tree that is no longer what $RELEASE_BRANCH carries."
+            echo "Nothing is tagged and nothing is published. Re-run this workflow: it" \
+                 "builds a new candidate on $tip and checks that one."
+            exit 1
+          fi
+          git tag "v$VERSION" "$SHA"
+          # One push, both refs: GitHub honours --atomic, so a branch update it rejects
+          # takes the tag down with it. The branch update is a plain fast-forward, which
+          # is what rejects it when a commit reaches the branch between the check above
+          # and this line.
+          git push --atomic origin "$SHA:refs/heads/$RELEASE_BRANCH" "refs/tags/v$VERSION"
+          git push origin ":refs/heads/$CANDIDATE"
 
   publish:
-    needs: [bump, tag]
+    needs: [prepare, promote]
     uses: ./.github/workflows/publish.yml
     with:
-      ref: v${{ needs.bump.outputs.version }}
+      ref: v${{ needs.prepare.outputs.version }}
     secrets: inherit

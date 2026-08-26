@@ -4,23 +4,9 @@ A release starts with one label on a pull request and needs nothing else from yo
 Add `release:major`, `release:minor` or `release:patch` before the merge, and the
 merge itself raises the version, checks it, tags it and publishes it to npm.
 
-## Before the first release
-
-The three labels have to exist on the repository. Create them once:
-
-```bash
-gh label create release:major --repo kvokka/codex-mcp --color B60205 --description "Merging this cuts a major release"
-gh label create release:minor --repo kvokka/codex-mcp --color 0E8A16 --description "Merging this cuts a minor release"
-gh label create release:patch --repo kvokka/codex-mcp --color 1D76DB --description "Merging this cuts a patch release"
-```
-
-The npm trusted publisher for `@kvokka/codex-mcp` names the workflow that publishes,
-which is still `.github/workflows/publish.yml` — the release run calls that file
-rather than repeating what it does, and the OIDC token names the file holding the
-job. If the first release run reaches the publish job and npm rejects the token,
-that setting is where to look.
-
 ## The label
+
+The three labels exist on <https://github.com/kvokka/codex-mcp>:
 
 | Label            | 2.2.0 becomes | Use it for                                            |
 | ---------------- | ------------- | ----------------------------------------------------- |
@@ -38,23 +24,58 @@ merge an empty follow-up pull request carrying the label you meant.
 
 ## What the merge does
 
-`.github/workflows/release.yml` runs on every push to `master` and holds four jobs:
+`.github/workflows/release.yml` runs on every push to `master` and holds four jobs.
+`master` moves in the third of them, after the matrix has passed.
 
-1. **bump** reads the labels of the pull request whose merge produced the commit,
+1. **prepare** reads the labels of the pull request whose merge produced the commit,
    through `repos/{repo}/commits/{sha}/pulls`. With no release label it stops here.
-   Otherwise it runs `node scripts/release.mjs bump <level>`, which writes the new
-   version into every file that carries one, commits them as
-   `chore(release): vX.Y.Z` and pushes that commit to `master`.
-2. **verify** calls `.github/workflows/ci.yml` on that commit — the same matrix of
-   seven runners the pull request went through, plus the markdown lint.
-3. **tag** creates `vX.Y.Z` on the verified commit and pushes it. Nothing is tagged
-   before the matrix is green.
+   Otherwise it checks out the tip of `master`, runs
+   `node scripts/release.mjs bump <level>`, commits the version files as
+   `chore(release): vX.Y.Z` and pushes that commit to a branch of its own,
+   `release-candidate/<run id>-<attempt>`. `master` does not move.
+2. **verify** calls `.github/workflows/ci.yml` on the candidate commit — the same
+   matrix of seven runners the pull request went through, plus the markdown lint. It
+   checks the tree that ships, the raised version files included.
+3. **promote** fast-forwards `master` to the candidate commit and pushes the tag
+   `vX.Y.Z` in one `git push --atomic`, then deletes the candidate branch. This is
+   the first moment `master` carries the new version, and the tag names the exact
+   commit the matrix passed on.
 4. **publish** calls `.github/workflows/publish.yml` on the tag, which runs
    `npm publish --provenance --access public` from the `npm` environment. The npm
    registry authenticates the run through OIDC, so the workflow carries no token.
 
+A red matrix leaves `master`, the tags and npm as they were. The candidate branch is
+the only thing such a run wrote, and it holds the commit that failed.
+
 All four are one workflow run: the version, the tag and the published package come
 out of a single link in the Actions tab.
+
+## Two merges close together
+
+`concurrency: release-${{ github.ref }}` with `cancel-in-progress: false` runs one
+release at a time. A merge that lands while a release runs waits for it, then reads
+`master` as that release left it and raises the version once more — 2.3.0 followed
+by 2.3.1.
+
+`promote` compares `master` against the commit `prepare` built on. A commit that
+reached `master` while the matrix ran — a second merge, a direct push — makes the two
+differ, and the job stops with the message before it tags anything. Re-run the
+workflow from the Actions tab: the new run builds a candidate on the current tip and
+checks that one. The atomic push behind that check covers the seconds after it,
+because GitHub rejects the tag together with a branch update it refuses.
+
+GitHub keeps at most one run waiting per concurrency group, so three merges in quick
+succession cancel the middle run before it starts. Its label cuts no version, and its
+code ships in the version the last merge cuts. Merge labelled pull requests one at a
+time, or re-run the cancelled release from the Actions tab.
+
+## The npm trusted publisher
+
+The npm trusted publisher for `@kvokka/codex-mcp` names the workflow that publishes,
+which is `.github/workflows/publish.yml` — the release run calls that file rather than
+repeating what it does, and the OIDC token names the file holding the job. If a
+release run reaches the publish job and npm rejects the token, that setting is where
+to look.
 
 ## Where the version lives
 
@@ -86,20 +107,28 @@ release run does not touch it.
 
 Read the run in the Actions tab and find the first red job.
 
-**bump failed.** Nothing was written. The version files, the tags and npm are
-untouched. Fix what the log names and re-run the workflow from the Actions tab.
+**prepare failed.** Nothing was released. `master`, the tags and npm are untouched.
+Fix what the log names and re-run the workflow from the Actions tab.
 
-**verify failed.** `master` carries the `chore(release): vX.Y.Z` commit, no tag
-exists and npm holds nothing new. Fix the failure in a new pull request. Label that
-pull request with the same level you meant, which raises the version once more —
-the version the broken commit named is skipped, and skipping a number costs
-nothing. To reuse the number instead, revert the release commit before merging the
-fix.
+**verify failed.** Nothing was released. `master` carries no version commit, no tag
+exists and npm holds nothing new. The branch `release-candidate/<run id>-<attempt>`
+holds the commit the matrix rejected: read the failure against it, then delete the
+branch. Fix the failure in a new pull request carrying the label you meant. The
+version the rejected candidate named is still free, and the next run takes it.
 
-**tag failed.** Same state as above plus whatever the log says about the push,
-usually a tag that already exists. Delete the stale tag
-(`git push origin :refs/tags/vX.Y.Z`) only after checking that npm does not already
-hold that version, then re-run the failed jobs.
+**promote failed.** Ask git which refs moved:
+
+```bash
+git ls-remote origin refs/heads/master 'refs/tags/vX.Y.Z'
+```
+
+The push is atomic, so the branch and the tag moved together or not at all. Neither
+moved — the log says `master` moved during the matrix, or the push was rejected: the
+state is the one **verify failed** describes, and re-running the workflow builds a
+fresh candidate on the current tip. Both moved — the release is on `master` and
+tagged, and only the candidate branch deletion failed: delete
+`release-candidate/<run id>-<attempt>` by hand and re-run the failed jobs so
+**publish** gets its turn.
 
 **publish failed.** The tag `vX.Y.Z` exists and `master` carries its version, but
 npm does not have the package. Nothing needs undoing. Run the `Publish` workflow by
@@ -109,6 +138,9 @@ because the version is already on npm needs nothing at all — the release is ou
 
 **The run published and then something failed.** npm versions cannot be replaced.
 Release the fix as a new patch.
+
+Candidate branches left behind by a failed run are safe to delete once you have read
+them; nothing but that run refers to them.
 
 ## Checking a release
 
