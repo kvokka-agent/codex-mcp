@@ -14,6 +14,7 @@ MCP server that wraps [OpenAI Codex](https://github.com/openai/codex) — start 
 - **Zero config** — inherits your local `~/.codex/config.toml` automatically
 - **Session management** — list, inspect, cancel, interrupt, fork sessions
 - **Status protocol** — `codex_check` reports the state of a session and what it waits for, never the turn's transcript
+- **Activity heading** — `progress.activity` carries one line in Codex's own words saying what it is doing right now
 - **Disk persistence** — session state, event logs, and results survive server restarts (`~/.codex-mcp/state/`)
 - **Long-polling** — `codex_check` takes `waitMs` and returns when the status changes, an action arrives or the turn ends
 - **Graceful shutdown** — stdin drain logic waits for active sessions before exiting
@@ -403,7 +404,8 @@ it: the caller gets the state of the session and the things it must answer.
 `codex_check` answers every action with one payload:
 
 - `status`: `running`, `waiting_approval`, `idle`, `error` or `cancelled`.
-- `progress`: the phase (`starting`, `reasoning`, `acting`, `waiting_approval`, `finished`, `error`, `cancelled`), the number of open actions, the time of the last event, the active turn id, and the token counters the backend reported.
+- `progress`: the phase (`starting`, `reasoning`, `acting`, `waiting_approval`, `finished`, `error`, `cancelled`), the number of open actions, the time of the last event, the active turn id, the token counters the backend reported, and `activity`.
+- `progress.activity`: one line in Codex's own words saying what it is doing right now — `"Разбираю падение теста в session-manager"`. See [Activity Marker](#activity-marker).
 - `actions[]`: what the caller must answer — approval requests and questions. Answer each by its `requestId`.
 - `result`: the finished turn's answer, carried by the first check that sees a terminal status. Later checks of the same turn report the status alone.
 - `interactionState` and `recommendedNextAction`: `poll`, `respond_permission`, `respond_user_input`, or `none` when the turn is over.
@@ -415,8 +417,48 @@ directory, and the full history of the turn is in Codex's own rollout log; sendi
 through an MCP client's context would put the whole run through the model a second time.
 
 `waitMs` long-polls: the call blocks until the status changes, a new action arrives, or
-the turn ends. Deltas and token-counter updates do not end the wait. It is capped at
-`120000` ms, and a session accepts 4 concurrent long polls — the fifth returns at once.
+the turn ends. Deltas, token-counter updates and a new activity line do not end the wait.
+It is capped at `120000` ms, and a session accepts 4 concurrent long polls — the fifth
+returns at once.
+
+## Activity Marker
+
+Between two approval requests a turn can run for minutes with nothing but a phase and a
+token counter to show for it. The activity marker says what the work is, at the cost of
+one string per session.
+
+The server puts a standing developer instruction on every thread it starts
+(`thread/start` → `developerInstructions`), asking Codex to write one line of the form
+
+```text
+%%%ACTIVITY: Разбираю падение теста в session-manager%%%
+```
+
+whenever it starts something new, in the language of the request. The server reads those
+lines out of the `item/agentMessage/delta` stream, keeps the last one in
+`progress.activity`, and cuts every marker out of `result.text`, so the caller reads
+Codex's answer and nothing the server put there for itself.
+
+- **It is a heading, not a percentage.** How much of the task is done is unknown to the
+  agent and is not reported. The line is overwritten, never accumulated: ten sessions cost
+  ten strings.
+- **The stream cuts it.** Deltas are model tokens — a measured run had a median of three
+  characters, and a live run delivered the closing `%%%` as `"%%"` then `"%\n"` — so the
+  server scans the concatenation across deltas, not one delta.
+- **A `%%%` run alone never matches.** The `ACTIVITY:` tag is required, which is what keeps
+  `printf '%%%d'` in quoted output from registering. A whole marker Codex quotes back from
+  a file does register; the cost is one wrong heading, overwritten by the next real one.
+- **Bounded.** The line is cut to 120 characters, an opener with no closing sentinel on its
+  line is given up as ordinary text, and `progress.activity` is empty until the turn's
+  first marker.
+- `advanced.developerInstructions` is appended after this instruction rather than replacing
+  it. `CODEX_MCP_DISABLE_ACTIVITY_MARKER=1` stops the server from sending it.
+- **Exec fallback has no activity line.** `codex exec` takes no developer instructions, so
+  a session in exec mode gets no markers to extract.
+
+Every extracted line is also written to the session's `events.jsonl` as a record of type
+`activity`, so a reader of the state directory gets the sequence of what the session was
+doing without reading the raw stream around it.
 
 When a turn completes, `result.text` provides a stable final assistant message: `turn.output` when the backend sent one, else the last completed `agentMessage` item. Only `codex exec` sends `turn.output`, which `result.output` carries as sent; the app-server turn has no such field, so app-server sessions answer from the agent message.
 
@@ -514,6 +556,7 @@ Session metadata, child-process identity, and turn results are persisted to disk
 | `CODEX_MCP_MODE`                 | Force `app-server` or `exec` backend mode        | auto-detect          |
 | `CODEX_MCP_STDIO_MODE`           | STDIO preflight guard: `auto`/`strict`/`off`     | `auto`               |
 | `CODEX_MCP_DISABLE_NOISE_FILTER` | Set to `1` to disable PowerShell noise filtering | `0`                  |
+| `CODEX_MCP_DISABLE_ACTIVITY_MARKER` | Set to `1` to start threads without the activity-marker instruction | `0` |
 
 ## Development
 

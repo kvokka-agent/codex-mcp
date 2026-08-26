@@ -429,10 +429,56 @@ Every `codex`, `codex_reply`, and `codex_check` response carries three orchestra
 | `lastEventAt`        | Timestamp of the last notification or server request                                                |
 | `activeTurnId`       | The turn id tracked from `turn/started`                                                             |
 | `pendingActionCount` | Unresolved pending requests                                                                         |
-| `lastMethod`         | The last observed JSON-RPC method, ignoring `thread/tokenUsage/updated`                             |
 | `tokens`             | Merged from `thread/tokenUsage/updated` and the exec turn's `usage`, accepting both camelCase and snake_case key names |
+| `activity`           | The last activity marker extracted from `item/agentMessage/delta`, cleared when a turn starts |
 
 `reasoning` covers `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`, and `item/plan/delta`. `acting` covers `item/commandExecution/outputDelta`, `item/commandExecution/terminalInteraction`, `item/fileChange/outputDelta`, `item/mcpToolCall/progress`, `turn/diff/updated`, and `turn/plan/updated`.
+
+### The Activity Marker
+
+`progress.activity` names the work: one line Codex writes about what it is doing, in the
+language of the request. `phase` and `tokens` say a turn is moving; between two approval
+requests they say nothing about what it is moving on.
+
+**Delivery.** `SessionManager.createSession` composes the thread's developer instructions
+in `src/session/activity-marker.ts` and passes them to `thread/start` →
+`developerInstructions` (`codex-schema/v2/ThreadStartParams.json`, `["string","null"]`,
+not in `required`). The server sets them, so a marker reaches every client rather than the
+one that read the documentation. `advanced.developerInstructions` is appended after the
+server's block; `thread/fork` and `thread/resume` carry the same composed string, so a
+forked session keeps the protocol. `CODEX_MCP_DISABLE_ACTIVITY_MARKER=1` sends no
+instruction, and extraction and stripping stay on either way.
+
+`codex exec` accepts no developer instructions — `buildExecArgs` has nothing to put them
+on — so an exec-mode session produces no markers and reports no `activity`.
+
+**Form.** `%%%ACTIVITY: <one line>%%%`. The `ACTIVITY:` tag carries the recognition: a bare
+`%%%` run reaches the stream whenever Codex quotes a `printf` format or a template, and
+matching on the sigil alone would fire on it. A whole marker Codex quotes back out of a
+file is indistinguishable from one it means, and costs one wrong heading until the next
+real marker overwrites it.
+
+**Extraction.** `ActivityMarkerScanner` holds a carry buffer per session and decides on the
+concatenation of the deltas, not on one delta: `item/agentMessage/delta` carries model
+tokens, measured at a median of three characters over 626 real deltas, and a live run
+delivered the closing sentinel as `"%%"` then `"%\n"`. Text outside a marker is dropped as
+it passes, so the buffer holds at most eleven characters between markers and
+`ACTIVITY_SCAN_LIMIT` (480) inside one. An opener whose line ends, or which runs past that
+limit, without a closing sentinel is given up as ordinary text and the scan resumes after
+it. A closed line is trimmed and cut to `MAX_ACTIVITY_LENGTH` (120).
+
+The scanner is reset when an `agentMessage` item completes and when `turn/started`
+arrives, which also clears `progress.activity` — the new turn has not said what it is
+doing yet.
+
+**Removal from the result.** `stripActivityMarkers` runs over the completed `agentMessage`
+text and over the exec turn's `output`, so `result.text`, `result.output` and the JSON that
+`structuredOutput` is parsed from carry the answer alone. Text holding no marker comes back
+byte for byte.
+
+**Cost.** One string per session, overwritten. A marker does not move `signalOf`, so a long
+poll sleeps through it: an activity line is a heading the caller reads on its next poll, not
+something it answers.
 
 ## The Event Log
 
@@ -451,7 +497,8 @@ for the sequence number to continue from.
 
 | app-server method                       | codex-mcp event type | Notes                                                                     |
 | --------------------------------------- | -------------------- | --------------------------------------------------------------------------- |
-| `item/agentMessage/delta`               | output               | Agent text increment                                                        |
+| `item/agentMessage/delta`               | output               | Agent text increment; also the source of `activity` markers                 |
+| activity marker (codex-mcp internal)    | activity             | One extracted `%%%ACTIVITY: ...%%%` line, flushed to disk at once           |
 | `item/completed` (ThreadItem)           | output/progress      | By `item.type`: `agentMessage`/`userMessage` → output; everything else → progress |
 | `item/started`                          | progress             | Item started                                                                |
 | `rawResponseItem/completed` (ResponseItem) | progress          | ExecClient's `raw_response_item`; a ResponseItem, so no `agentMessage` type and no final answer to read |
