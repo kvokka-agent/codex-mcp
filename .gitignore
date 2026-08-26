@@ -32,6 +32,11 @@ Thumbs.db
 # Claude
 .claude/
 
+# Local development server wiring (docs/DEVELOPMENT.md). The plugin's own
+# plugins/codex-mcp/.mcp.json is tracked; only the repo-root one is local.
+/.mcp.json
+/.codex-mcp-state/
+
 # Generated reference schemas (single-file outputs)
 codex-app-server.schema.json
 server-notifications.json
