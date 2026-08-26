@@ -42,6 +42,7 @@ const {
   POLL_DEFAULT_MAX_EVENTS,
   POLL_MIN_MAX_EVENTS,
   RESPOND_DEFAULT_MAX_EVENTS,
+  RESPONSE_MODE_DELTA_LIMITS,
   DEFAULT_IDLE_CLEANUP_MS,
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
@@ -673,6 +674,12 @@ describe("resource documents served over MCP", () => {
     expect(gotchas).toContain(`Poll default is \`maxEvents=${POLL_DEFAULT_MAX_EVENTS}\``);
     expect(gotchas).toContain(`Poll enforces minimum \`maxEvents=${POLL_MIN_MAX_EVENTS}\``);
     expect(gotchas).toContain(`\`maxEvents=${RESPOND_DEFAULT_MAX_EVENTS}\``);
+    expect(gotchas).toContain(
+      "`maxEvents` is a top-level `codex_check` field; `pollOptions` rejects it"
+    );
+    expect(gotchas).toContain(
+      `minimal ${RESPONSE_MODE_DELTA_LIMITS.minimal}, delta_compact ${RESPONSE_MODE_DELTA_LIMITS.delta_compact}, full ${RESPONSE_MODE_DELTA_LIMITS.full} characters`
+    );
     expect(gotchas).toContain(`(default ${DEFAULT_APPROVAL_TIMEOUT_MS} ms)`);
     expect(gotchas).toContain(`default approval timeout is ${DEFAULT_APPROVAL_TIMEOUT_MS / 1000}`);
     expect(quickstart).toContain(

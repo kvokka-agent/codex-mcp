@@ -136,6 +136,28 @@ describe("executeCodexCheck", () => {
       expect(res.nextCursor).toBe(1);
     });
 
+    it("drains a large backlog in a few default-window calls", () => {
+      const backlog = 200;
+      for (let i = 0; i < backlog; i++) {
+        emitOutput(`b${i}`);
+      }
+
+      const drained: number[] = [];
+      let calls = 0;
+      let cursor: number | undefined = 0;
+      while (calls < 50) {
+        const res = expectCheck(executeCodexCheck({ action: "poll", sessionId, cursor }, manager));
+        calls++;
+        for (const event of res.events) drained.push(event.id);
+        cursor = res.nextCursor;
+        if (res.events.length === 0) break;
+      }
+
+      expect(drained).toHaveLength(backlog);
+      // 200 buffered events / a 50-event window, plus the call that finds nothing left.
+      expect(calls).toBe(5);
+    });
+
     it("floors a fractional maxEvents", () => {
       emitOutput("A");
       emitOutput("B");
@@ -235,6 +257,57 @@ describe("executeCodexCheck", () => {
 
       expect(data.aggregatedOutput).toBe("hello world");
       expect(data.itemId).toBe("item_cmd");
+    });
+
+    it("caps a huge delta per event in full mode and marks it truncated", () => {
+      const huge = "x".repeat(40_000);
+      client.emitNotification(Methods.AGENT_MESSAGE_DELTA, {
+        threadId: "thread_mock",
+        turnId: "turn_mock",
+        itemId: "item_huge",
+        delta: huge,
+      });
+
+      const res = expectCheck(
+        executeCodexCheck(
+          { action: "poll", sessionId, cursor: 0, maxEvents: 50, responseMode: "full" },
+          manager
+        )
+      );
+
+      const data = res.events[res.events.length - 1].data as {
+        delta: string;
+        deltaTruncated?: boolean;
+      };
+      expect(data.delta.length).toBe(16_384);
+      expect(data.delta).toBe(huge.slice(0, data.delta.length));
+      expect(data.deltaTruncated).toBe(true);
+    });
+
+    it("keeps the tighter per-event delta caps of the compact modes", () => {
+      client.emitNotification(Methods.AGENT_MESSAGE_DELTA, {
+        threadId: "thread_mock",
+        turnId: "turn_mock",
+        itemId: "item_huge",
+        delta: "y".repeat(40_000),
+      });
+
+      const lengths = (["minimal", "delta_compact"] as const).map((mode) => {
+        const res = expectCheck(
+          executeCodexCheck(
+            { action: "poll", sessionId, cursor: 0, maxEvents: 50, responseMode: mode },
+            manager
+          )
+        );
+        const data = res.events[res.events.length - 1].data as {
+          delta: string;
+          deltaTruncated?: boolean;
+        };
+        expect(data.deltaTruncated).toBe(true);
+        return data.delta.length;
+      });
+
+      expect(lengths).toEqual([256, 2048]);
     });
 
     it("defaults to minimal when responseMode is omitted", () => {
@@ -733,6 +806,28 @@ describe("executeCodexCheck", () => {
       expect(res.interactionState).toBe("working");
     });
 
+    it("keeps the compact ACK while events sit in the buffer", () => {
+      // Read the pending request without consuming events, so the buffer still
+      // holds a backlog the new poll default would return.
+      const actions = expectCheck(
+        executeCodexCheck(
+          { action: "poll", sessionId, cursor: 0, pollOptions: { includeEvents: false } },
+          manager
+        )
+      ).actions;
+      const requestId = actions![0].requestId;
+      for (let i = 0; i < 20; i++) emitOutput(`ack${i}`);
+
+      const res = expectCheck(
+        executeCodexCheck(
+          { action: "respond_permission", sessionId, requestId, decision: "accept" },
+          manager
+        )
+      );
+
+      expect(res.events).toEqual([]);
+    });
+
     it("returns events when maxEvents is raised", () => {
       const requestId = pendingRequestId();
 
@@ -839,6 +934,31 @@ describe("executeCodexCheck", () => {
         )
       );
       expect(res.error).toBe("Error [REQUEST_NOT_FOUND]: User input request 'req_nope' not found");
+    });
+
+    it("keeps the compact ACK while events sit in the buffer", () => {
+      const actions = expectCheck(
+        executeCodexCheck(
+          { action: "poll", sessionId, cursor: 0, pollOptions: { includeEvents: false } },
+          manager
+        )
+      ).actions;
+      const requestId = actions![0].requestId;
+      for (let i = 0; i < 20; i++) emitOutput(`ack${i}`);
+
+      const res = expectCheck(
+        executeCodexCheck(
+          {
+            action: "respond_user_input",
+            sessionId,
+            requestId,
+            answers: { q1: { answers: ["main"] } },
+          },
+          manager
+        )
+      );
+
+      expect(res.events).toEqual([]);
     });
 
     it("forwards the answers to the app-server", () => {

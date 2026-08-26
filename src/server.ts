@@ -192,44 +192,69 @@ export function createServer(
     ...errorOutputShape,
   };
 
+  const POLL_OPTION_KEYS = [
+    "includeEvents",
+    "includeActions",
+    "includeResult",
+    "skipDeltas",
+    "finalOnly",
+    "maxBytes",
+    "waitMs",
+  ] as const;
+
   const codexCheckPollOptionsSchema = z
-    .object({
-      includeEvents: z
-        .boolean()
-        .optional()
-        .describe("Default: true. Include events[] in response."),
-      includeActions: z
-        .boolean()
-        .optional()
-        .describe("Default: true. Include actions[] in response."),
-      includeResult: z.boolean().optional().describe("Default: true. Include result in response."),
-      skipDeltas: z
-        .boolean()
-        .optional()
-        .describe(
-          "Default: false. Drop delta-heavy streaming events while still advancing the cursor."
-        ),
-      finalOnly: z
-        .boolean()
-        .optional()
-        .describe("Default: false. Omit events and focus on actions + terminal result."),
-      maxBytes: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Default: unlimited. Best-effort response payload cap in bytes."),
-      waitMs: z
-        .number()
-        .int()
-        .nonnegative()
-        .optional()
-        .describe(
-          "Long-poll: block up to this many ms for new events (max 120000). Omit or 0 for immediate return."
-        ),
-    })
+    .strictObject(
+      {
+        includeEvents: z
+          .boolean()
+          .optional()
+          .describe("Default: true. Include events[] in response."),
+        includeActions: z
+          .boolean()
+          .optional()
+          .describe("Default: true. Include actions[] in response."),
+        includeResult: z
+          .boolean()
+          .optional()
+          .describe("Default: true. Include result in response."),
+        skipDeltas: z
+          .boolean()
+          .optional()
+          .describe(
+            "Default: false. Drop delta-heavy streaming events while still advancing the cursor."
+          ),
+        finalOnly: z
+          .boolean()
+          .optional()
+          .describe("Default: false. Omit events and focus on actions + terminal result."),
+        maxBytes: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Default: unlimited. Best-effort response payload cap in bytes."),
+        waitMs: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe(
+            "Long-poll: block up to this many ms for new events (max 120000). Omit or 0 for immediate return."
+          ),
+      },
+      {
+        // A silently dropped key is the worst answer here: clients sent
+        // pollOptions.maxEvents and got the poll default without a word back.
+        error: (issue) =>
+          issue.code === "unrecognized_keys"
+            ? `Unknown pollOptions key(s): ${issue.keys.join(", ")}. maxEvents is a top-level codex_check field, not a pollOptions field — move it beside "action" and "sessionId". Allowed pollOptions keys: ${POLL_OPTION_KEYS.join(", ")}.`
+            : undefined,
+      }
+    )
     .optional()
-    .describe("Optional poll shaping controls.");
+    .describe(
+      "Optional poll shaping controls. Unknown keys are rejected; maxEvents is a top-level codex_check field."
+    );
 
   const codexCheckInputSchema = z
     .object({

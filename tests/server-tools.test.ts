@@ -401,6 +401,41 @@ describe("server tool registration", () => {
       expect(res.content[0].text).toContain("maxEvents >= 1");
     });
 
+    it("rejects maxEvents smuggled into pollOptions instead of dropping it", async () => {
+      const res = await callTool("codex_check", {
+        action: "poll",
+        sessionId: "sess_x",
+        pollOptions: { maxEvents: 100 },
+      });
+
+      expect(res.isError).toBe(true);
+      expect(res.content[0].text).toContain("maxEvents");
+      expect(res.content[0].text).toContain("top-level codex_check field");
+      expect(res.content[0].text).toContain("pollOptions");
+    });
+
+    it("accepts every documented pollOptions key", async () => {
+      const sessionId = await startSession();
+
+      const res = await callTool("codex_check", {
+        action: "poll",
+        sessionId,
+        cursor: 0,
+        pollOptions: {
+          includeEvents: true,
+          includeActions: true,
+          includeResult: true,
+          skipDeltas: false,
+          finalOnly: false,
+          maxBytes: 4096,
+          waitMs: 0,
+        },
+      });
+
+      expect(res.isError).toBe(false);
+      expect(res.structuredContent!.sessionId).toBe(sessionId);
+    });
+
     it("rejects respond-only fields on a poll", async () => {
       const cases: Array<[string, unknown]> = [
         ["requestId", "req_1"],

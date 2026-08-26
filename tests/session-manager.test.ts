@@ -241,45 +241,31 @@ describe("SessionManager protocol compatibility + approvals", () => {
     expect(manager.getObservedDefaultModel()).toBe("o4");
   });
 
-  it("defaults poll to one incremental event when maxEvents is omitted", async () => {
+  it("defaults poll to a 50-event window and moves the cursor past the last one", async () => {
     const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
 
-    client.emitNotification(Methods.AGENT_MESSAGE_DELTA, {
-      threadId,
-      turnId: "turn_1",
-      itemId: "item_a",
-      delta: "A",
-    });
-    client.emitNotification(Methods.AGENT_MESSAGE_DELTA, {
-      threadId,
-      turnId: "turn_1",
-      itemId: "item_b",
-      delta: "B",
-    });
+    const emitted = 60;
+    for (let i = 0; i < emitted; i++) {
+      client.emitNotification(Methods.AGENT_MESSAGE_DELTA, {
+        threadId,
+        turnId: "turn_1",
+        itemId: `item_${i}`,
+        delta: String(i),
+      });
+    }
 
-    const poll1 = executeCodexCheck(
-      {
-        action: "poll",
-        sessionId,
-        cursor: 0,
-      },
-      manager
-    );
+    const poll1 = executeCodexCheck({ action: "poll", sessionId, cursor: 0 }, manager);
     expect((poll1 as { isError?: boolean }).isError).not.toBe(true);
     const r1 = poll1 as { events: Array<{ id: number }>; nextCursor: number };
-    expect(r1.events).toHaveLength(1);
-    expect(r1.nextCursor).toBe(r1.events[0].id + 1);
+    expect(r1.events).toHaveLength(50);
+    expect(r1.nextCursor).toBe(r1.events[r1.events.length - 1].id + 1);
 
-    const poll2 = executeCodexCheck(
-      {
-        action: "poll",
-        sessionId,
-      },
-      manager
-    );
+    // The second call continues from the session cursor and drains the tail.
+    const poll2 = executeCodexCheck({ action: "poll", sessionId }, manager);
     expect((poll2 as { isError?: boolean }).isError).not.toBe(true);
-    const r2 = poll2 as { events: Array<{ id: number }> };
-    expect(r2.events).toHaveLength(1);
+    const r2 = poll2 as { events: Array<{ id: number }>; nextCursor: number };
+    expect(r2.events).toHaveLength(emitted - 50);
+    expect(r2.events[0].id).toBe(r1.nextCursor);
   });
 
   it("treats poll maxEvents=0 as 1 to avoid no-op polling loops", async () => {

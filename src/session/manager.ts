@@ -63,6 +63,7 @@ import {
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
   CLEANUP_INTERVAL_MS,
+  RESPONSE_MODE_DELTA_LIMITS,
 } from "../types.js";
 
 const COALESCED_PROGRESS_DELTA_METHODS = new Set<string>([
@@ -2895,7 +2896,12 @@ function serializeEventForMode(
   mode: ResponseMode
 ): { id: number; type: SessionEventType; data: unknown; timestamp: string } {
   if (mode === "full") {
-    return { id: event.id, type: event.type, data: event.data, timestamp: event.timestamp };
+    return {
+      id: event.id,
+      type: event.type,
+      data: capEventDelta(event.data, RESPONSE_MODE_DELTA_LIMITS.full),
+      timestamp: event.timestamp,
+    };
   }
   const minimal = mode === "minimal";
   return {
@@ -2904,6 +2910,13 @@ function serializeEventForMode(
     data: compactEventData(event.data, minimal),
     timestamp: event.timestamp,
   };
+}
+
+function capEventDelta(data: unknown, limit: number): unknown {
+  if (!isRecord(data)) return data;
+  const delta = data.delta;
+  if (typeof delta !== "string" || delta.length <= limit) return data;
+  return { ...data, delta: delta.slice(0, limit), deltaTruncated: true };
 }
 
 function compactEventData(data: unknown, minimal: boolean): unknown {
@@ -2959,7 +2972,7 @@ function compactEventData(data: unknown, minimal: boolean): unknown {
   }
 
   if (typeof compact.delta === "string") {
-    const limit = minimal ? 256 : 2048;
+    const limit = RESPONSE_MODE_DELTA_LIMITS[minimal ? "minimal" : "delta_compact"];
     if (compact.delta.length > limit) {
       compact.delta = compact.delta.slice(0, limit);
       compact.deltaTruncated = true;

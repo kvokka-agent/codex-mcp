@@ -328,8 +328,15 @@ export const DEFAULT_POLL_INTERVAL = 120_000;
  * Kept short so callers can unblock pending actions before approval timeout.
  */
 export const WAITING_APPROVAL_POLL_INTERVAL = 1000;
-/** Public codex_check default for action="poll" when maxEvents is omitted. */
-export const POLL_DEFAULT_MAX_EVENTS = 1;
+/**
+ * Public codex_check default for action="poll" when maxEvents is omitted.
+ * Sized against DEFAULT_POLL_INTERVAL and DEFAULT_EVENT_BUFFER_SIZE: one poll per
+ * interval makes this window the whole throughput of the event stream, and a client
+ * a full buffer behind needs DEFAULT_EVENT_BUFFER_SIZE / this many calls to catch up
+ * before eviction answers it with cursorResetTo instead. Raising
+ * DEFAULT_POLL_INTERVAL without raising this starves every consumer.
+ */
+export const POLL_DEFAULT_MAX_EVENTS = 50;
 /** Public codex_check lower bound for action="poll" to avoid no-op loops. */
 export const POLL_MIN_MAX_EVENTS = 1;
 /** Public codex_check default for action="respond_*" when maxEvents is omitted. */
@@ -339,6 +346,18 @@ export const RESPOND_DEFAULT_MAX_EVENTS = 0;
  * Not used as codex_check external default.
  */
 export const DEFAULT_MAX_EVENTS = 200;
+/**
+ * Per-event `delta` cap by response mode, in characters. `full` carries whole event
+ * payloads for debugging, so its cap is generous, but no mode is unbounded: a poll
+ * window of raw deltas would otherwise put megabytes on the wire twice, once in
+ * `content[0].text` and once in `structuredContent`. A cut delta carries
+ * `deltaTruncated: true`.
+ */
+export const RESPONSE_MODE_DELTA_LIMITS: Record<ResponseMode, number> = {
+  minimal: 256,
+  delta_compact: 2048,
+  full: 16_384,
+};
 export const DEFAULT_EVENT_BUFFER_SIZE = 1000;
 export const DEFAULT_EVENT_BUFFER_HARD_SIZE = 2000;
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 60_000;

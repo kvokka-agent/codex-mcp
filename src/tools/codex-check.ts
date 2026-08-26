@@ -63,9 +63,8 @@ export function executeCodexCheck(
           isError: true,
         };
       }
-      // Default to a single incremental event for lightweight polling.
-      // Polling with maxEvents=0 can cause no-op loops in some clients, so
-      // enforce a minimum of 1 for poll.
+      // POLL_DEFAULT_MAX_EVENTS sets the window; maxEvents=0 can cause no-op loops
+      // in some clients, so poll raises anything below POLL_MIN_MAX_EVENTS.
       const maxEvents =
         typeof args.maxEvents === "number"
           ? Math.max(POLL_MIN_MAX_EVENTS, Math.floor(args.maxEvents))

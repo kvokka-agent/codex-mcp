@@ -93,7 +93,7 @@ describe("tools/list metadata", () => {
     expect(codexSession).toContain("clean_background_terminals");
 
     const codexCheck = tool(tools, "codex_check").description ?? "";
-    expect(codexCheck).toContain("Default maxEvents=1");
+    expect(codexCheck).toContain("Default maxEvents=50");
     expect(codexCheck).toContain("respond_permission");
     expect(codexCheck).toContain("codex-mcp:///gotchas");
   });

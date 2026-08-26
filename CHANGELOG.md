@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `codex_check(action="poll")` returns up to 50 events per call instead of 1. `POLL_DEFAULT_MAX_EVENTS` was set when the recommended poll interval was 3000 ms; the interval later became 120000 ms and the window stayed at 1, which capped the stream at 0.5 events per minute and left a client a full 1000-event buffer behind needing 1001 calls to catch up — more than eviction allows, so it only ever got `cursorResetTo`. Measured on ten parallel sessions: 502 of 502 polls returned exactly one event, one client round-trip each, 44.6M tokens of client context over 1144 turns.
+- `pollOptions.maxEvents` fails validation instead of being dropped in silence. `maxEvents` is a top-level `codex_check` field; `pollOptions` was not strict, so Zod stripped the key and the caller got the poll default with no diagnostic. `pollOptions` now rejects every key it does not declare and the error says where `maxEvents` belongs.
+- `responseMode="full"` caps a per-event `delta` at 16384 characters and marks the event `deltaTruncated`, as `minimal` (256) and `delta_compact` (2048) already did. `full` returned the raw payload with no per-event bound, and `pollOptions.maxBytes` is unset by default, so a 50-event window of 20 KB deltas would put megabytes on the wire twice — once in `content[0].text`, once in `structuredContent`.
+
 ## [2.2.0] - 2026-08-26
 
 First release of this fork. It carries the 2.1.1-2.1.7 work published on npm by @leo000001,

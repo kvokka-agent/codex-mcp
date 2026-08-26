@@ -299,7 +299,7 @@ Takes an optional `cwd` and returns:
 │
 │ # poll
 ├── cursor?: number          # event offset, default the session's last consumed cursor
-├── maxEvents?: number       # poll default 1 (minimum 1), respond_* default 0
+├── maxEvents?: number       # poll default 50 (minimum 1), respond_* default 0
 ├── responseMode?: "minimal" | "delta_compact" | "full"  # default minimal
 ├── pollOptions?: {
 │     includeEvents?: boolean   # default true
@@ -518,7 +518,8 @@ On Windows, PowerShell profile output (oh-my-posh banners, PSReadLine, terminal-
 
 ### Poll Shaping
 
-- `responseMode` controls per-event payload size: `minimal` (default), `delta_compact`, `full`.
+- `responseMode` controls per-event payload size: `minimal` (default), `delta_compact`, `full`. Each caps a per-event `delta` — 256, 2048 and 16384 characters — and sets `deltaTruncated` on the event it cut.
+- `pollOptions` rejects any key it does not declare. `maxEvents` is a top-level `codex_check` field, and sending it inside `pollOptions` fails validation instead of falling back to the default.
 - `pollOptions.skipDeltas` omits `item/agentMessage/delta`, `item/commandExecution/outputDelta`, `item/fileChange/outputDelta`, `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`, and `item/plan/delta` while advancing the cursor past them, so the client never re-reads them.
 - `pollOptions.finalOnly` forces `includeEvents=false` and `includeResult=true`, keeps `actions[]`, and advances the cursor past every unseen event. It is the result-centric poll.
 - `pollOptions.maxBytes` caps the serialized response; when the cap bites, the response sets `truncated` and lists `truncatedFields`.

@@ -273,13 +273,13 @@ After `codex` or `codex_reply`:
 4. Terminal statuses are `idle`, `error`, `cancelled`.
 5. `respond_permission` / `respond_user_input` may return compact ACK by default (`events` can be empty). Continue polling for streamed events.
 6. `maxEvents` per action type:
-   - `poll`: defaults to `1`. You can increase to `10-20` to fetch more accumulated events per call. Sending `0` is normalized to `1` to avoid no-op loops.
+   - `poll`: defaults to `50`. Raise it to drain a backlog in fewer calls. Sending `0` is normalized to `1` to avoid no-op loops.
    - `respond_*`: defaults to `0` (compact ACK, no event replay). Use `1-5` only when you need immediate events alongside the approval response.
-   - `maxEvents` is a top-level `codex_check` field, not inside `pollOptions`.
+   - `maxEvents` is a top-level `codex_check` field. `pollOptions` rejects it, and every other key it does not declare, with a validation error.
 7. `responseMode` defaults to `minimal`. Available modes:
    - `minimal`: smallest payload, key fields only.
    - `delta_compact`: compact delta-focused payload (larger than `minimal`, smaller than `full` in typical streaming turns).
-   - `full`: raw complete event payloads for debugging.
+   - `full`: complete event payloads for debugging, with a per-event `delta` cap of 16384 characters.
 8. `pollOptions.includeEvents/includeActions/includeResult` default to `true`.
 9. `pollOptions.skipDeltas=true` drops streaming delta events and still advances the cursor past them; `pollOptions.finalOnly=true` omits `events[]` entirely and returns `actions[]` plus the terminal `result`.
 10. `pollOptions.waitMs` long-polls: the call blocks until an event, action, or result appears, or the budget expires. It is capped at `120000` ms, and a session accepts 4 concurrent long polls — the fifth returns immediately instead of waiting.
