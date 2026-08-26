@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    branches: [main, master]
+
+# One release at a time: a second merge waits for the first to finish rather than
+# racing it for the version commit.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      sha: ${{ steps.bump.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Read the release label of the pull request this merge came from
+        id: level
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          labels=$(gh api "repos/$REPOSITORY/commits/$SHA/pulls" \
+            --jq '[.[] | select(.merge_commit_sha == env.SHA) | .labels[].name]')
+          echo "The pull request of $SHA carries: $labels"
+          level=$(node scripts/release.mjs level "$labels")
+          if [ -z "$level" ]; then
+            echo "No release:major, release:minor or release:patch label — this merge ships no release."
+          else
+            echo "Releasing a $level version."
+          fi
+          echo "level=$level" >> "$GITHUB_OUTPUT"
+      - name: Write the new version and commit it
+        id: bump
+        if: steps.level.outputs.level != ''
+        env:
+          LEVEL: ${{ steps.level.outputs.level }}
+        run: |
+          version=$(node scripts/release.mjs bump "$LEVEL")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Only the version files changed, and the release refuses to run on a tree where
+          # one of them no longer carries the version.
+          git commit -am "chore(release): v$version"
+          git push origin "HEAD:${{ github.ref_name }}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # The full matrix, run once, against the commit that carries the new version.
+  verify:
+    needs: bump
+    if: needs.bump.outputs.version != ''
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.bump.outputs.sha }}
+
+  tag:
+    needs: [bump, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.bump.outputs.sha }}
+      - name: Tag the verified version commit
+        env:
+          VERSION: ${{ needs.bump.outputs.version }}
+        run: |
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+  publish:
+    needs: [bump, tag]
+    uses: ./.github/workflows/publish.yml
+    with:
+      ref: v${{ needs.bump.outputs.version }}
+    secrets: inherit
