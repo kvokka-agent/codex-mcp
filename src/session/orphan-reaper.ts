@@ -2,22 +2,23 @@
  * orphan-reaper — reaps orphaned codex child processes left over from a
  * previous server run.
  *
- * On startup the recovery scanner surfaces sessions that still have a
- * pid.json file.  This module verifies whether each such process is still
- * running and, if so, whether it genuinely belongs to the previous server
- * invocation (guards against PID reuse).  Confirmed orphans are terminated
- * gracefully (SIGTERM / taskkill) with a 5-second window, then forcefully
- * killed if still alive.
+ * The startup sweep hands it the sessions it adopted: those whose owner is
+ * gone. A session another server still holds never reaches here, so its live
+ * codex process is never signalled.
+ *
+ * For each adopted session that still has a pid.json this module verifies
+ * whether the process runs and whether it is the one the record names (a pid is
+ * handed on as soon as its process exits). Confirmed orphans are terminated
+ * gracefully with a five-second window, then forcefully killed if still alive.
  *
  * Both clients spawn codex with `detached: true` on POSIX, so the orphan leads
- * a process group holding whatever it started itself.  The signal goes to that
+ * a process group holding whatever it started itself. The signal goes to that
  * group, as the clients' own cleanup does, and on Windows `taskkill /T` takes
  * the child tree.
  */
-import { execSync, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { uptime } from "node:os";
+import { spawn } from "node:child_process";
 import type { RecoveredSession } from "../persistence/index.js";
+import { UNKNOWN_PROCESS, identifyProcess, probePid } from "../persistence/process-identity.js";
 
 export interface ReapSummary {
   /** Orphans whose exit this run confirmed: the pid is gone, or it now names another process. */
@@ -28,268 +29,6 @@ export interface ReapSummary {
   unconfirmed: number;
   /** Sessions no signal was sent for: the identity of the live pid was unmatched or unverifiable. */
   skipped: number;
-}
-
-// ── Liveness check ───────────────────────────────────────────────────
-
-/** What `process.kill(pid, 0)` could establish about a pid. */
-type Liveness = "alive" | "dead" | "unknown";
-
-/**
- * Probe whether a process with the given PID runs.
- *
- * `process.kill(pid, 0)` raises ESRCH for a pid no process holds and EPERM when
- * the process runs under a user this one may not signal — EPERM is a live
- * process. Any other errno leaves liveness unknown, and an unknown pid is never
- * counted as reaped.
- */
-function probePid(pid: number): Liveness {
-  try {
-    process.kill(pid, 0);
-    return "alive";
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ESRCH") return "dead";
-    if (code === "EPERM") return "alive";
-    return "unknown";
-  }
-}
-
-// ── Start-time helpers ───────────────────────────────────────────────
-
-/**
- * On Windows: read the process creation time from WMI.
- * Returns null when the process is gone or no query tool answers.
- */
-function getWindowsCreationTimeMs(pid: number): number | null {
-  // PowerShell first: wmic is disabled by default from Windows 11 24H2 and absent from Server 2025.
-  const viaPowerShell = getPowerShellCreationTimeMs(pid);
-  if (viaPowerShell !== null) return viaPowerShell;
-  return getWmicCreationTimeMs(pid);
-}
-
-/**
- * Ask CIM for Win32_Process.CreationDate, printed as an ISO 8601 round-trip
- * string ("o") so the offset travels with it.
- * Returns null when powershell.exe is absent, the process is gone (the query
- * then prints nothing) or the output does not parse.
- */
-function getPowerShellCreationTimeMs(pid: number): number | null {
-  try {
-    const raw = execSync(
-      `powershell.exe -NoProfile -NonInteractive -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CreationDate.ToUniversalTime().ToString('o')"`,
-      { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }
-    )
-      .toString()
-      .trim();
-    if (!raw) return null;
-    const ms = new Date(raw).getTime();
-    return Number.isNaN(ms) ? null : ms;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Ask wmic for the process creation time, formatted as
- * "YYYYMMDDHHmmss.ffffff+ZZZ" where ZZZ is the offset from UTC in minutes.
- * Returns null on any error (process gone, access denied, wmic absent) and
- * when the offset is missing, which leaves the zone of the digits unknown.
- */
-function getWmicCreationTimeMs(pid: number): number | null {
-  try {
-    const raw = execSync(`wmic process where "ProcessId=${pid}" get CreationDate /value`, {
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 5000,
-    }).toString();
-    const match = raw.match(/CreationDate=(\d{14})\.\d+([+-]\d{1,4})/);
-    if (!match || !match[1] || !match[2]) return null;
-    const s = match[1];
-    const iso = `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T${s.slice(8, 10)}:${s.slice(10, 12)}:${s.slice(12, 14)}.000Z`;
-    const ms = new Date(iso).getTime();
-    if (Number.isNaN(ms)) return null;
-    return ms - Number(match[2]) * 60_000;
-  } catch {
-    return null;
-  }
-}
-
-// Every mainstream Linux build compiles USER_HZ as 100; on a kernel built with
-// another value the computed start time misses and the PID is skipped, never killed.
-const USER_HZ = 100;
-
-/** What a POSIX source reports about a live PID. */
-interface LiveProcess {
-  /** Epoch milliseconds at which the process started. */
-  startMs: number;
-  /** Process group id, or null when the source did not report one. */
-  pgid: number | null;
-}
-
-/**
- * On Linux: read /proc/{pid}/stat for field 5 (pgrp) and field 22 (start time
- * in clock ticks since boot, turned into an epoch timestamp).
- * Returns null when the file, the start tick or the boot time is unavailable.
- */
-function readProcStat(pid: number): LiveProcess | null {
-  let pgrp: number;
-  let ticks: number;
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-    // Field 2 is the executable name in parentheses and may itself hold spaces
-    // and ')', so the remaining fields are split after the last ')'.
-    const fields = stat
-      .slice(stat.lastIndexOf(")") + 1)
-      .trim()
-      .split(/\s+/);
-    // fields[0] is field 3 (state), so field 5 (pgrp) sits at index 2 and
-    // field 22 (starttime) at index 19.
-    pgrp = Number(fields[2]);
-    ticks = Number(fields[19]);
-  } catch {
-    return null;
-  }
-  if (!Number.isFinite(ticks) || ticks < 0) return null;
-
-  const bootMs = getBootTimeMs();
-  if (bootMs === null) return null;
-  return {
-    startMs: bootMs + (ticks / USER_HZ) * 1000,
-    pgid: Number.isInteger(pgrp) && pgrp > 0 ? pgrp : null,
-  };
-}
-
-/**
- * Epoch milliseconds of the last boot, from the `btime` line of /proc/stat
- * (whole seconds) or, where that is unreadable, from the uptime the kernel
- * reports now.  Returns null when neither answers.
- */
-function getBootTimeMs(): number | null {
-  try {
-    const match = readFileSync("/proc/stat", "utf-8").match(/^btime\s+(\d+)$/m);
-    if (match?.[1]) {
-      const seconds = Number(match[1]);
-      if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
-    }
-  } catch {
-    // Fall through to the uptime reading.
-  }
-  try {
-    const seconds = uptime();
-    if (Number.isFinite(seconds) && seconds > 0) return Date.now() - seconds * 1000;
-  } catch {
-    // Neither source answered.
-  }
-  return null;
-}
-
-/** Run `ps -p PID -o FORMAT` and return its trimmed output, or null on failure. */
-function runPs(pid: number, format: string): string | null {
-  try {
-    const output = execSync(`ps -p ${pid} -o ${format}`, {
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 5000,
-    })
-      .toString()
-      .trim();
-    return output === "" ? null : output;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Read the start time and the process group of a live PID.
- *
- * `ps` answers first — it is the only source of either on macOS and the BSDs —
- * and both fields come from one call, so they describe the same instant of the
- * same process.  A `ps` that rejects the `pgid` keyword is asked for the start
- * time alone, which leaves the group unknown; Linux then falls back to /proc,
- * which carries both.  Returns null when no source answers.
- */
-function readPosixProcess(pid: number): LiveProcess | null {
-  // pgid is printed first: lstart holds spaces, so a trailing column would not
-  // separate cleanly from it.
-  const combined = runPs(pid, "pgid=,lstart=");
-  if (combined !== null) {
-    const match = /^(\d+)\s+(\S.*)$/.exec(combined);
-    if (match) {
-      const startMs = new Date(match[2]!).getTime();
-      if (!isNaN(startMs)) return { startMs, pgid: Number(match[1]) };
-    }
-  }
-
-  const lstart = runPs(pid, "lstart=");
-  if (lstart !== null) {
-    const startMs = new Date(lstart).getTime();
-    if (!isNaN(startMs)) return { startMs, pgid: null };
-  }
-
-  return readProcStat(pid);
-}
-
-// ── Identity verification ─────────────────────────────────────────────
-
-/**
- * What a source reported about the identity of a live PID.
- *
- * "mismatch" is a positive answer — a source read a start time, and it is not
- * the recorded one, so the pid was reused. "unknown" is the absence of an
- * answer: no source could read a start time at all.
- */
-type Identity = "match" | "mismatch" | "unknown";
-
-/** What the reaper knows about a live PID it is about to signal. */
-interface OrphanCheck {
-  /** Whether the live process is the one the previous server recorded. */
-  identity: Identity;
-  /**
-   * The process leads its own process group (pgid === pid), so `kill(-pid)`
-   * reaches that group and nothing else.  False whenever no source reported
-   * the group, and on Windows, which has no process groups.
-   */
-  leadsGroup: boolean;
-}
-
-const UNKNOWN: OrphanCheck = { identity: "unknown", leadsGroup: false };
-const MISMATCH: OrphanCheck = { identity: "mismatch", leadsGroup: false };
-
-/**
- * Verify that the running process with the given PID is (likely) the same
- * process that was spawned by the previous server instance, and whether it
- * leads its own process group.
- *
- * The comparison is best-effort.  When we cannot determine the start time
- * we conservatively report no match (do NOT kill) to avoid hitting a reused PID.
- *
- * @param pid        Process ID to inspect.
- * @param spawnedAt  ISO timestamp stored in pid.json at spawn time.
- */
-function checkOrphan(pid: number, spawnedAt: string): OrphanCheck {
-  const storedMs = new Date(spawnedAt).getTime();
-  if (isNaN(storedMs)) return UNKNOWN; // Nothing to compare against.
-
-  if (process.platform === "win32") {
-    const procMs = getWindowsCreationTimeMs(pid);
-    if (procMs === null) return UNKNOWN;
-    // Allow 5-second slop for clock skew / WMIC rounding.
-    return Math.abs(procMs - storedMs) < 5000 ? { identity: "match", leadsGroup: false } : MISMATCH;
-  }
-
-  const live = readPosixProcess(pid);
-  // No start time from any source — skip rather than risk a reused PID.
-  if (live === null) return UNKNOWN;
-
-  // The 5-second slop covers the 1-second resolution of `ps -o lstart`, the
-  // whole-second /proc boot time and the delay between the spawn and the write
-  // of pid.json.
-  if (Math.abs(live.startMs - storedMs) >= 5000) return MISMATCH;
-
-  // pgid === pid means the recorded process is itself the leader of the group,
-  // so the group is the one it was given at spawn.  A pgid pointing elsewhere
-  // leaves the group with id `pid` — if one exists at all — led by some process
-  // that is not this one.
-  return { identity: "match", leadsGroup: live.pgid === pid };
 }
 
 // ── Signal helpers ───────────────────────────────────────────────────
@@ -395,7 +134,7 @@ export async function reapOrphanProcesses(recovered: RecoveredSession[]): Promis
       return;
     }
 
-    const atCheck = checkOrphan(pid, spawnedAt);
+    const atCheck = identifyProcess(pid, spawnedAt);
     if (atCheck.identity !== "match") {
       console.error(
         `[orphan-reaper] PID ${pid} (session ${session.sessionId}) is alive but` +
@@ -414,7 +153,8 @@ export async function reapOrphanProcesses(recovered: RecoveredSession[]): Promis
       summary.alreadyDead++;
       return;
     }
-    const atGraceful = beforeGraceful === "alive" ? checkOrphan(pid, spawnedAt) : UNKNOWN;
+    const atGraceful =
+      beforeGraceful === "alive" ? identifyProcess(pid, spawnedAt) : UNKNOWN_PROCESS;
     if (atGraceful.identity !== "match") {
       summary.skipped++;
       return;
@@ -437,7 +177,7 @@ export async function reapOrphanProcesses(recovered: RecoveredSession[]): Promis
       // The graceful window is long enough for the leader to exit and its PID
       // to be handed to something else, so the identity is checked again before
       // the force signal — which on POSIX reaches a whole process group.
-      const atForce = checkOrphan(pid, spawnedAt);
+      const atForce = identifyProcess(pid, spawnedAt);
       if (atForce.identity === "mismatch") {
         // A source read a start time and it is another process's: the orphan
         // exited during the graceful window and its pid was handed on.
