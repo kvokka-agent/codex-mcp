@@ -3,6 +3,29 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const { deniedExecute } = vi.hoisted(() => ({ deniedExecute: new Set<string>() }));
+
+// The resolver asks `fs.accessSync(file, X_OK)` whether a file carries the POSIX execute bit.
+// Windows has no such bit and answers X_OK like F_OK, so the denial is injected here instead of
+// taken from a mode: that keeps the POSIX branch measurable on every host.
+vi.mock("fs", async () => {
+  const actual = await vi.importActual<typeof import("fs")>("fs");
+  return {
+    ...actual,
+    default: actual,
+    accessSync: ((file: string, mode?: number) => {
+      if (deniedExecute.has(String(file))) {
+        const err = new Error(
+          `EACCES: permission denied, access '${file}'`
+        ) as NodeJS.ErrnoException;
+        err.code = "EACCES";
+        throw err;
+      }
+      return actual.accessSync(file, mode);
+    }) as typeof actual.accessSync,
+  };
+});
+
 import {
   AUTO_CODEX_COMMANDS,
   CODEX_MCP_COMMAND,
@@ -14,11 +37,17 @@ import {
 } from "../src/utils/codex-executable.js";
 
 let root: string;
+const isWindows = process.platform === "win32";
 const realPlatform = process.platform;
 const envBackup = { ...process.env };
 
 function setPlatform(platform: string): void {
   Object.defineProperty(process, "platform", { value: platform, configurable: true });
+}
+
+/** Make `accessSync(file, X_OK)` report the file as not executable. */
+function denyExecute(file: string): void {
+  deniedExecute.add(file);
 }
 
 function makeExecutable(dir: string, name: string, mode = 0o755): string {
@@ -27,6 +56,19 @@ function makeExecutable(dir: string, name: string, mode = 0o755): string {
   writeFileSync(file, "#!/bin/sh\nexit 0\n");
   chmodSync(file, mode);
   return file;
+}
+
+/**
+ * A PATH entry the host itself runs: Windows takes executability from the PATHEXT suffix,
+ * POSIX from the mode bits.
+ */
+function makeExecutableOnPath(dir: string, base: string): string {
+  return makeExecutable(dir, isWindows ? `${base}.exe` : base);
+}
+
+/** A PATH entry the host refuses: no PATHEXT suffix on Windows, no execute bit on POSIX. */
+function makeUnexecutableOnPath(dir: string, base: string): string {
+  return makeExecutable(dir, base, 0o644);
 }
 
 beforeEach(() => {
@@ -39,6 +81,7 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
   setPlatform(realPlatform);
+  deniedExecute.clear();
   for (const key of Object.keys(process.env)) {
     if (!(key in envBackup)) delete process.env[key];
   }
@@ -79,11 +122,26 @@ describe("resolveDefaultCodexExecutable", () => {
     ).toThrow(/file does not exist/);
   });
 
-  it("rejects a CODEX_MCP_PATH that is not executable", () => {
+  it("rejects a CODEX_MCP_PATH without the execute bit on POSIX", () => {
+    setPlatform("linux");
     const file = makeExecutable(root, "not-exec", 0o644);
+    denyExecute(file);
+
     expect(() => resolveDefaultCodexExecutable({ [CODEX_MCP_PATH]: file })).toThrow(
       /not an executable file/
     );
+  });
+
+  it("accepts a CODEX_MCP_PATH without the execute bit on Windows", () => {
+    setPlatform("win32");
+    const file = makeExecutable(root, "codex.exe", 0o644);
+    denyExecute(file);
+
+    expect(resolveDefaultCodexExecutable({ [CODEX_MCP_PATH]: file })).toEqual({
+      command: path.resolve(file),
+      isPath: true,
+      source: "env_path",
+    });
   });
 
   it("rejects a CODEX_MCP_PATH that points at a directory", () => {
@@ -106,20 +164,20 @@ describe("resolveDefaultCodexExecutable", () => {
 
   it("resolves CODEX_MCP_COMMAND against PATH", () => {
     const dir = path.join(root, "bin");
-    const file = makeExecutable(dir, "special-codex");
+    const file = makeExecutableOnPath(dir, "special-codex");
 
     expect(
       resolveDefaultCodexExecutable({
         [CODEX_MCP_COMMAND]: "special-codex",
-        PATH: `${path.join(root, "empty")}:${dir}`,
+        PATH: [path.join(root, "empty"), dir].join(path.delimiter),
       })
     ).toEqual({ command: file, isPath: true, source: "env_command" });
   });
 
   it("auto-detects the first candidate present on PATH", () => {
     const dir = path.join(root, "bin");
-    const codex = makeExecutable(dir, "codex");
-    makeExecutable(dir, "codex-internal");
+    const codex = makeExecutableOnPath(dir, "codex");
+    makeExecutableOnPath(dir, "codex-internal");
 
     expect(AUTO_CODEX_COMMANDS[0]).toBe("codex");
     expect(resolveDefaultCodexExecutable({ PATH: dir })).toEqual({
@@ -131,7 +189,7 @@ describe("resolveDefaultCodexExecutable", () => {
 
   it("falls back to codex-internal when codex is absent", () => {
     const dir = path.join(root, "bin");
-    const internal = makeExecutable(dir, "codex-internal");
+    const internal = makeExecutableOnPath(dir, "codex-internal");
 
     expect(resolveDefaultCodexExecutable({ PATH: dir })).toEqual({
       command: internal,
@@ -142,8 +200,23 @@ describe("resolveDefaultCodexExecutable", () => {
 
   it("ignores non-executable and non-file candidates on PATH", () => {
     const dir = path.join(root, "bin");
-    makeExecutable(dir, "codex", 0o644);
-    mkdirSync(path.join(dir, "codex-internal"), { recursive: true });
+    makeUnexecutableOnPath(dir, "codex");
+    mkdirSync(path.join(dir, isWindows ? "codex-internal.exe" : "codex-internal"), {
+      recursive: true,
+    });
+
+    expect(resolveDefaultCodexExecutable({ PATH: dir })).toEqual({
+      command: "codex",
+      isPath: false,
+      source: "default",
+    });
+  });
+
+  it("ignores a PATH candidate without a PATHEXT suffix on Windows", () => {
+    setPlatform("win32");
+    const dir = path.join(root, "bin");
+    makeExecutable(dir, "codex");
+    mkdirSync(path.join(dir, "codex-internal.exe"), { recursive: true });
 
     expect(resolveDefaultCodexExecutable({ PATH: dir })).toEqual({
       command: "codex",
@@ -162,7 +235,7 @@ describe("resolveDefaultCodexExecutable", () => {
 
   it("reads Path and path as PATH aliases and strips quotes from entries", () => {
     const dir = path.join(root, "bin");
-    const codex = makeExecutable(dir, "codex");
+    const codex = makeExecutableOnPath(dir, "codex");
 
     expect(resolveDefaultCodexExecutable({ Path: `"${dir}"` }).command).toBe(codex);
     expect(resolveDefaultCodexExecutable({ path: dir }).command).toBe(codex);
@@ -247,7 +320,7 @@ describe("checkDefaultCodexExecutableAvailability", () => {
   it("names the env var that supplied the command", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const dir = path.join(root, "bin");
-    const file = makeExecutable(dir, "codex");
+    const file = makeExecutableOnPath(dir, "codex");
     process.env[CODEX_MCP_COMMAND] = "codex";
     process.env.PATH = dir;
 
@@ -260,7 +333,7 @@ describe("checkDefaultCodexExecutableAvailability", () => {
   it("reports an auto-detected executable", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const dir = path.join(root, "bin");
-    const file = makeExecutable(dir, "codex");
+    const file = makeExecutableOnPath(dir, "codex");
     process.env.PATH = dir;
 
     checkDefaultCodexExecutableAvailability();

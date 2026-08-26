@@ -21,11 +21,18 @@ interface FakeProc extends EventEmitter {
   killed: boolean;
   exitCode: number | null;
   kill: (signal?: NodeJS.Signals) => boolean;
+  /** Signals sent straight to the child, as opposed to the process group. */
+  killSignals: Array<NodeJS.Signals | undefined>;
 }
 
 const envBackup = { ...process.env };
+const realPlatform = process.platform;
 const killCalls: Array<[number, string | number | undefined]> = [];
 let procs: FakeProc[] = [];
+
+function setPlatform(platform: string): void {
+  Object.defineProperty(process, "platform", { value: platform, configurable: true });
+}
 
 function newProc(pid: number): FakeProc {
   const proc = new EventEmitter() as FakeProc;
@@ -35,7 +42,9 @@ function newProc(pid: number): FakeProc {
   proc.pid = pid;
   proc.killed = false;
   proc.exitCode = null;
-  proc.kill = () => {
+  proc.killSignals = [];
+  proc.kill = (signal?: NodeJS.Signals) => {
+    proc.killSignals.push(signal);
     proc.killed = true;
     return true;
   };
@@ -68,6 +77,9 @@ async function startedClient(): Promise<{
 }
 
 beforeEach(() => {
+  // The client reads process.platform when it spawns and when it terminates a turn. Pinning it
+  // keeps the POSIX branch under test on every host; the win32 branch has its own tests below.
+  setPlatform("linux");
   procs = [];
   killCalls.length = 0;
   spawnMock.mockReset();
@@ -88,6 +100,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPlatform(realPlatform);
   for (const key of Object.keys(process.env)) {
     if (!(key in envBackup)) delete process.env[key];
   }
@@ -342,6 +355,52 @@ describe("ExecClient argument building", () => {
 
     await client.turnInterrupt({ threadId: "t", turnId: "x" });
     expect(killCalls).toContainEqual([-lastProc().pid, "SIGTERM"]);
+  });
+});
+
+describe("ExecClient on Windows", () => {
+  async function windowsTurn(): Promise<ExecClient> {
+    setPlatform("win32");
+    process.env.ComSpec = "C:\\Windows\\System32\\cmd.exe";
+    const client = new ExecClient();
+    await client.start({});
+    await client.threadStart({ cwd: "D:\\work\\repo" });
+    await client.turnStart({ threadId: "t", input: [{ type: "text", text: "go" }] });
+    return client;
+  }
+
+  it("hands the command line to cmd.exe as separate tokens", async () => {
+    await windowsTurn();
+
+    const [cmd, args, opts] = spawnMock.mock.calls[0]! as [
+      string,
+      string[],
+      Record<string, unknown>,
+    ];
+    expect(cmd).toBe("C:\\Windows\\System32\\cmd.exe");
+    expect(args).toEqual([
+      "/d",
+      "/s",
+      "/c",
+      "codex",
+      "exec",
+      "go",
+      "--json",
+      "--skip-git-repo-check",
+      "-C",
+      "D:\\work\\repo",
+    ]);
+    expect(opts.detached).toBe(false);
+    expect(opts.windowsHide).toBe(true);
+  });
+
+  it("signals the child directly, since Windows has no POSIX process group", async () => {
+    const client = await windowsTurn();
+
+    await client.turnInterrupt({ threadId: "t", turnId: "x" });
+
+    expect(lastProc().killSignals).toEqual(["SIGTERM"]);
+    expect(killCalls).toEqual([]);
   });
 });
 

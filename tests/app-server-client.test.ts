@@ -161,9 +161,17 @@ describe("AppServerClient spawn behavior", () => {
   it("falls back to the bare command when PATH holds no codex", async () => {
     pinEnv({ PATH: path.join(binDir, "empty") });
 
-    const [cmd] = await spawnAppServer();
+    const [cmd, args] = await spawnAppServer();
 
-    expect(cmd).toBe("codex");
+    if (process.platform === "win32") {
+      // Windows cannot spawn a bare name: resolution ends at the ComSpec fallback, which passes
+      // the command to cmd.exe as its own argument token.
+      expect(cmd.toLowerCase()).toMatch(/cmd\.exe$/);
+      expect(args.slice(0, 5)).toEqual(["/d", "/s", "/c", "codex", "app-server"]);
+    } else {
+      expect(cmd).toBe("codex");
+      expect(args[0]).toBe("app-server");
+    }
   });
 
   it("uses extended timeout for startup RPCs", async () => {

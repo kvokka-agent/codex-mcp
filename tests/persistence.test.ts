@@ -1,5 +1,47 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+/** Injected failures, keyed by `${call}\0${path}`, holding the errno code to raise. */
+const { fsFaults } = vi.hoisted(() => ({ fsFaults: new Map<string, string>() }));
+
+/**
+ * Make one `node:fs` call fail for one path; every other call and path reaches the real
+ * filesystem. A POSIX mode cannot stand in for this: Windows ignores the mode bits, so a
+ * `chmod 0o500` directory stays writable and the error branch under test never runs there.
+ */
+function failFs(call: "openSync" | "readdirSync" | "rmSync", path: string, code = "EACCES"): void {
+  fsFaults.set(`${call}\0${path}`, code);
+}
+
+vi.mock("node:fs", async () => {
+  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  const failIfInjected = (call: string, target: unknown): void => {
+    const code = fsFaults.get(`${call}\0${String(target)}`);
+    if (!code) return;
+    const err = new Error(
+      `${code}: injected failure, ${call} '${String(target)}'`
+    ) as NodeJS.ErrnoException;
+    err.code = code;
+    throw err;
+  };
+  return {
+    ...actual,
+    default: actual,
+    openSync: ((...args: Parameters<typeof actual.openSync>) => {
+      failIfInjected("openSync", args[0]);
+      return actual.openSync(...args);
+    }) as typeof actual.openSync,
+    readdirSync: ((...args: Parameters<typeof actual.readdirSync>) => {
+      failIfInjected("readdirSync", args[0]);
+      return actual.readdirSync(...args);
+    }) as typeof actual.readdirSync,
+    rmSync: ((...args: Parameters<typeof actual.rmSync>) => {
+      failIfInjected("rmSync", args[0]);
+      return actual.rmSync(...args);
+    }) as typeof actual.rmSync,
+  };
+});
+
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -12,7 +54,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   EventLog,
@@ -31,6 +72,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  fsFaults.clear();
   rmSync(root, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
@@ -232,14 +274,11 @@ describe("acquireLock", () => {
   });
 
   it("rethrows a create failure that is not a lost race", () => {
-    const dir = join(root, "readonly");
-    mkdirSync(dir, { recursive: true });
-    chmodSync(dir, 0o500);
-    try {
-      expect(() => acquireLock(join(dir, ".lock"))).toThrow(/EACCES/);
-    } finally {
-      chmodSync(dir, 0o755);
-    }
+    const lockPath = join(root, "readonly", ".lock");
+    failFs("openSync", lockPath, "EACCES");
+
+    expect(() => acquireLock(lockPath)).toThrow(/EACCES/);
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   it("keeps an unreadable lockfile and fails the O_EXCL create", () => {
@@ -386,13 +425,18 @@ describe("scanRecoverableSessions", () => {
 
   it("returns nothing when the sessions directory cannot be listed", () => {
     const sessions = join(root, "sessions");
-    mkdirSync(sessions, { recursive: true });
-    chmodSync(sessions, 0o000);
-    try {
-      expect(scanRecoverableSessions(sessions)).toEqual([]);
-    } finally {
-      chmodSync(sessions, 0o755);
-    }
+    writeSession("sess_listed", {
+      meta: {
+        schemaVersion: SCHEMA_VERSION,
+        sessionId: "sess_listed",
+        status: "running",
+        createdAt: "2024-01-01T00:00:00.000Z",
+        lastActiveAt: "2024-01-02T00:00:00.000Z",
+      },
+    });
+    failFs("readdirSync", sessions);
+
+    expect(scanRecoverableSessions(sessions)).toEqual([]);
   });
 
   it("skips a session written by a newer schema", () => {
@@ -518,20 +562,16 @@ describe("pruneSessionDirs", () => {
   });
 
   it("reports a removal failure on stderr and does not count it", () => {
-    makeSession("old", iso(120_000));
+    const old = makeSession("old", iso(120_000));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const sessions = join(root, "sessions");
-    chmodSync(sessions, 0o500);
-    try {
-      expect(pruneSessionDirs(sessions, { maxAgeMs: 60_000 })).toBe(0);
-    } finally {
-      chmodSync(sessions, 0o755);
-    }
+    failFs("rmSync", old);
+
+    expect(pruneSessionDirs(join(root, "sessions"), { maxAgeMs: 60_000 })).toBe(0);
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[retention] Failed to remove"),
+      expect.stringContaining(`[retention] Failed to remove ${old}`),
       expect.anything()
     );
-    expect(existsSync(join(sessions, "old"))).toBe(true);
+    expect(existsSync(old)).toBe(true);
   });
 
   it("uses createdAt when lastActiveAt is absent", () => {
@@ -578,13 +618,9 @@ describe("getDirSize", () => {
     writeFileSync(join(locked, "blob.bin"), "x".repeat(500));
     writeFileSync(join(dir, "events.jsonl"), "x".repeat(42));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    failFs("readdirSync", locked);
 
-    chmodSync(locked, 0o000);
-    try {
-      expect(getDirSize(dir)).toBe(42);
-    } finally {
-      chmodSync(locked, 0o755);
-    }
+    expect(getDirSize(dir)).toBe(42);
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining(`[retention] Failed to size ${locked}`),
       expect.anything()

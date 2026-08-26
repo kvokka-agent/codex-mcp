@@ -95,15 +95,13 @@ function getPathExtensions(env: NodeJS.ProcessEnv): string[] {
 function resolveCommandFromPath(command: string, env: NodeJS.ProcessEnv): string | undefined {
   const dirs = getPathEntries(env);
   const ext = process.platform === "win32" ? path.extname(command) : "";
+  // Windows takes executability from the name's extension, not from a mode bit: a PATH hit
+  // without a PATHEXT suffix cannot be handed to CreateProcess, so it is not a candidate there.
   const names =
     process.platform === "win32"
-      ? Array.from(
-          new Set(
-            ext
-              ? [command]
-              : [...getPathExtensions(env).map((suffix) => `${command}${suffix}`), command]
-          )
-        )
+      ? ext
+        ? [command]
+        : Array.from(new Set(getPathExtensions(env).map((suffix) => `${command}${suffix}`)))
       : [command];
 
   for (const dir of dirs) {
