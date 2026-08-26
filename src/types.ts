@@ -36,22 +36,6 @@ export type SessionAction = (typeof SESSION_ACTIONS)[number];
 export const CHECK_ACTIONS = ["poll", "respond_permission", "respond_user_input"] as const;
 export type CheckAction = (typeof CHECK_ACTIONS)[number];
 
-export const RESPONSE_MODES = ["minimal", "delta_compact", "full"] as const;
-export type ResponseMode = (typeof RESPONSE_MODES)[number];
-
-export interface PollOptions {
-  includeEvents?: boolean;
-  includeActions?: boolean;
-  includeResult?: boolean;
-  /** Omit delta-heavy streaming events while still advancing the cursor past them. */
-  skipDeltas?: boolean;
-  /** Shortcut for result-centric polling: omit events, keep actions, always include result. */
-  finalOnly?: boolean;
-  maxBytes?: number;
-  /** Long-poll: wait up to this many ms for new events before returning. Max 120000. */
-  waitMs?: number;
-}
-
 export const APPROVAL_TYPES = ["command", "fileChange"] as const;
 export type ApprovalType = (typeof APPROVAL_TYPES)[number];
 
@@ -91,6 +75,14 @@ export type InteractionState = "working" | "waiting_input" | "finished";
 
 export type RecommendedNextAction = "poll" | "respond_permission" | "respond_user_input" | "none";
 
+/** What a long-poll waiter compares between two reads of a session. */
+export interface SessionSignal {
+  /** Two equal keys mean nothing the caller acts on happened in between. */
+  key: string;
+  /** The session waits on the caller: an open action, or a turn that ended. */
+  awaitsCaller: boolean;
+}
+
 export type ExecutionMode = "background" | "foreground";
 
 export type ExecutionFallbackReason =
@@ -119,7 +111,6 @@ export interface ProgressInfo {
   lastEventAt: string;
   activeTurnId?: string;
   pendingActionCount: number;
-  lastMethod?: string;
   tokens?: ProgressTokens;
 }
 
@@ -137,21 +128,6 @@ export type SessionEventType =
   | "approval_result"
   | "result"
   | "error";
-
-export interface SessionEvent {
-  id: number;
-  type: SessionEventType;
-  data: unknown;
-  timestamp: string;
-  pinned: boolean;
-}
-
-export interface EventBuffer {
-  events: SessionEvent[];
-  maxSize: number;
-  hardMaxSize: number;
-  nextId: number;
-}
 
 /** Pending approval/user-input request */
 export interface PendingRequest {
@@ -186,8 +162,6 @@ export interface SessionInfo {
   threadId?: string;
   activeTurnId?: string;
   lastAgentMessageText?: string;
-  /** Most recent poll cursor consumed by this session. */
-  lastEventCursor: number;
   status: SessionStatus;
   createdAt: string;
   lastActiveAt: string;
@@ -201,10 +175,15 @@ export interface SessionInfo {
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
   config?: Record<string, unknown>;
-  eventBuffer: EventBuffer;
   pendingRequests: Map<string, PendingRequest>;
   lastResult?: TurnResult;
-  progressState?: Omit<ProgressInfo, "phase" | "pendingActionCount" | "activeTurnId">;
+  /** Set once `lastResult` has been handed to a caller, so no poll repeats it. */
+  resultDelivered?: boolean;
+  progressState?: {
+    lastEventAt: string;
+    lastMethod?: string;
+    tokens?: ProgressTokens;
+  };
 }
 
 /** Public session info (redacted) */
@@ -260,41 +239,42 @@ export interface SessionStartResult {
   recommendedNextAction?: RecommendedNextAction;
 }
 
+/** One thing the caller must answer: an approval request or a question. */
+export interface PendingAction {
+  type: "approval" | "user_input";
+  requestId: string;
+  kind: "command" | "fileChange" | "user_input";
+  params: unknown;
+  itemId: string;
+  reason?: string;
+  approvalId?: string;
+  commandActions?: unknown[] | null;
+  proposedExecpolicyAmendment?: string[] | null;
+  availableDecisions?: unknown[] | null;
+  additionalPermissions?: unknown;
+  networkApprovalContext?: unknown;
+  proposedNetworkPolicyAmendments?: unknown[] | null;
+  createdAt: string;
+}
+
+/**
+ * What `codex_check` answers with: where the session stands and what it waits for.
+ *
+ * The turn's own history — every reasoning, command and message event — stays in
+ * Codex's rollout log under `~/.codex/sessions/`; this server never repeats it to
+ * the caller.
+ */
 export interface CheckResult {
   sessionId: string;
   status: SessionStatus;
   pollInterval?: number;
-  progress?: ProgressInfo;
-  interactionState?: InteractionState;
-  recommendedNextAction?: RecommendedNextAction;
-  events: Array<{
-    id: number;
-    type: SessionEventType;
-    data: unknown;
-    timestamp: string;
-  }>;
-  nextCursor: number;
-  cursorResetTo?: number;
-  actions?: Array<{
-    type: "approval" | "user_input";
-    requestId: string;
-    kind: "command" | "fileChange" | "user_input";
-    params: unknown;
-    itemId: string;
-    reason?: string;
-    approvalId?: string;
-    commandActions?: unknown[] | null;
-    proposedExecpolicyAmendment?: string[] | null;
-    availableDecisions?: unknown[] | null;
-    additionalPermissions?: unknown;
-    networkApprovalContext?: unknown;
-    proposedNetworkPolicyAmendments?: unknown[] | null;
-    createdAt: string;
-  }>;
+  progress: ProgressInfo;
+  interactionState: InteractionState;
+  recommendedNextAction: RecommendedNextAction;
+  /** What the caller must answer. Empty while the turn needs nothing. */
+  actions: PendingAction[];
+  /** The final answer of the turn, carried by the first check that sees it. */
   result?: TurnResult;
-  compatWarnings?: string[];
-  truncated?: boolean;
-  truncatedFields?: string[];
 }
 
 // ── Error Types ────────────────────────────────────────────────────
@@ -328,19 +308,8 @@ export const DEFAULT_POLL_INTERVAL = 120_000;
  * Kept short so callers can unblock pending actions before approval timeout.
  */
 export const WAITING_APPROVAL_POLL_INTERVAL = 1000;
-/** Public codex_check default for action="poll" when maxEvents is omitted. */
-export const POLL_DEFAULT_MAX_EVENTS = 1;
-/** Public codex_check lower bound for action="poll" to avoid no-op loops. */
-export const POLL_MIN_MAX_EVENTS = 1;
-/** Public codex_check default for action="respond_*" when maxEvents is omitted. */
-export const RESPOND_DEFAULT_MAX_EVENTS = 0;
-/**
- * Internal SessionManager fallback for direct poll helpers.
- * Not used as codex_check external default.
- */
-export const DEFAULT_MAX_EVENTS = 200;
-export const DEFAULT_EVENT_BUFFER_SIZE = 1000;
-export const DEFAULT_EVENT_BUFFER_HARD_SIZE = 2000;
+/** Ceiling for `codex_check(action="poll").waitMs`, and for any single wait inside it. */
+export const MAX_LONG_POLL_WAIT_MS = 120_000;
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 60_000;
 export const DEFAULT_IDLE_CLEANUP_MS = 30 * 60 * 1000;
 export const DEFAULT_RUNNING_CLEANUP_MS = 4 * 60 * 60 * 1000;

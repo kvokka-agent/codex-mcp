@@ -14,7 +14,7 @@ When you execute this plan as an LLM test operator:
    - input params
    - output payload
    - session `status`
-   - `nextCursor`
+   - `progress`
    - `actions[]` (if present)
 3. If `actions[]` is non-empty, respond before timeout using `codex_check`.
 4. Keep testing in an isolated project workspace, not inside production code.
@@ -33,7 +33,7 @@ Optional but recommended:
 
 1. Structured output via `outputSchema`.
 2. User input response flow via `respond_user_input`.
-3. Cursor and event-buffer edge behavior (`cursorResetTo`).
+3. Long polling (`waitMs`) and the once-only delivery of the terminal `result`.
 
 ## 2. Preconditions
 
@@ -263,29 +263,17 @@ For `codex_reply`, required:
 1. `sessionId`
 2. `prompt`
 
-## 5.2 Polling Rules
+## 5.2 Checking Rules
 
 After `codex` or `codex_reply`:
 
-1. Poll with `codex_check(action="poll")`.
-2. Persist `nextCursor` and pass it back next poll.
-3. If `cursorResetTo` appears, your cursor is stale. For the next request, always use the returned `nextCursor` (in no-event cases it is typically equal to `cursorResetTo`).
-4. Terminal statuses are `idle`, `error`, `cancelled`.
-5. `respond_permission` / `respond_user_input` may return compact ACK by default (`events` can be empty). Continue polling for streamed events.
-6. `maxEvents` per action type:
-   - `poll`: defaults to `1`. You can increase to `10-20` to fetch more accumulated events per call. Sending `0` is normalized to `1` to avoid no-op loops.
-   - `respond_*`: defaults to `0` (compact ACK, no event replay). Use `1-5` only when you need immediate events alongside the approval response.
-   - `maxEvents` is a top-level `codex_check` field, not inside `pollOptions`.
-7. `responseMode` defaults to `minimal`. Available modes:
-   - `minimal`: smallest payload, key fields only.
-   - `delta_compact`: compact delta-focused payload (larger than `minimal`, smaller than `full` in typical streaming turns).
-   - `full`: raw complete event payloads for debugging.
-8. `pollOptions.includeEvents/includeActions/includeResult` default to `true`.
-9. `pollOptions.skipDeltas=true` drops streaming delta events and still advances the cursor past them; `pollOptions.finalOnly=true` omits `events[]` entirely and returns `actions[]` plus the terminal `result`.
-10. `pollOptions.waitMs` long-polls: the call blocks until an event, action, or result appears, or the budget expires. It is capped at `120000` ms, and a session accepts 4 concurrent long polls — the fifth returns immediately instead of waiting.
-11. When `pollOptions.maxBytes` is set and payload is too large, response can include `truncated=true`, `truncatedFields`, and `compatWarnings`; continue polling with returned `nextCursor`.
-12. In `respond_*` flows, if a stale `cursor` is provided, codex-mcp can auto-normalize to session cursor and include a `compatWarnings` notice.
-13. `progress` summarizes the session without reading events: `phase`, `lastEventAt`, `pendingActionCount`, `lastMethod`, and `tokens` when the backend reports them. `interactionState` and `recommendedNextAction` tell you what to call next.
+1. Check with `codex_check(action="poll")`. Every action — `poll`, `respond_permission`, `respond_user_input` — answers with the same payload: `{ sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }`.
+2. No check returns the events of the turn. Codex writes the whole run to its rollout log under `~/.codex/sessions/**/rollout-*.jsonl`, and codex-mcp writes its own view to `events.jsonl` in the state directory. Read either from disk; the tool reports state.
+3. Terminal statuses are `idle`, `error`, `cancelled`.
+4. `result` arrives with the first check that sees a terminal status and carries the turn's final answer. Later checks of the same turn report the status alone.
+5. `waitMs` long-polls: the call blocks until the status changes, a new action arrives, or the turn ends. Reasoning, command output and token counters do not end the wait. It is capped at `120000` ms, and a session accepts 4 concurrent long polls — the fifth returns immediately instead of waiting.
+6. `progress` reports `phase`, `lastEventAt`, `activeTurnId`, `pendingActionCount`, and `tokens` when the backend reports them. `interactionState` and `recommendedNextAction` tell you what to call next.
+7. Inputs the tool no longer takes — `cursor`, `nextCursor`, `maxEvents`, `responseMode`, `pollOptions` — are refused with a message naming what replaced them.
 
 Observed internal polling cadence (codex-mcp → app-server, NOT MCP client → codex-mcp):
 
@@ -303,9 +291,9 @@ Codex tasks often take 2-10+ minutes. Do not poll every turn.
 2. When `status` is `waiting_approval`: target ~1 second polling to respond to `actions[]` and unblock quickly.
 3. When `status` is `idle`, `error`, or `cancelled`: stop polling. The session is done.
 4. The tool descriptions for `codex`, `codex_reply`, and `codex_check` include this guidance so LLM callers see it directly.
-5. To learn about a change sooner without shortening the interval, pass `pollOptions.waitMs` and let the server answer as soon as something happens.
+5. To learn about a change as it happens without shortening the interval, pass `waitMs`: one call covers the whole stretch and costs one round trip.
 6. `codex` (`advanced.waitForResult`) and `codex_reply` (`waitForResult`) skip polling entirely for short non-interactive runs: they block up to 300000 ms and return the result. Use them only with `approvalPolicy` `on-failure` or `never`; an approval request makes them return early with `execution.fallbackReason="interactive_poll_required"`.
-7. A session emits one `progress` event with `data.method="codex-mcp/ttl_warning"` 60 seconds before TTL cleanup. Any tool call on the session postpones the cleanup.
+7. A session writes one `codex-mcp/ttl_warning` line to its event log 60 seconds before TTL cleanup. Any tool call on the session postpones the cleanup.
 
 **CRITICAL: Approval timeout vs polling interval conflict.** The default `approvalTimeoutMs` is 60 seconds, but the recommended `running` polling interval is ≥2 minutes. If a session transitions from `running` to `waiting_approval` between polls, the approval will auto-decline before the client can respond. Mitigations:
 
@@ -395,14 +383,14 @@ Then poll (wait at least 2 minutes after starting the session before first poll)
 {
   "action": "poll",
   "sessionId": "<sessionId>",
-  "cursor": 0
+  "waitMs": 120000
 }
 ```
 
 Pass criteria:
 
 1. Start call returns quickly with `sessionId`.
-2. Poll returns incremental events and increasing cursor.
+2. The check reports a status and a `progress` that moves between calls, and carries no events.
 3. Final status reaches `idle` (or `error` with explicit reason).
 4. If `actions[]` appears, respond and verify session can return from `waiting_approval` to `running`.
 
@@ -614,34 +602,27 @@ Negative checks:
 2. Use `acceptWithExecpolicyAmendment` without `execpolicy_amendment` -> expect `Error [INVALID_ARGUMENT]`.
 3. Reuse resolved `requestId` -> expect `Error [REQUEST_NOT_FOUND]`.
 
-## 7.3 Cursor Staleness (`cursorResetTo`)
-
-Stress sequence:
-
-1. Generate many events (long task with frequent output/progress).
-2. Keep polling with old small cursor after buffer churn.
-
-Expected:
-
-1. `cursorResetTo` appears.
-2. Client continues from returned `nextCursor` and proceeds safely (this may be equal to `cursorResetTo`).
-
-## 7.4 Poll Shaping Compatibility (`responseMode` + `pollOptions`)
+## 7.3 The Status Payload
 
 Checks:
 
-1. Generate a delta-heavy turn, then poll at the same cursor with `responseMode="minimal"`, `responseMode="delta_compact"`, and `responseMode="full"`.
-2. Compare payload sizes; for this workload, expect `minimal < delta_compact < full`.
-3. Poll once with `pollOptions.includeEvents=false`, then poll again with defaults; verify events were not consumed by the first poll.
-4. Optional stress: combine very small `pollOptions.maxBytes` with `respond_*` and verify responses remain valid even if compatibility warnings are omitted to stay under byte budget.
-5. Optional stale-cursor check for `respond_*`: send a smaller stale cursor than current session progress and verify response remains monotonic (no replay), with compatibility warning when warning budget allows.
+1. Generate a delta-heavy turn (a long build, a big file read), then check the session. The response carries `status`, `progress`, `actions[]` and nothing of the stream: no `events`, no `delta`, no `nextCursor`.
+2. `progress.tokens` grows across checks while the turn runs, so the counters the backend reports still reach you.
+3. Read `~/.codex/sessions/**/rollout-*.jsonl` for that thread and confirm the history is there, and `<STATE_DIR>/sessions/<sessionId>/events.jsonl` for this server's own view.
 
-## 7.5 Long Polling (`pollOptions.waitMs`)
+## 7.4 Removed Inputs
 
 Checks:
 
-1. Start a long `running` session, then poll with `pollOptions.waitMs: 30000` at the current cursor. The call returns as soon as an event appears rather than after the full budget.
-2. Poll an `idle` session with `pollOptions.waitMs: 5000`. It returns promptly with the terminal `result`, since the result counts as visible data.
+1. Send `codex_check(action="poll", cursor=0)`, then the same with `maxEvents`, `responseMode`, and `pollOptions`. Each is refused with a message naming what replaced it.
+2. Send `codex_check(action="respond_permission", ..., waitMs=1000)`. It is refused: `waitMs` belongs to `poll`.
+
+## 7.5 Long Polling (`waitMs`)
+
+Checks:
+
+1. Start a long `running` session, then check with `waitMs: 120000`. The call sits through the model's reasoning and its command output, and returns when the status changes, an action arrives, or the turn ends.
+2. Check an `idle` session with `waitMs: 5000`. It returns at once with the terminal `result`; a second check returns the same status without the result.
 3. Issue 5 concurrent long polls on one session. Four wait; the fifth returns immediately instead of blocking.
 
 ## 7.6 Foreground Execution (`waitForResult`)
@@ -772,7 +753,7 @@ Fix:
 
 - Session IDs:
 - Status transitions observed:
-- Cursor handling (`nextCursor`/`cursorResetTo`):
+- Long polls issued and what ended each one:
 - Approval actions handled (count/type):
 - Errors encountered (exact `Error [CODE]`):
 
@@ -789,10 +770,10 @@ If you are unsure about any critical behavior, discuss it with Claude Code expli
 
 Recommended prompts:
 
-1. `I got cursorResetTo=123 while polling session <id>. Show the exact next poll payload I should send and why.`
+1. `My check of session <id> returned status running with an empty actions[]. Show the exact next payload I should send and why.`
 2. `For request kind=fileChange, which decisions are legal? Validate this payload before I send respond_permission.`
 3. `I used acceptWithExecpolicyAmendment and got INVALID_ARGUMENT. Diagnose which field is missing from my payload.`
-4. `Given this poll output, determine if session is terminal and whether I should continue polling.`
+4. `Given this check output, determine if the session is terminal and whether I should check again.`
 5. `Convert this content text JSON into a normalized report table with status transitions and approval decisions.`
 
 Keep all discussion grounded in actual tool responses (copy the exact JSON payloads).

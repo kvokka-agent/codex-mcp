@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -78,12 +78,34 @@ function recovered(overrides: Partial<RecoveredSession> = {}): RecoveredSession 
       cwd: workspace,
       ...(overrides.meta ?? {}),
     },
-    events: overrides.events ?? [],
     lastSeq: overrides.lastSeq ?? -1,
     result: overrides.result ?? null,
     pidInfo: null,
     sessionDir: path.join(os.tmpdir(), sessionId),
   };
+}
+
+/**
+ * The events the manager wrote to a session's log.
+ *
+ * `codex_check` reports the state of a session and none of this; the log on disk is
+ * where the events of the turn go, so it is where a test reads them.
+ */
+function loggedEvents(
+  persistence: SessionPersistence,
+  stateDir: string,
+  sessionId: string
+): Array<{ seq: number; type: string; data: Record<string, unknown> }> {
+  persistence.flushAll();
+  const file = path.join(stateDir, "sessions", sessionId, "events.jsonl");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf-8")
+    .trim()
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map(
+      (line) => JSON.parse(line) as { seq: number; type: string; data: Record<string, unknown> }
+    );
 }
 
 describe("SessionManager long-poll waiters", () => {
@@ -103,17 +125,65 @@ describe("SessionManager long-poll waiters", () => {
     vi.restoreAllMocks();
   });
 
-  it("wakes every waiter when a notification arrives", async () => {
+  it("wakes every waiter when the turn ends", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
     const settled: number[] = [];
     const waits = [0, 1, 2].map((i) =>
       manager.waitForChange(started.sessionId, 60_000).then(() => settled.push(i))
     );
 
-    client.emitNotification(Methods.THREAD_ARCHIVED, { threadId: started.threadId });
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      turn: { id: "turn_1", status: "completed" },
+    });
     await Promise.all(waits);
 
     expect(settled.sort()).toEqual([0, 1, 2]);
+  });
+
+  it("leaves a waiter asleep through the delta and token traffic of a turn", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    let woke = false;
+    const wait = manager.waitForChange(started.sessionId, 60_000).then(() => {
+      woke = true;
+    });
+
+    for (let i = 0; i < 20; i++) {
+      client.emitNotification(Methods.AGENT_MESSAGE_DELTA, {
+        threadId: started.threadId,
+        turnId: "turn_1",
+        itemId: "item_1",
+        delta: `chunk ${i}`,
+      });
+      client.emitNotification(Methods.THREAD_TOKEN_USAGE_UPDATED, {
+        threadId: started.threadId,
+        tokenUsage: { total: { inputTokens: i, outputTokens: i } },
+      });
+    }
+    await Promise.resolve();
+    expect(woke).toBe(false);
+
+    // The end of the turn is what the waiter is there for.
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      turn: { id: "turn_1", status: "completed" },
+    });
+    await wait;
+    expect(woke).toBe(true);
+  });
+
+  it("wakes every waiter when the session is dropped", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    await manager.cancelSession(started.sessionId, "by test");
+    const waits = [0, 1].map(() => manager.waitForChange(started.sessionId, 60_000));
+
+    await manager.cleanSessions({ statuses: ["cancelled"] });
+    await Promise.all(waits);
+
+    // The waiter that wakes reads a session that is no longer there.
+    expect(() => manager.getSessionSignal(started.sessionId)).toThrow("SESSION_NOT_FOUND");
   });
 
   it("resolves on its own deadline when nothing happens", async () => {
@@ -129,12 +199,18 @@ describe("SessionManager long-poll waiters", () => {
       "Too many concurrent long-poll waiters"
     );
 
-    client.emitNotification(Methods.THREAD_ARCHIVED, { threadId: started.threadId });
+    client.emitServerRequest(1, Methods.COMMAND_APPROVAL, {
+      itemId: "item_waiters",
+      threadId: started.threadId,
+      turnId: "turn_1",
+      command: "echo hi",
+      cwd: workspace,
+    });
     await Promise.all(waits);
 
     // The drained queue accepts a full set again — no waiter was left behind.
     const second = [0, 1, 2, 3].map(() => manager.waitForChange(started.sessionId, 60_000));
-    client.emitNotification(Methods.THREAD_ARCHIVED, { threadId: started.threadId });
+    await manager.cancelSession(started.sessionId, "done");
     await Promise.all(second);
   });
 
@@ -157,7 +233,7 @@ describe("SessionManager long-poll waiters", () => {
     await wait;
 
     const refill = [0, 1, 2, 3].map(() => manager.waitForChange(started.sessionId, 60_000));
-    client.emitNotification(Methods.THREAD_ARCHIVED, { threadId: started.threadId });
+    await manager.cancelSession(started.sessionId, "done");
     await Promise.all(refill);
   });
 });
@@ -217,66 +293,6 @@ describe("SessionManager recovered sessions", () => {
       status: "completed",
       output: "final answer",
     });
-  });
-
-  it("restores only known event types and continues the id numbering", () => {
-    manager.ingestRecovered([
-      recovered({
-        sessionId: "sess_events",
-        lastSeq: 4,
-        events: [
-          { seq: 2, type: "output", data: { delta: "hello" }, timestamp: "2024-01-01T00:00:02Z" },
-          { seq: 3, type: "telemetry", data: { ignored: true } },
-          { seq: 4, type: "progress", data: { note: "kept" }, timestamp: "2024-01-01T00:00:04Z" },
-        ],
-      }),
-    ]);
-
-    const poll = manager.pollEvents("sess_events", 0, 50);
-    expect(poll.events.map((event) => event.id)).toEqual([2, 4]);
-    expect(poll.cursorResetTo).toBe(2);
-    expect(poll.nextCursor).toBe(5);
-  });
-
-  it("summarizes a restored event whose payload has no known fields", () => {
-    manager.ingestRecovered([
-      recovered({
-        sessionId: "sess_opaque",
-        lastSeq: 0,
-        events: [
-          {
-            seq: 0,
-            type: "progress",
-            data: { unknownField: "x" },
-            timestamp: "2024-01-01T00:00:00Z",
-          },
-        ],
-      }),
-    ]);
-
-    const minimal = manager.pollEvents("sess_opaque", 0, 50, { responseMode: "minimal" });
-    expect(minimal.events[0].data).toEqual({ summary: "omitted for minimal response mode" });
-
-    const compact = manager.pollEvents("sess_opaque", 0, 50, { responseMode: "delta_compact" });
-    expect(compact.events[0].data).toEqual({ unknownField: "x" });
-  });
-
-  it("passes a restored event whose payload is not an object straight through", () => {
-    manager.ingestRecovered([
-      recovered({
-        sessionId: "sess_scalar",
-        lastSeq: 0,
-        events: [
-          { seq: 0, type: "progress", data: "plain text", timestamp: "2024-01-01T00:00:00Z" },
-        ],
-      }),
-    ]);
-
-    const poll = manager.pollEvents("sess_scalar", 0, 50, {
-      responseMode: "minimal",
-      pollOptions: { skipDeltas: true },
-    });
-    expect(poll.events[0].data).toBe("plain text");
   });
 
   it("keeps the instant the recovered session was last active", () => {
@@ -363,35 +379,6 @@ describe("SessionManager recovered sessions", () => {
     );
   });
 
-  it("drops a restored event that carries no timestamp instead of dating it now", () => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-
-    manager.ingestRecovered([
-      recovered({
-        sessionId: "sess_undated_event",
-        lastSeq: 3,
-        events: [
-          { seq: 2, type: "output", data: { delta: "kept" }, timestamp: "2024-01-01T00:00:02Z" },
-          { seq: 3, type: "output", data: { delta: "undated" } },
-        ],
-      }),
-    ]);
-
-    const poll = manager.pollEvents("sess_undated_event", 0, 50);
-    expect(poll.events.map((event) => event.id)).toEqual([2]);
-    expect(poll.events.every((event) => event.timestamp === "2024-01-01T00:00:02Z")).toBe(true);
-    // The dropped seq is still consumed, so a later event cannot reuse its id.
-    const buffer = (
-      manager as unknown as { sessions: Map<string, { eventBuffer: { nextId: number } }> }
-    ).sessions.get("sess_undated_event")!.eventBuffer;
-    expect(buffer.nextId).toBe(4);
-    expect(
-      errors.mock.calls.some((call) =>
-        String(call[0]).includes("Dropped 1 restored event(s) that carry no timestamp")
-      )
-    ).toBe(true);
-  });
-
   it("resumes the event log sequence for a recovered session", () => {
     const stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-recover-"));
     const persistence = new SessionPersistence(stateDir);
@@ -411,17 +398,26 @@ describe("SessionManager recovered sessions", () => {
 describe("SessionManager session operations", () => {
   let client: MockClient;
   let manager: SessionManager;
+  let persistence: SessionPersistence;
+  let stateDir: string;
+
+  const events = (sessionId: string) => loggedEvents(persistence, stateDir, sessionId);
 
   beforeEach(() => {
     client = new MockClient();
+    stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-operations-"));
+    persistence = new SessionPersistence(stateDir);
     manager = new SessionManager({
       disableCleanup: true,
+      persistence,
       createClient: () => client as unknown as AppServerClient,
     });
   });
 
   afterEach(() => {
     manager.destroy();
+    persistence.destroy();
+    rmSync(stateDir, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
 
@@ -433,14 +429,11 @@ describe("SessionManager session operations", () => {
     expect(client.threadBackgroundTerminalsClean).toHaveBeenCalledWith({
       threadId: started.threadId,
     });
-    const poll = manager.pollEvents(started.sessionId, 0, 50);
-    const cleaned = poll.events.find(
-      (event) =>
-        (event.data as Record<string, unknown>)?.method ===
-        Methods.THREAD_BACKGROUND_TERMINALS_CLEAN
+    const cleaned = events(started.sessionId).find(
+      (event) => event.data?.method === Methods.THREAD_BACKGROUND_TERMINALS_CLEAN
     );
     expect(cleaned).toBeDefined();
-    expect((cleaned!.data as Record<string, unknown>).status).toBe("requested");
+    expect(cleaned!.data.status).toBe("requested");
   });
 
   it("pushes no event when the client refuses to clean background terminals", async () => {
@@ -453,12 +446,9 @@ describe("SessionManager session operations", () => {
       "EXEC_NOT_SUPPORTED"
     );
 
-    const poll = manager.pollEvents(started.sessionId, 0, 50);
     expect(
-      poll.events.some(
-        (event) =>
-          (event.data as Record<string, unknown>)?.method ===
-          Methods.THREAD_BACKGROUND_TERMINALS_CLEAN
+      events(started.sessionId).some(
+        (event) => event.data?.method === Methods.THREAD_BACKGROUND_TERMINALS_CLEAN
       )
     ).toBe(false);
   });
@@ -695,7 +685,7 @@ describe("SessionManager session operations", () => {
       "user_input",
     ]);
 
-    const poll = manager.pollEvents(started.sessionId, 0, 50);
+    const poll = manager.pollStatus(started.sessionId);
     for (const action of poll.actions!) {
       if (action.kind === "user_input") {
         manager.resolveUserInput(started.sessionId, action.requestId, { q1: { answers: ["a"] } });
@@ -977,17 +967,26 @@ describe("SessionManager unapplied turn overrides", () => {
 describe("SessionManager notification handling", () => {
   let client: MockClient;
   let manager: SessionManager;
+  let persistence: SessionPersistence;
+  let stateDir: string;
+
+  const events = (sessionId: string) => loggedEvents(persistence, stateDir, sessionId);
 
   beforeEach(() => {
     client = new MockClient();
+    stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-notifications-"));
+    persistence = new SessionPersistence(stateDir);
     manager = new SessionManager({
       disableCleanup: true,
+      persistence,
       createClient: () => client as unknown as AppServerClient,
     });
   });
 
   afterEach(() => {
     manager.destroy();
+    persistence.destroy();
+    rmSync(stateDir, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
 
@@ -1013,12 +1012,9 @@ describe("SessionManager notification handling", () => {
 
     const info = manager.getSession(started.sessionId, true) as { threadId?: string };
     expect(info.threadId).toBe("thread_real");
-    const poll = manager.pollEvents(started.sessionId, 0, 50);
-    const event = poll.events.find(
-      (e) => (e.data as Record<string, unknown>)?.method === Methods.THREAD_STARTED
-    );
-    expect((event!.data as Record<string, unknown>).threadId).toBe("thread_real");
-    expect((event!.data as Record<string, unknown>).status).toBe("active");
+    const event = events(started.sessionId).find((e) => e.data?.method === Methods.THREAD_STARTED);
+    expect(event!.data.threadId).toBe("thread_real");
+    expect(event!.data.status).toBe("active");
   });
 
   it("reports the idle variant of a thread/started status", async () => {
@@ -1028,11 +1024,8 @@ describe("SessionManager notification handling", () => {
       thread: { id: started.threadId, status: { type: "idle" } },
     });
 
-    const poll = manager.pollEvents(started.sessionId, 0, 50);
-    const event = poll.events.find(
-      (e) => (e.data as Record<string, unknown>)?.method === Methods.THREAD_STARTED
-    );
-    expect((event!.data as Record<string, unknown>).status).toBe("idle");
+    const event = events(started.sessionId).find((e) => e.data?.method === Methods.THREAD_STARTED);
+    expect(event!.data.status).toBe("idle");
   });
 
   it("reports no status for a thread/started that carries no thread", async () => {
@@ -1040,11 +1033,8 @@ describe("SessionManager notification handling", () => {
 
     client.emitNotification(Methods.THREAD_STARTED, { threadId: started.threadId });
 
-    const poll = manager.pollEvents(started.sessionId, 0, 50);
-    const event = poll.events.find(
-      (e) => (e.data as Record<string, unknown>)?.method === Methods.THREAD_STARTED
-    );
-    expect((event!.data as Record<string, unknown>).status).toBeUndefined();
+    const event = events(started.sessionId).find((e) => e.data?.method === Methods.THREAD_STARTED);
+    expect(event!.data.status).toBeUndefined();
   });
 
   it("drops a command output delta that is nothing but shell profile noise", async () => {
@@ -1056,7 +1046,7 @@ describe("SessionManager notification handling", () => {
       delta: "WARNING: oh-my-posh update available",
     });
 
-    expect(manager.pollEvents(started.sessionId, 0, 50).events).toHaveLength(0);
+    expect(events(started.sessionId)).toHaveLength(0);
   });
 
   it("keeps a command output delta that is not a string", async () => {
@@ -1068,9 +1058,9 @@ describe("SessionManager notification handling", () => {
       delta: { chunks: ["a"] },
     });
 
-    const poll = manager.pollEvents(started.sessionId, 0, 50);
-    expect(poll.events).toHaveLength(1);
-    expect((poll.events[0].data as { delta: unknown }).delta).toEqual({ chunks: ["a"] });
+    const logged = events(started.sessionId);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]!.data.delta).toEqual({ chunks: ["a"] });
   });
 
   it("ignores a notification method it has no case for", async () => {
@@ -1078,7 +1068,7 @@ describe("SessionManager notification handling", () => {
 
     client.emitNotification("account/somethingNew", { whatever: true });
 
-    expect(manager.pollEvents(started.sessionId, 0, 50).events).toHaveLength(0);
+    expect(events(started.sessionId)).toHaveLength(0);
   });
 
   it("uses the last completed agent message when the turn carries no output", async () => {
@@ -1137,9 +1127,8 @@ describe("SessionManager notification handling", () => {
       turn: { id: "turn_1", status: "completed", items: [] },
     });
 
-    const events = manager.pollEvents(started.sessionId, 0, 50).events;
-    const planEvent = events.find(
-      (e) => ((e.data as Record<string, unknown>)?.item as { id?: string })?.id === "item_plan"
+    const planEvent = events(started.sessionId).find(
+      (e) => (e.data?.item as { id?: string })?.id === "item_plan"
     );
     expect(planEvent!.type).toBe("progress");
     expect(manager.getLastResult(started.sessionId)?.text).toBe("the answer");
@@ -1171,11 +1160,9 @@ describe("SessionManager notification handling", () => {
     });
 
     expect(manager.getLastResult(started.sessionId)?.text).toBe("the answer");
-    const rawEvent = manager
-      .pollEvents(started.sessionId, 0, 50)
-      .events.find(
-        (e) => (e.data as Record<string, unknown>)?.method === Methods.RAW_RESPONSE_ITEM_COMPLETED
-      );
+    const rawEvent = events(started.sessionId).find(
+      (e) => e.data?.method === Methods.RAW_RESPONSE_ITEM_COMPLETED
+    );
     expect(rawEvent!.type).toBe("progress");
   });
 
@@ -1318,11 +1305,11 @@ describe("SessionManager notification handling", () => {
     });
 
     const progress = manager.getProgress(started.sessionId);
-    expect(progress.lastMethod).toBe(Methods.MCP_TOOL_PROGRESS);
+    expect(progress.phase).toBe("acting");
     expect(Object.keys(progress)).not.toContain("percent");
   });
 
-  it("merges reported token usage without letting it become the last method", async () => {
+  it("merges reported token usage without moving the phase", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
 
     client.emitNotification(Methods.REASONING_TEXT_DELTA, { turnId: "turn_mock", delta: "a" });
@@ -1369,7 +1356,8 @@ describe("SessionManager notification handling", () => {
 
     const progress = manager.getProgress(started.sessionId);
     expect(progress.tokens).toEqual({ input: 10, output: 9, total: 19 });
-    expect(progress.lastMethod).toBe(Methods.REASONING_TEXT_DELTA);
+    // The counter update carries no phase of its own: the reasoning delta before it
+    // is still what the session is doing.
     expect(progress.phase).toBe("reasoning");
   });
 
@@ -1418,7 +1406,7 @@ describe("SessionManager notification handling", () => {
   it("ignores a turn start and an error that arrive after cancellation", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
     await manager.cancelSession(started.sessionId, "by test");
-    const before = manager.pollEvents(started.sessionId, 0, 50).events.length;
+    const before = events(started.sessionId).length;
 
     client.emitNotification(Methods.TURN_STARTED, { turn: { id: "turn_late", status: "active" } });
     client.emitNotification(Methods.ERROR, {
@@ -1428,8 +1416,7 @@ describe("SessionManager notification handling", () => {
       willRetry: false,
     });
 
-    const after = manager.pollEvents(started.sessionId, 0, 50);
-    expect(after.events.length).toBe(before);
+    expect(events(started.sessionId).length).toBe(before);
     expect(manager.getSession(started.sessionId).status).toBe("cancelled");
   });
 
@@ -1441,11 +1428,9 @@ describe("SessionManager notification handling", () => {
       willRetry: false,
     });
 
-    const poll = manager.pollEvents(started.sessionId, 0, 50);
-    const errorEvent = poll.events.find((event) => event.type === "error")!;
-    const data = errorEvent.data as Record<string, unknown>;
-    expect(data.error).toContain("<path>");
-    expect(data.error).not.toContain("/home/someone/secret");
+    const errorEvent = events(started.sessionId).find((event) => event.type === "error")!;
+    expect(errorEvent.data.error).toContain("<path>");
+    expect(errorEvent.data.error).not.toContain("/home/someone/secret");
   });
 
   it("survives a notification that carries no params", async () => {
@@ -1454,7 +1439,7 @@ describe("SessionManager notification handling", () => {
     client.emitNotification(Methods.MCP_TOOL_PROGRESS, null);
 
     const progress = manager.getProgress(started.sessionId);
-    expect(progress.lastMethod).toBe(Methods.MCP_TOOL_PROGRESS);
+    expect(progress.phase).toBe("acting");
     expect(progress.tokens).toBeUndefined();
   });
 
@@ -1469,8 +1454,7 @@ describe("SessionManager notification handling", () => {
     expect(result?.status).toBe("error");
     expect(result?.error).toContain("app-server error:");
     expect(result?.error).not.toContain("/usr/local/bin/codex");
-    const poll = manager.pollEvents(started.sessionId, 0, 50);
-    expect(poll.events.some((event) => event.type === "error")).toBe(true);
+    expect(events(started.sessionId).some((event) => event.type === "error")).toBe(true);
   });
 });
 
@@ -1478,11 +1462,16 @@ describe("SessionManager server-initiated requests", () => {
   let client: MockClient;
   let manager: SessionManager;
   let errors: ReturnType<typeof vi.spyOn>;
+  let persistence: SessionPersistence;
+  let stateDir: string;
 
   beforeEach(() => {
     client = new MockClient();
+    stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-server-requests-"));
+    persistence = new SessionPersistence(stateDir);
     manager = new SessionManager({
       disableCleanup: true,
+      persistence,
       createClient: () => client as unknown as AppServerClient,
     });
     errors = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1490,19 +1479,21 @@ describe("SessionManager server-initiated requests", () => {
 
   afterEach(() => {
     manager.destroy();
+    persistence.destroy();
+    rmSync(stateDir, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
 
-  it("wakes long-poll waiters when the answer to a server request cannot be sent", async () => {
+  it("reports a dynamic tool call whose refusal cannot be sent and runs on", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
     client.respondToServer = vi.fn(() => {
       throw new Error("stdin closed");
     });
 
-    const woken = manager.waitForChange(started.sessionId, 60_000);
     client.emitServerRequest(10, Methods.DYNAMIC_TOOL_CALL, { name: "whatever" });
 
-    await expect(woken).resolves.toBeUndefined();
+    // Nothing here is the caller's to answer, so the session stays as it was.
+    expect(manager.pollStatus(started.sessionId).status).toBe("running");
     expect(
       errors.mock.calls.some(
         (call) =>
@@ -1518,10 +1509,9 @@ describe("SessionManager server-initiated requests", () => {
       throw new Error("stdin closed");
     });
 
-    const woken = manager.waitForChange(started.sessionId, 60_000);
     client.emitServerRequest(11, "some/unknown/method", {});
 
-    await expect(woken).resolves.toBeUndefined();
+    expect(manager.pollStatus(started.sessionId).status).toBe("running");
     expect(
       errors.mock.calls.some(
         (call) =>
@@ -1685,13 +1675,7 @@ describe("SessionManager approval timeouts", () => {
     const info = manager.getSession(started.sessionId);
     expect(info.status).toBe("running");
     expect(info.pendingRequestCount).toBe(0);
-    const poll = manager.pollEvents(started.sessionId, 0, 50);
-    const timedOut = poll.events.find(
-      (event) => (event.data as Record<string, unknown>)?.timeout === true
-    );
-    expect(timedOut).toBeDefined();
-    expect((timedOut!.data as Record<string, unknown>).kind).toBe("fileChange");
-    expect((timedOut!.data as Record<string, unknown>).decision).toBe("decline");
+    expect(manager.pollStatus(started.sessionId).actions).toEqual([]);
   });
 
   it("reports a command approval whose auto-decline cannot be delivered", async () => {
@@ -1795,7 +1779,7 @@ describe("SessionManager approval decision validation", () => {
       cwd: workspace,
       ...extra,
     });
-    const poll = manager.pollEvents(started.sessionId, 0, 50);
+    const poll = manager.pollStatus(started.sessionId);
     return { sessionId: started.sessionId, requestId: poll.actions![0].requestId };
   }
 
@@ -1905,7 +1889,7 @@ describe("SessionManager approval decision validation", () => {
       turnId: "turn_1",
       questions: [{ id: "q1", question: "which?" }],
     });
-    const poll = manager.pollEvents(started.sessionId, 0, 50);
+    const poll = manager.pollStatus(started.sessionId);
     const requestId = poll.actions![0].requestId;
 
     expect(() => manager.resolveApproval(started.sessionId, requestId, "accept")).toThrow(

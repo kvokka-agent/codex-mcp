@@ -18,12 +18,9 @@ import {
   SUMMARY_MODES,
   SESSION_ACTIONS,
   CHECK_ACTIONS,
-  RESPONSE_MODES,
   ALL_DECISIONS,
   DEFAULT_APPROVAL_TIMEOUT_MS,
-  POLL_DEFAULT_MAX_EVENTS,
-  POLL_MIN_MAX_EVENTS,
-  RESPOND_DEFAULT_MAX_EVENTS,
+  MAX_LONG_POLL_WAIT_MS,
   DEFAULT_EFFORT_LEVEL,
   ErrorCode,
 } from "./types.js";
@@ -127,7 +124,6 @@ export function createServer(
     lastEventAt: z.string(),
     activeTurnId: z.string().optional(),
     pendingActionCount: z.number().int(),
-    lastMethod: z.string().optional(),
     tokens: z
       .object({
         input: z.number().optional(),
@@ -192,68 +188,31 @@ export function createServer(
     ...errorOutputShape,
   };
 
-  const codexCheckPollOptionsSchema = z
-    .object({
-      includeEvents: z
-        .boolean()
-        .optional()
-        .describe("Default: true. Include events[] in response."),
-      includeActions: z
-        .boolean()
-        .optional()
-        .describe("Default: true. Include actions[] in response."),
-      includeResult: z.boolean().optional().describe("Default: true. Include result in response."),
-      skipDeltas: z
-        .boolean()
-        .optional()
-        .describe(
-          "Default: false. Drop delta-heavy streaming events while still advancing the cursor."
-        ),
-      finalOnly: z
-        .boolean()
-        .optional()
-        .describe("Default: false. Omit events and focus on actions + terminal result."),
-      maxBytes: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Default: unlimited. Best-effort response payload cap in bytes."),
+  // What `codex_check` used to take. A caller that still sends one is told what
+  // replaced it, rather than polling on and wondering why the response looks
+  // nothing like the one it asked for.
+  const REMOVED_CHECK_INPUTS: Record<string, string> = {
+    maxEvents:
+      "maxEvents was removed: codex_check reports status, actions and the finished turn's result, never events. The turn's transcript is in the Codex rollout log under ~/.codex/sessions/.",
+    cursor: "cursor was removed: there is no event stream to page through.",
+    nextCursor: "nextCursor was removed: there is no event stream to page through.",
+    responseMode:
+      "responseMode was removed: every action of codex_check answers with the same status payload.",
+    pollOptions: "pollOptions was removed: pass waitMs at the top level.",
+  };
+
+  const codexCheckInputSchema = z
+    .looseObject({
+      action: z.enum(CHECK_ACTIONS),
+      sessionId: z.string().describe("Target session ID"),
       waitMs: z
         .number()
         .int()
         .nonnegative()
         .optional()
         .describe(
-          "Long-poll: block up to this many ms for new events (max 120000). Omit or 0 for immediate return."
+          `Long-poll for action='poll': block up to this many ms (max ${MAX_LONG_POLL_WAIT_MS}) until the status changes, an action arrives or the turn ends. Omit or 0 to answer at once.`
         ),
-    })
-    .optional()
-    .describe("Optional poll shaping controls.");
-
-  const codexCheckInputSchema = z
-    .object({
-      action: z.enum(CHECK_ACTIONS),
-      sessionId: z.string().describe("Target session ID"),
-      cursor: z
-        .number()
-        .int()
-        .nonnegative()
-        .optional()
-        .describe("Event cursor (default: session last consumed cursor)."),
-      maxEvents: z
-        .number()
-        .int()
-        .nonnegative()
-        .optional()
-        .describe(
-          `Max events. Default: poll=${POLL_DEFAULT_MAX_EVENTS} (min ${POLL_MIN_MAX_EVENTS}), respond_*=${RESPOND_DEFAULT_MAX_EVENTS}.`
-        ),
-      responseMode: z
-        .enum(RESPONSE_MODES)
-        .optional()
-        .describe("Response mode. Default: minimal. Options: minimal/delta_compact/full."),
-      pollOptions: codexCheckPollOptionsSchema,
       // respond_permission
       requestId: z.string().optional().describe("Request ID from actions[]"),
       decision: z
@@ -294,14 +253,12 @@ export function createServer(
         });
       };
 
+      for (const [name, message] of Object.entries(REMOVED_CHECK_INPUTS)) {
+        if (name in value) addIssue(name, message);
+      }
+
       switch (value.action) {
         case "poll": {
-          if (value.maxEvents !== undefined && value.maxEvents < POLL_MIN_MAX_EVENTS) {
-            addIssue(
-              "maxEvents",
-              `poll requires maxEvents >= ${POLL_MIN_MAX_EVENTS} to avoid no-op loops.`
-            );
-          }
           if (value.requestId !== undefined) {
             addIssue("requestId", "requestId is only allowed for respond_* actions.");
           }
@@ -329,6 +286,9 @@ export function createServer(
           break;
         }
         case "respond_permission": {
+          if (value.waitMs !== undefined) {
+            addIssue("waitMs", "waitMs is only allowed for action='poll'.");
+          }
           if (!value.requestId) {
             addIssue("requestId", "requestId is required for action='respond_permission'.");
           }
@@ -371,6 +331,9 @@ export function createServer(
           break;
         }
         case "respond_user_input": {
+          if (value.waitMs !== undefined) {
+            addIssue("waitMs", "waitMs is only allowed for action='poll'.");
+          }
           if (!value.requestId) {
             addIssue("requestId", "requestId is required for action='respond_user_input'.");
           }
@@ -695,11 +658,11 @@ export function createServer(
     "codex_check",
     {
       title: "Poll & Respond",
-      description: `Poll session for events or respond to approval/input requests. Use pollInterval as a minimum hint; stop polling on terminal status (idle/error/cancelled). WARNING: running sessions usually poll at >=120000ms, but approvalTimeoutMs defaults to ${DEFAULT_APPROVAL_TIMEOUT_MS}ms, so approvals can expire between polls unless you raise the timeout or use non-interactive policies. See codex-mcp:///quickstart and codex-mcp:///gotchas.
+      description: `Report where a session stands and answer what it waits for. Every action returns the same payload: { sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }. The turn's own events are never returned — Codex writes the full transcript to its rollout log under ~/.codex/sessions/. Answer every entry of actions[]; stop checking on terminal status (idle/error/cancelled), where result carries the final answer once. WARNING: running sessions usually poll at >=120000ms, but approvalTimeoutMs defaults to ${DEFAULT_APPROVAL_TIMEOUT_MS}ms, so approvals can expire between checks unless you raise the timeout, use non-interactive policies, or pass waitMs. See codex-mcp:///quickstart and codex-mcp:///gotchas.
 
-poll: events since cursor. Default maxEvents=${POLL_DEFAULT_MAX_EVENTS}.
-respond_permission: approval decision. Default maxEvents=${RESPOND_DEFAULT_MAX_EVENTS} (compact ACK).
-respond_user_input: user-input answers. Default maxEvents=${RESPOND_DEFAULT_MAX_EVENTS} (compact ACK).`,
+poll: current status; with waitMs it blocks until the status changes, an action arrives or the turn ends.
+respond_permission: answer an approval action.
+respond_user_input: answer a user-input action.`,
       inputSchema: codexCheckInputSchema,
       outputSchema: {
         sessionId: z.string().optional(),
@@ -714,25 +677,6 @@ respond_user_input: user-input answers. Default maxEvents=${RESPOND_DEFAULT_MAX_
         progress: progressSchema.optional(),
         interactionState: interactionStateSchema.optional(),
         recommendedNextAction: nextActionSchema.optional(),
-        events: z
-          .array(
-            z.object({
-              id: z.number().int(),
-              type: z.enum([
-                "output",
-                "progress",
-                "approval_request",
-                "approval_result",
-                "result",
-                "error",
-              ]),
-              data: z.unknown(),
-              timestamp: z.string(),
-            })
-          )
-          .optional(),
-        nextCursor: z.number().int().optional(),
-        cursorResetTo: z.number().int().optional(),
         actions: z
           .array(
             z.object({
@@ -745,10 +689,15 @@ respond_user_input: user-input answers. Default maxEvents=${RESPOND_DEFAULT_MAX_
               approvalId: z.string().optional(),
               commandActions: z.array(z.unknown()).nullable().optional(),
               proposedExecpolicyAmendment: z.array(z.string()).nullable().optional(),
+              availableDecisions: z.array(z.unknown()).nullable().optional(),
+              proposedNetworkPolicyAmendments: z.array(z.unknown()).nullable().optional(),
+              additionalPermissions: z.unknown().optional(),
+              networkApprovalContext: z.unknown().optional(),
               createdAt: z.string(),
             })
           )
-          .optional(),
+          .optional()
+          .describe("What the caller must answer. Empty while the turn needs nothing."),
         result: z
           .object({
             turnId: z.string(),
@@ -761,10 +710,8 @@ respond_user_input: user-input answers. Default maxEvents=${RESPOND_DEFAULT_MAX_
             error: z.string().optional(),
             completedAt: z.string(),
           })
-          .optional(),
-        compatWarnings: z.array(z.string()).optional(),
-        truncated: z.boolean().optional(),
-        truncatedFields: z.array(z.string()).optional(),
+          .optional()
+          .describe("The finished turn's answer, carried by the first check that sees it."),
         ...errorOutputShape,
       },
       annotations: {

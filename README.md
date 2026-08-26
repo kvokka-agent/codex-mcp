@@ -13,9 +13,9 @@ MCP server that wraps [OpenAI Codex](https://github.com/openai/codex) — start 
 - **Complete permission management** — three-layer model: approval policy, sandbox isolation, async approval arbitration
 - **Zero config** — inherits your local `~/.codex/config.toml` automatically
 - **Session management** — list, inspect, cancel, interrupt, fork sessions
-- **Event streaming** — cursor-based pagination with pin-protected event buffer
+- **Status protocol** — `codex_check` reports the state of a session and what it waits for, never the turn's transcript
 - **Disk persistence** — session state, event logs, and results survive server restarts (`~/.codex-mcp/state/`)
-- **Long-polling** — `codex_check` supports `pollOptions.waitMs` to wait for new events instead of busy-polling
+- **Long-polling** — `codex_check` takes `waitMs` and returns when the status changes, an action arrives or the turn ends
 - **Graceful shutdown** — stdin drain logic waits for active sessions before exiting
 - **Orphan reaping** — leaked child processes from crashed runs are automatically cleaned up on startup
 - **Static read-only resources** — `codex-mcp:///server-info`, `codex-mcp:///compat-report`, `codex-mcp:///config`, `codex-mcp:///gotchas`, `codex-mcp:///quickstart`, `codex-mcp:///errors`, `codex-mcp:///delegation-guide`
@@ -360,18 +360,19 @@ List, inspect, cancel, interrupt, fork, batch-clean sessions, or clean backgroun
 { "action": "clean_background_terminals", "sessionId": "sess_abc123" }
 ```
 
-### `codex_check` — Poll events & respond
+### `codex_check` — Check status & respond
 
-Query a running session for events, respond to approval requests, or answer user input.
+Report where a session stands, respond to approval requests, or answer user input.
+
+The turn's own history — every reasoning step, command and message — stays in Codex's
+rollout log under `~/.codex/sessions/**/rollout-*.jsonl`. `codex_check` does not repeat
+it: the caller gets the state of the session and the things it must answer.
 
 | Parameter                  | Type     | Required                          | Description                                                                                                                                                                                                                       |
 | -------------------------- | -------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `action`                   | string   | Yes                               | `"poll"`, `"respond_permission"`, or `"respond_user_input"`                                                                                                                                                                       |
 | `sessionId`                | string   | Yes                               | Target session ID                                                                                                                                                                                                                 |
-| `cursor`                   | number   | No                                | Event cursor for incremental polling (`action="poll"`). For `respond_*`, codex-mcp applies monotonic cursor progression: `max(cursor, sessionLastCursor)`.                                                                        |
-| `maxEvents`                | number   | No                                | Keep this small. `poll` default: `1` (minimum `1`; increase only for catch-up). `respond_*` default: `0` (recommended; compact ACK, no event replay).                                                                             |
-| `responseMode`             | string   | No                                | Response shaping mode: `minimal` (default), `delta_compact`, `full`                                                                                                                                                               |
-| `pollOptions`              | object   | No                                | Optional controls: `includeEvents` (default `true`), `includeActions` (default `true`), `includeResult` (default `true`), `skipDeltas`, `finalOnly`, `maxBytes` (default unlimited), `waitMs` (long-poll budget, capped at `120000`) |
+| `waitMs`                   | number   | No                                | `action="poll"` only. Long-poll budget in ms, capped at `120000`. The call returns when the status changes, an action arrives or the turn ends. Omit or `0` to answer at once.                                                     |
 | `requestId`                | string   | For respond_permission/user_input | Request ID from `actions[]`                                                                                                                                                                                                       |
 | `decision`                 | string   | For respond_permission            | For command approvals: `"accept"`, `"acceptForSession"`, `"acceptWithExecpolicyAmendment"`, `"applyNetworkPolicyAmendment"`, `"decline"`, `"cancel"`; for file changes: `"accept"`, `"acceptForSession"`, `"decline"`, `"cancel"` |
 | `execpolicy_amendment`     | string[] | For acceptWithExecpolicyAmendment | Exec policy amendment list (required when `decision="acceptWithExecpolicyAmendment"`)                                                                                                                                             |
@@ -379,10 +380,10 @@ Query a running session for events, respond to approval requests, or answer user
 | `denyMessage`              | string   | No                                | Internal note on deny (not sent to app-server)                                                                                                                                                                                    |
 | `answers`                  | object   | For respond_user_input            | For `respond_user_input`: `question-id -> { answers: string[] }`                                                                                                                                                                  |
 
-**Returns (poll and respond\_\*):** `{ sessionId, status, pollInterval?, progress?, interactionState?, recommendedNextAction?, cursorResetTo?, events, nextCursor, actions?, result? }`
+**Returns (poll and respond\_\*):** `{ sessionId, status, pollInterval?, progress, interactionState, recommendedNextAction, actions, result? }`
 
 ```json
-{ "action": "poll", "sessionId": "sess_abc123", "cursor": 0 }
+{ "action": "poll", "sessionId": "sess_abc123", "waitMs": 120000 }
 {
   "action": "respond_permission",
   "sessionId": "sess_abc123",
@@ -397,31 +398,26 @@ Query a running session for events, respond to approval requests, or answer user
 }
 ```
 
-## Event Polling Semantics
+## What A Check Reports
 
-`codex_check(action="poll")` returns an append-only event stream with cursor pagination:
+`codex_check` answers every action with one payload:
 
-- `cursor`: the first event id you want (use the previous `nextCursor`)
-- `nextCursor`: pass this back on the next poll
-- `cursorResetTo`: when present, older events were evicted; restart from this cursor to avoid gaps
-- `maxEvents`: max events returned per call
-- If `cursor` is omitted, codex-mcp continues from that session's last consumed cursor.
-- If `responseMode` is omitted, codex-mcp uses `minimal`.
-- `pollOptions.includeEvents/includeActions/includeResult` default to `true`.
-- `pollOptions.skipDeltas=true` drops streaming delta events but still advances the cursor past them.
-- `pollOptions.finalOnly=true` omits `events[]`, focuses on `actions[]` plus terminal `result`, and advances the cursor past hidden events.
-- `pollOptions.maxBytes` is optional and enforces best-effort payload truncation (`truncated`, `truncatedFields`).
-- `pollOptions.waitMs` long-polls: the call blocks until an event, an action, or a result appears, or the budget runs out. It is capped at `120000` ms, and a session accepts 4 concurrent long polls — the fifth returns immediately.
-- `progress.phase` gives a coarse execution snapshot (`starting`, `reasoning`, `acting`, `waiting_approval`, `finished`, etc.).
-- `progress.tokens` is populated when the backend exposes token counts.
-- `respond_*` defaults to compact ACK (`events: []`, no cursor advance) unless you explicitly pass `maxEvents`.
-- `poll` defaults to `maxEvents=1` to keep payloads small; increase temporarily (for example `10-20`) when you need to catch up faster.
-- If `poll` is called with `maxEvents=0`, codex-mcp treats it as `1` to avoid no-op polling loops.
-- For `respond_*`, prefer `maxEvents=0` instead of `1`: `0` keeps approval ACK minimal and avoids consuming/replaying stream events in the same call. Use `1-5` only when you explicitly need immediate events.
-- For `poll`, keep windows small to reduce payload spikes and context pressure.
+- `status`: `running`, `waiting_approval`, `idle`, `error` or `cancelled`.
+- `progress`: the phase (`starting`, `reasoning`, `acting`, `waiting_approval`, `finished`, `error`, `cancelled`), the number of open actions, the time of the last event, the active turn id, and the token counters the backend reported.
+- `actions[]`: what the caller must answer — approval requests and questions. Answer each by its `requestId`.
+- `result`: the finished turn's answer, carried by the first check that sees a terminal status. Later checks of the same turn report the status alone.
+- `interactionState` and `recommendedNextAction`: `poll`, `respond_permission`, `respond_user_input`, or `none` when the turn is over.
+- `pollInterval`: minimum delay before the next check — `>=120000` ms while `running`, `~1000` ms while `waiting_approval`, absent in a terminal state.
 
-Event types include `output`, `progress`, `approval_request`, `approval_result`, `result`, `error`.
-Approvals/results/errors are pinned to reduce eviction risk.
+Nothing else reaches the caller. Reasoning, command output, agent-message deltas and
+token-counter updates are written to the session's `events.jsonl` under the state
+directory, and the full history of the turn is in Codex's own rollout log; sending either
+through an MCP client's context would put the whole run through the model a second time.
+
+`waitMs` long-polls: the call blocks until the status changes, a new action arrives, or
+the turn ends. Deltas and token-counter updates do not end the wait. It is capped at
+`120000` ms, and a session accepts 4 concurrent long polls — the fifth returns at once.
+
 When a turn completes, `result.text` provides a stable final assistant message: `turn.output` when the backend sent one, else the last completed `agentMessage` item. Only `codex exec` sends `turn.output`, which `result.output` carries as sent; the app-server turn has no such field, so app-server sessions answer from the agent message.
 
 ## Approvals & User Input
@@ -470,18 +466,18 @@ Common codes include `INVALID_ARGUMENT`, `SESSION_NOT_FOUND`, `SESSION_BUSY`, `S
 - Windows command execution inside `codex app-server` may still inherit PowerShell profile side effects in some environments. This cannot be filtered by codex-mcp once emitted on stdout; if command turns are noisy or fail with profile errors, clean your PowerShell profile and prefer `approvalPolicy="on-failure"` / `"never"` to reduce approval churn.
 - If Windows command output shows mojibake, enforce UTF-8 in the shell (`chcp 65001` and `$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()`).
 - Startup guard behavior is controlled by `CODEX_MCP_STDIO_MODE` (`auto`/`strict`/`off`). Use `strict` in CI or hardened environments to fail fast on blocking contamination risks (while still surfacing heuristic risk warnings).
-- Retryable transport/API interruptions are emitted as `progress` events with `data.method="codex-mcp/reconnect"` and `willRetry=true`, so clients can surface reconnect state without treating it as terminal failure.
-- Approval/user-input flows rely on the `actions[]` array returned by `codex_check(action="poll")`. Claude and Cursor render approval buttons from this payload, so they need to poll at `pollInterval`, honour `cursorResetTo`, and reply within `approvalTimeoutMs` to avoid automatic declines.
+- A retryable transport/API interruption keeps the session `running`; only a failure the backend will not retry moves it to `error`, where `result.error` says what happened.
+- Approval/user-input flows rely on the `actions[]` array returned by `codex_check`. Claude and Cursor render approval buttons from this payload, so they need to check at `pollInterval` (or pass `waitMs`) and reply within `approvalTimeoutMs` to avoid automatic declines.
 
 ## Typical Workflow
 
 ```text
-1. codex(prompt="Fix bug X")           → { sessionId, threadId, status: "running" }
-2. codex_check(action="poll", ...)      → events[], status, actions[]
-3. codex_check(action="respond_permission", decision="accept")  (if needed)
-4. codex_check(action="poll", ...)      → result when status="idle"
-5. codex_reply(prompt="Also add tests") → new turn starts
-6. codex_check(action="poll", ...)      → poll until done
+1. codex(prompt="Fix bug X")                          → { sessionId, threadId, status: "running" }
+2. codex_check(action="poll", waitMs=120000)          → status, progress, actions[]
+3. codex_check(action="respond_permission", decision="accept")  (for each action)
+4. codex_check(action="poll", waitMs=120000)          → result when status="idle"
+5. codex_reply(prompt="Also add tests")               → new turn starts
+6. codex_check(action="poll", waitMs=120000)          → check until done
 ```
 
 ## Permission Model

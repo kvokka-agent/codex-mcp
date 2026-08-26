@@ -39,9 +39,7 @@ const {
   DEFAULT_EFFORT_LEVEL,
   ErrorCode,
   DEFAULT_APPROVAL_TIMEOUT_MS,
-  POLL_DEFAULT_MAX_EVENTS,
-  POLL_MIN_MAX_EVENTS,
-  RESPOND_DEFAULT_MAX_EVENTS,
+  MAX_LONG_POLL_WAIT_MS,
   DEFAULT_IDLE_CLEANUP_MS,
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
@@ -435,16 +433,6 @@ describe("resource documents served over MCP", () => {
     expect(mentioned.filter((key) => !advancedProps.includes(key))).toEqual([]);
   });
 
-  it("names only real `pollOptions.*` fields", () => {
-    const pollOptionProps = Object.keys(
-      tools.get("codex_check")!.inputSchema!.properties!.pollOptions.properties ?? {}
-    );
-    const mentioned = collectMatches(allText, /pollOptions\.([A-Za-z]+)/g);
-
-    expect(mentioned.length).toBeGreaterThan(0);
-    expect(mentioned.filter((key) => !pollOptionProps.includes(key))).toEqual([]);
-  });
-
   it("uses only actions that codex_check and codex_session accept", () => {
     const checkActions = tools.get("codex_check")!.inputSchema!.properties!.action.enum ?? [];
     const sessionActions = tools.get("codex_session")!.inputSchema!.properties!.action.enum ?? [];
@@ -670,16 +658,12 @@ describe("resource documents served over MCP", () => {
     const configText = docs.get(RESOURCE_URIS.config)!;
     const guide = docs.get(RESOURCE_URIS.delegationGuide)!;
 
-    expect(gotchas).toContain(`Poll default is \`maxEvents=${POLL_DEFAULT_MAX_EVENTS}\``);
-    expect(gotchas).toContain(`Poll enforces minimum \`maxEvents=${POLL_MIN_MAX_EVENTS}\``);
-    expect(gotchas).toContain(`\`maxEvents=${RESPOND_DEFAULT_MAX_EVENTS}\``);
+    expect(gotchas).toContain(`\`waitMs\` (max ${MAX_LONG_POLL_WAIT_MS})`);
     expect(gotchas).toContain(`(default ${DEFAULT_APPROVAL_TIMEOUT_MS} ms)`);
     expect(gotchas).toContain(`default approval timeout is ${DEFAULT_APPROVAL_TIMEOUT_MS / 1000}`);
-    expect(quickstart).toContain(
-      `defaults are poll=${POLL_DEFAULT_MAX_EVENTS}, respond_*=${RESPOND_DEFAULT_MAX_EVENTS}`
-    );
+    expect(quickstart).toContain(`"waitMs": ${MAX_LONG_POLL_WAIT_MS}`);
     expect(configText).toContain(`(default \`${DEFAULT_APPROVAL_TIMEOUT_MS}\` ms)`);
-    expect(configText).toContain(`default \`${POLL_DEFAULT_MAX_EVENTS}\``);
+    expect(configText).toContain(`maximum \`${MAX_LONG_POLL_WAIT_MS}\``);
     expect(guide).toContain(`Default approval timeout is ${DEFAULT_APPROVAL_TIMEOUT_MS}ms`);
   });
 
@@ -768,64 +752,6 @@ describe("resource documents served over MCP", () => {
     } finally {
       manager.destroy();
     }
-  });
-
-  it("names on the reconnect event only fields the backend really sends", async () => {
-    const gotchas = docs.get(RESOURCE_URIS.gotchas)!;
-    const bullet = gotchas.match(/^- Retryable interruptions .+$/m)![0];
-    const named = collectMatches(bullet, /`([a-z][A-Za-z]+)`/g).filter(
-      (name) => name !== "progress"
-    );
-    const errorNotification = PROTOCOL_MESSAGES.get("errornotification")!;
-    const client = new StubCodexClient();
-    const manager = new SessionManager({
-      disableCleanup: true,
-      createClient: () => client as never,
-    });
-
-    try {
-      const { sessionId } = await manager.createSession("hi", process.cwd(), {}, "low");
-      client.notifyManager(Methods.ERROR, {
-        threadId: "thread_stub",
-        turnId: "turn_stub",
-        error: { message: "stream reset" },
-        willRetry: true,
-      });
-      const events = manager.pollEvents(sessionId, 0).events ?? [];
-      const reconnect = events.find(
-        (event) => (event.data as { method?: string }).method === "codex-mcp/reconnect"
-      )!;
-
-      expect(named).toContain("willRetry");
-      for (const field of named) {
-        expect(errorNotification.has(field), `codex-schema ErrorNotification has no ${field}`).toBe(
-          true
-        );
-        expect(Object.keys(reconnect.data as SchemaNode)).toContain(field);
-      }
-      // Nothing in the bundle counts attempts, so no document may tell a client to read one.
-      const counters = Array.from(PROTOCOL_MESSAGES.values()).filter(
-        (properties) => properties.has("retryCount") || properties.has("maxRetries")
-      );
-      expect(counters).toEqual([]);
-      expect(allText).not.toContain("retryCount");
-      expect(allText).not.toContain("maxRetries");
-    } finally {
-      manager.destroy();
-    }
-  });
-
-  it("lists the event types the codex_check output schema declares", () => {
-    const gotchas = docs.get(RESOURCE_URIS.gotchas)!;
-    const events = (tools.get("codex_check")!.outputSchema!.properties!.events as SchemaNode)
-      .items as SchemaNode;
-    const declared = ((events.properties as SchemaNode).type as { enum: string[] }).enum;
-    const listed = collectMatches(
-      gotchas.match(/^- Top-level `events\[\]\.type` is one of: (.+)$/m)![1],
-      /`([a-z_]+)`/g
-    );
-
-    expect(listed).toEqual(declared);
   });
 
   it("promises `progress` on exactly the tools whose output schema carries it", () => {

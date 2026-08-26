@@ -93,7 +93,8 @@ describe("tools/list metadata", () => {
     expect(codexSession).toContain("clean_background_terminals");
 
     const codexCheck = tool(tools, "codex_check").description ?? "";
-    expect(codexCheck).toContain("Default maxEvents=1");
+    expect(codexCheck).toContain("waitMs");
+    expect(codexCheck).toContain("rollout log");
     expect(codexCheck).toContain("respond_permission");
     expect(codexCheck).toContain("codex-mcp:///gotchas");
   });
@@ -115,22 +116,15 @@ describe("tools/list metadata", () => {
     expect(checkProps).toHaveProperty("execpolicy_amendment");
     expect(checkProps).not.toHaveProperty("execpolicyAmendment");
 
-    // The client, not the schema, decides the paging window: advertising a default would make
-    // every poll re-send it.
-    const cursorSchema = checkProps.cursor as Record<string, unknown> | undefined;
-    expect(cursorSchema, "codex_check.cursor").toBeDefined();
-    expect(cursorSchema).not.toHaveProperty("default");
+    // The event stream and everything that paged through it are gone from the input.
+    for (const gone of ["cursor", "nextCursor", "maxEvents", "responseMode", "pollOptions"]) {
+      expect(checkProps, `codex_check.${gone}`).not.toHaveProperty(gone);
+    }
 
-    const maxEventsSchema = checkProps.maxEvents as Record<string, unknown> | undefined;
-    expect(maxEventsSchema, "codex_check.maxEvents").toBeDefined();
-    expect(maxEventsSchema).not.toHaveProperty("default");
-
-    const pollOptionsSchema = checkProps.pollOptions as
-      | { properties?: Record<string, unknown> }
-      | undefined;
-    expect(pollOptionsSchema?.properties, "codex_check.pollOptions.properties").toBeDefined();
-    expect(pollOptionsSchema!.properties!).toHaveProperty("includeEvents");
-    expect(pollOptionsSchema!.properties!).not.toHaveProperty("includeTools");
+    // The wait a caller asks for is one number, at the top level.
+    const waitMsSchema = checkProps.waitMs as Record<string, unknown> | undefined;
+    expect(waitMsSchema, "codex_check.waitMs").toBeDefined();
+    expect(waitMsSchema).not.toHaveProperty("default");
   });
 
   it("reports the registered tool count in the compat report resource", async () => {
