@@ -311,22 +311,26 @@ describe("SessionPersistence", () => {
     expect(() => persistence!.recoverSessions()).toThrow(/EACCES/);
   });
 
-  it("holds the state dir lock until it is released", () => {
+  it("claims one session at a time and hands each back", () => {
     persistence = new SessionPersistence(root);
-    persistence.acquireLock();
+    persistence.claim("sess_1");
+    persistence.claim("sess_2");
 
-    const lockPath = join(root, ".lock");
-    expect(JSON.parse(readFileSync(lockPath, "utf-8")).pid).toBe(process.pid);
+    expect(persistence.ownedSessions().sort()).toEqual(["sess_1", "sess_2"]);
+    expect(JSON.parse(readFileSync(sessionFile("sess_1", "owner.json"), "utf-8")).pid).toBe(
+      process.pid
+    );
 
-    persistence.releaseLockIfHeld();
-    expect(existsSync(lockPath)).toBe(false);
-    persistence.releaseLockIfHeld();
-    expect(existsSync(lockPath)).toBe(false);
+    persistence.release("sess_1");
+    expect(existsSync(sessionFile("sess_1", "owner.json"))).toBe(false);
+    expect(existsSync(sessionFile("sess_2", "owner.json"))).toBe(true);
+    expect(persistence.ownedSessions()).toEqual(["sess_2"]);
   });
 
-  it("destroy flushes every log and releases the lock", () => {
+  it("destroy flushes every log and gives up every claim", () => {
     persistence = new SessionPersistence(root);
-    persistence.acquireLock();
+    persistence.claim("sess_1");
+    persistence.claim("sess_2");
     persistence.appendEvent("sess_1", "progress", { a: 1 }, EVENT_AT);
     persistence.appendEvent("sess_2", "progress", { b: 2 }, EVENT_AT);
 
@@ -335,7 +339,32 @@ describe("SessionPersistence", () => {
 
     expect(existsSync(sessionFile("sess_1", "events.jsonl"))).toBe(true);
     expect(existsSync(sessionFile("sess_2", "events.jsonl"))).toBe(true);
-    expect(existsSync(join(root, ".lock"))).toBe(false);
+    expect(existsSync(sessionFile("sess_1", "owner.json"))).toBe(false);
+    expect(existsSync(sessionFile("sess_2", "owner.json"))).toBe(false);
+  });
+
+  it("records every thread parameter a resume needs", () => {
+    persistence = new SessionPersistence(root);
+    persistence.writeSessionMeta(
+      makeSession({
+        threadId: "thr_1",
+        personality: "pragmatic",
+        config: { "model_providers.x.name": "X" },
+        developerInstructions: "# Activity marker",
+        approvalTimeoutMs: 900_000,
+        profile: "work",
+      })
+    );
+
+    const meta = JSON.parse(readFileSync(sessionFile("sess_1", "meta.json"), "utf-8"));
+    expect(meta).toMatchObject({
+      threadId: "thr_1",
+      personality: "pragmatic",
+      config: { "model_providers.x.name": "X" },
+      developerInstructions: "# Activity marker",
+      approvalTimeoutMs: 900_000,
+      profile: "work",
+    });
   });
 });
 
@@ -359,7 +388,7 @@ describe("startDiskPersistence", () => {
     return makeSession({ sessionId, status: "running", createdAt: now, lastActiveAt: now });
   }
 
-  it("recovers and prunes when it owns STATE_DIR", () => {
+  it("recovers and prunes what the state directory holds", () => {
     const owner = new SessionPersistence(root);
     owner.writeSessionMeta(activeSession("sess_owned"));
     owner.destroy();
@@ -369,7 +398,7 @@ describe("startDiskPersistence", () => {
 
     expect(startup.persistence).toBeInstanceOf(SessionPersistence);
     expect(startup.recovered.map((r) => r.sessionId)).toContain("sess_owned");
-    expect(existsSync(join(root, ".lock"))).toBe(true);
+    expect(startup.recovered[0]!.owner).toEqual({ kind: "unowned" });
   });
 
   it("keeps pruned sessions out of what it hands back", () => {
@@ -422,8 +451,6 @@ describe("startDiskPersistence", () => {
       String(args[0]).includes("running without disk persistence")
     );
     expect(String((warning![1] as Error).message)).toContain("EACCES");
-    // The rollback gives STATE_DIR back, so the next server can take it.
-    expect(existsSync(join(root, ".lock"))).toBe(false);
     expect(existsSync(sessionFile("sess_kept", "meta.json"))).toBe(true);
   });
 
@@ -443,38 +470,38 @@ describe("startDiskPersistence", () => {
       String(args[0]).includes("running without disk persistence")
     );
     expect(String((warning![1] as Error).message)).toContain("EACCES");
-    expect(existsSync(join(root, ".lock"))).toBe(false);
     expect(existsSync(sessionFile("sess_kept", "meta.json"))).toBe(true);
   });
 
-  it("leaves another server's state untouched when the lock is held", () => {
-    // The first server keeps its lock and its session directory. acquireLock treats a
-    // lock held by this very process as reentrant, so the owner is the parent process.
+  it("hands back a session another running server holds, marked as held", () => {
+    // The live owner is this very test process: its pid and start time are what a
+    // running server would have written into the session it drives.
     const owner = new SessionPersistence(root);
     owner.writeSessionMeta(activeSession("sess_live"));
     owner.writePidInfo("sess_live", 4242, { model: "gpt-5" });
-    writeFileSync(
-      join(root, ".lock"),
-      JSON.stringify({ pid: process.ppid, startedAt: "2024-01-01T00:00:00.000Z" }) + "\n",
-      "utf-8"
-    );
+    owner.claim("sess_live");
 
-    const { result: startup, errors } = captureConsoleError(() => startDiskPersistence(root));
+    const startup = startDiskPersistence(root);
+    persistence = startup.persistence ?? null;
 
-    // No adapter, so SessionManager never writes into the owner's STATE_DIR.
-    expect(startup.persistence).toBeUndefined();
-    // No recovered sessions, so reapOrphanProcesses gets no live PID to kill.
-    expect(startup.recovered).toEqual([]);
-    expect(startup.pruned).toBe(0);
-    const warning = errors.find((args) =>
-      String(args[0]).includes("running without disk persistence")
-    );
-    expect(String((warning![1] as Error).message)).toContain("STATE_DIR is locked by another");
-
+    const live = startup.recovered.find((r) => r.sessionId === "sess_live")!;
+    expect(live.owner.kind).toBe("self");
     expect(existsSync(sessionFile("sess_live", "meta.json"))).toBe(true);
     expect(existsSync(sessionFile("sess_live", "pid.json"))).toBe(true);
-    expect(JSON.parse(readFileSync(join(root, ".lock"), "utf-8")).pid).toBe(process.ppid);
+  });
 
-    owner.destroy();
+  it("leaves a session a live owner holds out of a prune", () => {
+    const longAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const owner = new SessionPersistence(root);
+    owner.writeSessionMeta(
+      makeSession({ sessionId: "sess_old_held", createdAt: longAgo, lastActiveAt: longAgo })
+    );
+    owner.claim("sess_old_held");
+
+    const startup = startDiskPersistence(root);
+    persistence = startup.persistence ?? null;
+
+    expect(startup.pruned).toBe(0);
+    expect(existsSync(sessionFile("sess_old_held", "meta.json"))).toBe(true);
   });
 });

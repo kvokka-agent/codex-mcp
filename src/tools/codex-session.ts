@@ -1,14 +1,15 @@
 /**
- * codex_session tool — manage sessions (list/get/cancel/interrupt/fork/clean_background_terminals).
+ * codex_session tool — manage sessions
+ * (list/get/resume/cancel/interrupt/fork/clean/clean_background_terminals).
  */
 import type { SessionManager } from "../session/manager.js";
-import { ErrorCode, type SessionAction } from "../types.js";
+import { ErrorCode, type CleanableStatus, type SessionAction } from "../types.js";
 
 export interface CodexSessionParams {
   action: SessionAction;
   sessionId?: string;
   includeSensitive?: boolean;
-  statuses?: Array<"idle" | "error" | "cancelled">;
+  statuses?: CleanableStatus[];
   olderThanMs?: number;
   dryRun?: boolean;
   includeDisk?: boolean;
@@ -20,7 +21,16 @@ export async function executeCodexSession(
 ): Promise<unknown> {
   switch (args.action) {
     case "list":
-      return { sessions: sessionManager.listSessions() };
+      return { sessions: sessionManager.listAllSessions() };
+
+    case "resume":
+      if (!args.sessionId) {
+        return {
+          error: `Error [${ErrorCode.INVALID_ARGUMENT}]: sessionId required for 'resume'`,
+          isError: true,
+        };
+      }
+      return await sessionManager.resumeSession(args.sessionId);
 
     case "get":
       if (!args.sessionId) {

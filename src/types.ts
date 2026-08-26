@@ -25,6 +25,7 @@ export type SummaryMode = (typeof SUMMARY_MODES)[number];
 export const SESSION_ACTIONS = [
   "list",
   "get",
+  "resume",
   "cancel",
   "interrupt",
   "fork",
@@ -69,7 +70,35 @@ export interface NetworkPolicyAmendment {
 
 // ── Session Types ──────────────────────────────────────────────────
 
-export type SessionStatus = "running" | "idle" | "waiting_approval" | "error" | "cancelled";
+/**
+ * Where a session stands.
+ *
+ * `abandoned` is the honest end of a session whose server went away mid-turn:
+ * the work was cut off, nobody holds it, and `codex_session(action="resume")`
+ * picks the thread up where Codex left it. It is not `error` — nothing failed —
+ * and not `cancelled` — nobody asked for it to stop.
+ */
+export type SessionStatus =
+  | "running"
+  | "idle"
+  | "waiting_approval"
+  | "error"
+  | "cancelled"
+  | "abandoned";
+
+/** The statuses a session can be recovered from disk in and be listed under. */
+export const SESSION_STATUSES = [
+  "running",
+  "idle",
+  "waiting_approval",
+  "error",
+  "cancelled",
+  "abandoned",
+] as const;
+
+/** The statuses `codex_session(action="clean")` accepts. */
+export const CLEANABLE_STATUSES = ["idle", "error", "cancelled", "abandoned"] as const;
+export type CleanableStatus = (typeof CLEANABLE_STATUSES)[number];
 
 export type InteractionState = "working" | "waiting_input" | "finished";
 
@@ -98,7 +127,8 @@ export type ProgressPhase =
   | "waiting_approval"
   | "finished"
   | "error"
-  | "cancelled";
+  | "cancelled"
+  | "abandoned";
 
 export interface ProgressTokens {
   input?: number;
@@ -183,6 +213,7 @@ export interface SessionInfo {
   profile?: string;
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
+  personality?: Personality;
   config?: Record<string, unknown>;
   pendingRequests: Map<string, PendingRequest>;
   lastResult?: TurnResult;
@@ -195,8 +226,15 @@ export interface SessionInfo {
     /** Last activity line extracted from the agent-message stream. */
     activity?: string;
   };
-  /** Developer instructions the thread was started with, reused when it is forked. */
+  /** Developer instructions the thread was started with, reused when it is forked or resumed. */
   developerInstructions?: string;
+}
+
+/** Which server holds a session, as a listing reports it. */
+export interface SessionOwnership {
+  pid: number;
+  /** "self" for this server, "other" for another one that is still running. */
+  state: "self" | "other";
 }
 
 /** Public session info (redacted) */
@@ -211,6 +249,13 @@ export interface PublicSessionInfo {
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
   pendingRequestCount: number;
+  /**
+   * The last line the session said it was doing. On an abandoned session it is
+   * what the work was cut off in the middle of.
+   */
+  activity?: string;
+  /** Absent when no server holds the session, which is what makes it resumable. */
+  owner?: SessionOwnership;
 }
 
 /** Sensitive session info */
@@ -295,6 +340,7 @@ export interface CheckResult {
 export enum ErrorCode {
   INVALID_ARGUMENT = "INVALID_ARGUMENT",
   SESSION_NOT_FOUND = "SESSION_NOT_FOUND",
+  SESSION_HELD_BY_OTHER_SERVER = "SESSION_HELD_BY_OTHER_SERVER",
   SESSION_BUSY = "SESSION_BUSY",
   SESSION_NOT_RUNNING = "SESSION_NOT_RUNNING",
   REQUEST_NOT_FOUND = "REQUEST_NOT_FOUND",

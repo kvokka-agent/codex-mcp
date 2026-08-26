@@ -10,8 +10,13 @@ import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { isMissing } from "./fs-errors.js";
+import { ownerState, readOwner, type OwnerState } from "./session-owner.js";
 
-export const SCHEMA_VERSION = 1;
+/**
+ * The version of the session directory format. Version 2 records the whole set
+ * of thread parameters a resume needs and the owner of the session.
+ */
+export const SCHEMA_VERSION = 2;
 
 export interface RecoveredSessionMeta {
   schemaVersion: number;
@@ -51,6 +56,10 @@ export interface RecoveredSession {
   result: unknown | null;
   /** PID info from pid.json if present */
   pidInfo: RecoveredPidInfo | null;
+  /** Who holds the session: another running server, a dead owner, or nobody. */
+  owner: OwnerState;
+  /** The last line the session reported as its activity, or undefined for none. */
+  lastActivity?: string;
   /** Path to the session directory */
   sessionDir: string;
 }
@@ -60,6 +69,8 @@ interface EventLogScan {
   lastSeq: number;
   /** Unparsable lines before the last one; the torn tail is excluded */
   corruptLines: number;
+  /** The activity the last `activity` record of the log names. */
+  lastActivity?: string;
 }
 
 /**
@@ -67,6 +78,10 @@ interface EventLogScan {
  *
  * The events themselves are not carried back: nothing in a recovered session is
  * built from them, and the turn they describe is in the Codex rollout log.
+ *
+ * The last `activity` record does come back: it is the one line saying what the session
+ * was doing when it was cut off, and a caller looking for an abandoned session reads it
+ * instead of a session id alone.
  *
  * A cut power tears the last line only, so an unparsable final line is dropped without
  * a word. An unparsable line anywhere before it is lost data: the line is skipped and
@@ -78,19 +93,23 @@ function scanEventsJsonl(filePath: string): EventLogScan {
   const lines = raw.split("\n");
   let lastSeq = -1;
   let corruptLines = 0;
+  let lastActivity: string | undefined;
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i]!.trim();
     if (!trimmed) continue;
     try {
       const parsed = JSON.parse(trimmed);
       if (typeof parsed.seq === "number" && parsed.seq > lastSeq) lastSeq = parsed.seq;
+      if (parsed.type === "activity" && typeof parsed.data?.activity === "string") {
+        lastActivity = parsed.data.activity;
+      }
     } catch {
       // The last element of the split holds text written after the final newline:
       // an unparsable one is the torn tail of an interrupted write.
       if (i < lines.length - 1) corruptLines++;
     }
   }
-  return { lastSeq, corruptLines };
+  return { lastSeq, corruptLines, lastActivity };
 }
 
 /** What one JSON file of a session directory turned out to be. */
@@ -211,6 +230,8 @@ export function scanRecoverableSessions(sessionsDir: string): RecoveredSession[]
       lastSeq: eventLog.lastSeq,
       result,
       pidInfo,
+      owner: ownerState(readOwner(sessionDir)),
+      ...(eventLog.lastActivity ? { lastActivity: eventLog.lastActivity } : {}),
       sessionDir,
     });
   }

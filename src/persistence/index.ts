@@ -1,8 +1,20 @@
 /**
- * Persistence primitives — atomic writes, lockfile, event log, recovery scan, retention.
+ * Persistence primitives — atomic writes, session ownership, event log, recovery scan, retention.
  */
 export { atomicWriteJson } from "./atomic-writer.js";
-export { acquireLock } from "./lockfile.js";
+export {
+  OWNER_FILE,
+  claimSession,
+  describeOwner,
+  hasLiveOwner,
+  ownClaim,
+  ownerState,
+  readOwner,
+  releaseSession,
+  type OwnerState,
+  type SessionOwner,
+} from "./session-owner.js";
+export { identifyProcess, ownStartedAt, probePid } from "./process-identity.js";
 export { EventLog, type EventCriticality, type EventLogOptions } from "./event-log.js";
 export {
   SCHEMA_VERSION,

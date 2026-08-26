@@ -5,6 +5,7 @@ import { readdirSync, rmSync, statSync, readFileSync, type Dirent } from "node:f
 import { join } from "node:path";
 
 import { isMissing } from "./fs-errors.js";
+import { hasLiveOwner, ownerState, readOwner } from "./session-owner.js";
 
 export interface RetentionPolicy {
   /** Maximum age in milliseconds (default: 7 days) */
@@ -60,6 +61,10 @@ export function getDirSize(dirPath: string): number {
  * Apply retention policy to `sessionsDir`, removing oldest sessions first.
  * Returns the number of sessions pruned.
  *
+ * A session a running server holds is left where it is, whatever its age: that
+ * server is writing into the directory, and removing it would take the event log
+ * out from under a live turn.
+ *
  * A directory that is not there has nothing to prune. A directory that is there and
  * cannot be listed throws: reporting zero removals would tell the caller retention ran
  * over an empty directory while the sessions in it keep the disk they hold.
@@ -84,6 +89,7 @@ export function pruneSessionDirs(sessionsDir: string, policy?: RetentionPolicy):
     // dangling symlink, are both nothing to prune. Any other stat failure throws.
     const stat = statSync(dirPath, { throwIfNoEntry: false });
     if (!stat?.isDirectory()) continue;
+    if (hasLiveOwner(ownerState(readOwner(dirPath)))) continue;
 
     let lastActiveAt: number;
     try {

@@ -10,7 +10,8 @@ import { homedir } from "node:os";
 
 import {
   atomicWriteJson,
-  acquireLock,
+  claimSession,
+  releaseSession,
   EventLog,
   type EventCriticality,
   scanRecoverableSessions,
@@ -20,10 +21,24 @@ import {
   type RetentionPolicy,
 } from "../persistence/index.js";
 
-import type { SessionInfo, SessionEventType } from "../types.js";
+import type {
+  ApprovalPolicy,
+  Personality,
+  SandboxMode,
+  SessionInfo,
+  SessionEventType,
+} from "../types.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
+/**
+ * What meta.json records.
+ *
+ * Everything `thread/resume` takes is here: a session picked up by another
+ * server starts its thread with the parameters it was created with, and a
+ * missing `developerInstructions` would silently drop the activity-marker
+ * instruction from the resumed thread.
+ */
 export interface PersistedSessionMeta {
   schemaVersion: number;
   sessionId: string;
@@ -35,9 +50,13 @@ export interface PersistedSessionMeta {
   threadId?: string;
   model?: string;
   cwd?: string;
-  approvalPolicy?: string;
-  sandbox?: string;
+  approvalPolicy?: ApprovalPolicy;
+  sandbox?: SandboxMode;
   profile?: string;
+  personality?: Personality;
+  config?: Record<string, unknown>;
+  developerInstructions?: string;
+  approvalTimeoutMs?: number;
 }
 
 export interface PidInfo {
@@ -78,7 +97,8 @@ function eventCriticality(type: SessionEventType): EventCriticality {
 export class SessionPersistence {
   private readonly stateDir: string;
   private readonly sessionsDir: string;
-  private releaseLock: (() => void) | null = null;
+  /** Sessions this process claimed, so shutdown gives every one of them back. */
+  private owned = new Set<string>();
   private eventLogs = new Map<string, EventLog>();
 
   constructor(stateDir?: string) {
@@ -88,17 +108,33 @@ export class SessionPersistence {
     mkdirSync(this.sessionsDir, { recursive: true });
   }
 
-  /** Acquire the STATE_DIR lock. Call once at startup. */
-  acquireLock(): void {
-    this.releaseLock = acquireLock(join(this.stateDir, ".lock"));
+  /** The directory of one session, whether or not it exists yet. */
+  sessionDir(sessionId: string): string {
+    return join(this.sessionsDir, sessionId);
   }
 
-  /** Release the lock. Call on shutdown. */
-  releaseLockIfHeld(): void {
-    if (this.releaseLock) {
-      this.releaseLock();
-      this.releaseLock = null;
-    }
+  /** Record this process as the owner of a session it drives. */
+  claim(sessionId: string): void {
+    const dir = this.sessionDir(sessionId);
+    mkdirSync(dir, { recursive: true });
+    claimSession(dir);
+    this.owned.add(sessionId);
+  }
+
+  /** Give up the claim on one session. */
+  release(sessionId: string): void {
+    this.owned.delete(sessionId);
+    releaseSession(this.sessionDir(sessionId));
+  }
+
+  /** The sessions this process holds a claim on. */
+  ownedSessions(): string[] {
+    return Array.from(this.owned);
+  }
+
+  /** Give up every claim this process holds. */
+  releaseAll(): void {
+    for (const sessionId of Array.from(this.owned)) this.release(sessionId);
   }
 
   // ── Write operations ────────────────────────────────────────────
@@ -119,6 +155,10 @@ export class SessionPersistence {
       approvalPolicy: session.approvalPolicy,
       sandbox: session.sandbox,
       profile: session.profile,
+      personality: session.personality,
+      config: session.config,
+      developerInstructions: session.developerInstructions,
+      approvalTimeoutMs: session.approvalTimeoutMs,
     };
     const dir = join(this.sessionsDir, session.sessionId);
     atomicWriteJson(join(dir, "meta.json"), meta);
@@ -213,16 +253,17 @@ export class SessionPersistence {
   /** Remove a persisted session directory from disk. */
   removeSession(sessionId: string): void {
     this.destroySessionLog(sessionId);
+    this.owned.delete(sessionId);
     rmSync(join(this.sessionsDir, sessionId), { recursive: true, force: true });
   }
 
-  /** Clean up: flush all logs, release lock. */
+  /** Clean up: flush all logs, give up every claim. */
   destroy(): void {
     for (const log of this.eventLogs.values()) {
       log.destroy();
     }
     this.eventLogs.clear();
-    this.releaseLockIfHeld();
+    this.releaseAll();
   }
 
   /** Check if a session directory exists on disk. */
@@ -234,26 +275,25 @@ export class SessionPersistence {
 // ── Startup ──────────────────────────────────────────────────────────
 
 export interface DiskPersistenceStartup {
-  /** The adapter to use, or undefined when another server owns STATE_DIR. */
+  /** The adapter to use, or undefined when the state directory is unusable. */
   persistence?: SessionPersistence;
   recovered: RecoveredSession[];
   pruned: number;
 }
 
 /**
- * Take ownership of STATE_DIR and read back what the previous run left there.
+ * Open the state directory and read back what is in it.
  *
- * Serving MCP requests needs no disk state, so every step here is best-effort: creating
- * the state directory, taking the lock, pruning and scanning all run under one rollback
- * that reports the reason on stderr and hands back a server that runs in memory only.
- * Recovery, pruning and orphan reaping act on another server's live sessions when
- * STATE_DIR is shared, which is why losing the lock takes that same rollback.
+ * Every server that shares the directory does this: the sessions of the others are read
+ * along with its own, and what each may act on is decided per session by its owner.json.
+ *
+ * Serving MCP requests needs no disk state, so every step is best-effort: a failure is
+ * reported on stderr and hands back a server that runs in memory only.
  */
 export function startDiskPersistence(stateDir?: string): DiskPersistenceStartup {
   let persistence: SessionPersistence | undefined;
   try {
     persistence = new SessionPersistence(stateDir);
-    persistence.acquireLock();
     // Prune first: a directory retention deletes must not come back in `recovered`,
     // where SessionManager would list it and write the session back to disk.
     const pruned = persistence.prune();
@@ -263,7 +303,6 @@ export function startDiskPersistence(stateDir?: string): DiskPersistenceStartup 
       "[codex-mcp] WARNING: STATE_DIR unusable — running without disk persistence:",
       err
     );
-    // Releases the lock only when this process took it; another server's lock is left alone.
     persistence?.destroy();
     return { recovered: [], pruned: 0 };
   }

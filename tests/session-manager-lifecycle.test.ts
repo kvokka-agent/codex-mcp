@@ -7,7 +7,7 @@ import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
-import type { RecoveredSession } from "../src/persistence/recovery-scanner.js";
+import { SCHEMA_VERSION, type RecoveredSession } from "../src/persistence/recovery-scanner.js";
 
 class MockClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;
@@ -69,7 +69,7 @@ function recovered(overrides: Partial<RecoveredSession> = {}): RecoveredSession 
   return {
     sessionId,
     meta: {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       sessionId,
       status: "idle",
       createdAt: "2024-01-01T00:00:00.000Z",
@@ -81,6 +81,8 @@ function recovered(overrides: Partial<RecoveredSession> = {}): RecoveredSession 
     lastSeq: overrides.lastSeq ?? -1,
     result: overrides.result ?? null,
     pidInfo: null,
+    owner: overrides.owner ?? { kind: "unowned" },
+    ...(overrides.lastActivity ? { lastActivity: overrides.lastActivity } : {}),
     sessionDir: path.join(os.tmpdir(), sessionId),
   };
 }
@@ -250,14 +252,79 @@ describe("SessionManager recovered sessions", () => {
     vi.restoreAllMocks();
   });
 
-  it("marks a session that was running at shutdown as failed", () => {
+  it("marks a session whose owner died mid-turn as abandoned, not failed", () => {
     manager.ingestRecovered([
       recovered({ sessionId: "sess_was_running", meta: { status: "running" } as never }),
     ]);
 
     const info = manager.getSession("sess_was_running");
-    expect(info.status).toBe("error");
-    expect(info.cancelledReason).toBe("Server restarted while session was active");
+    expect(info.status).toBe("abandoned");
+    expect(info.cancelledReason).toBeUndefined();
+  });
+
+  it("carries the last activity of an abandoned session into what a listing reports", () => {
+    manager.ingestRecovered([
+      recovered({
+        sessionId: "sess_cut_off",
+        meta: { status: "running" } as never,
+        lastActivity: "Подсчёт TypeScript-файлов в src",
+      }),
+    ]);
+
+    const listed = manager.listSessions().find((s) => s.sessionId === "sess_cut_off")!;
+    expect(listed.status).toBe("abandoned");
+    expect(listed.activity).toBe("Подсчёт TypeScript-файлов в src");
+    expect(listed.owner).toBeUndefined();
+  });
+
+  it("leaves a session another running server holds out of memory", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    manager.ingestRecovered([
+      recovered({
+        sessionId: "sess_held",
+        meta: { status: "running" } as never,
+        owner: {
+          kind: "held",
+          owner: { pid: 4242, startedAt: "2024-01-01T00:00:00.000Z" },
+          proven: true,
+        },
+      }),
+    ]);
+
+    expect(manager.listSessions()).toHaveLength(0);
+    expect(
+      errors.mock.calls.some((call) => String(call[0]).includes("leaving it to that server"))
+    ).toBe(true);
+  });
+
+  it("restores every thread parameter a resume needs", () => {
+    manager.ingestRecovered([
+      recovered({
+        sessionId: "sess_full",
+        meta: {
+          status: "running",
+          threadId: "thr_full",
+          model: "gpt-5",
+          profile: "work",
+          approvalPolicy: "never",
+          sandbox: "read-only",
+          personality: "pragmatic",
+          developerInstructions: "# Activity marker",
+          approvalTimeoutMs: 900_000,
+          config: { "a.b": 1 },
+        } as never,
+      }),
+    ]);
+
+    const info = manager.getSession("sess_full", true) as Record<string, unknown>;
+    expect(info).toMatchObject({
+      threadId: "thr_full",
+      model: "gpt-5",
+      profile: "work",
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      config: { "a.b": 1 },
+    });
   });
 
   it("falls back to error for a status it does not know", () => {
@@ -322,7 +389,7 @@ describe("SessionManager recovered sessions", () => {
       const meta = JSON.parse(
         readFileSync(path.join(stateDir, "sessions", "sess_active", "meta.json"), "utf-8")
       );
-      expect(meta.status).toBe("error");
+      expect(meta.status).toBe("abandoned");
       expect(meta.lastActiveAt).toBe("2020-03-04T05:06:07.000Z");
     } finally {
       agedManager.destroy();

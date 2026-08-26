@@ -71,9 +71,14 @@ import { join } from "node:path";
 import {
   EventLog,
   SCHEMA_VERSION,
-  acquireLock,
   atomicWriteJson,
+  claimSession,
+  describeOwner,
+  ownStartedAt,
+  ownerState,
   pruneSessionDirs,
+  readOwner,
+  releaseSession,
   scanRecoverableSessions,
 } from "../src/persistence/index.js";
 import { getDirSize } from "../src/persistence/retention.js";
@@ -235,30 +240,7 @@ describe("EventLog", () => {
   });
 });
 
-describe("acquireLock", () => {
-  it("writes the current pid and removes the file on release", () => {
-    const lockPath = join(root, "state", ".lock");
-    const release = acquireLock(lockPath);
-
-    const content = JSON.parse(readFileSync(lockPath, "utf-8"));
-    expect(content.pid).toBe(process.pid);
-    expect(Number.isNaN(Date.parse(content.startedAt))).toBe(false);
-
-    release();
-    expect(existsSync(lockPath)).toBe(false);
-    release();
-    expect(existsSync(lockPath)).toBe(false);
-  });
-
-  it("refuses a lock held by another live process", () => {
-    const lockPath = join(root, ".lock");
-    writeFileSync(lockPath, JSON.stringify({ pid: 555, startedAt: "2024-01-01T00:00:00.000Z" }));
-    vi.spyOn(process, "kill").mockImplementation(() => true);
-
-    expect(() => acquireLock(lockPath)).toThrow(/STATE_DIR is locked by another process \(pid=555/);
-    expect(existsSync(lockPath)).toBe(true);
-  });
-
+describe("session ownership", () => {
   /** Make `process.kill(pid, 0)` raise the errno a real kernel would. */
   function killFails(pid: number, code: string): void {
     vi.spyOn(process, "kill").mockImplementation(((target: number) => {
@@ -269,81 +251,88 @@ describe("acquireLock", () => {
     }) as typeof process.kill);
   }
 
-  it("reclaims a lock left by a dead process", () => {
-    const lockPath = join(root, ".lock");
-    writeFileSync(lockPath, JSON.stringify({ pid: 424242, startedAt: "2024-01-01T00:00:00.000Z" }));
+  it("writes this process's pid and start time, and takes them back", () => {
+    const dir = join(root, "sessions", "sess_owned");
+    mkdirSync(dir, { recursive: true });
+    claimSession(dir);
+
+    const written = readOwner(dir)!;
+    expect(written.pid).toBe(process.pid);
+    // The claim dates the process, not the machine: a start time older than the
+    // process is what os.uptime() would have written.
+    const recordedMs = Date.parse(written.startedAt);
+    expect(Date.now() - recordedMs).toBeLessThan(process.uptime() * 1000 + 2000);
+    expect(ownerState(written)).toEqual({ kind: "self", owner: written });
+
+    releaseSession(dir);
+    expect(readOwner(dir)).toBeNull();
+    releaseSession(dir);
+    expect(readOwner(dir)).toBeNull();
+  });
+
+  it("reads a session with no owner file as held by nobody", () => {
+    const dir = join(root, "sessions", "sess_free");
+    mkdirSync(dir, { recursive: true });
+    expect(ownerState(readOwner(dir))).toEqual({ kind: "unowned" });
+  });
+
+  it("reads an owner whose process is gone as gone", () => {
     killFails(424242, "ESRCH");
-
-    const release = acquireLock(lockPath);
-    expect(JSON.parse(readFileSync(lockPath, "utf-8")).pid).toBe(process.pid);
-    release();
+    const state = ownerState({ pid: 424242, startedAt: "2024-01-01T00:00:00.000Z" });
+    expect(state.kind).toBe("gone");
   });
 
-  it("keeps a lock held by a live process of another user", () => {
-    const lockPath = join(root, ".lock");
-    const held = JSON.stringify({ pid: 424243, startedAt: "2024-01-01T00:00:00.000Z" });
-    writeFileSync(lockPath, held);
-    // EPERM is a running process this user may not signal — a shared STATE_DIR
-    // across accounts is where it appears.
+  it("reads a running owner of another user as held", () => {
+    // EPERM is a running process this user may not signal — a state directory
+    // shared across accounts is where it appears. Its start time is unreadable
+    // from here, so the claim stands unproven and the session stays held.
     killFails(424243, "EPERM");
-
-    expect(() => acquireLock(lockPath)).toThrow(
-      /STATE_DIR is locked by another process \(pid=42424/
-    );
-    expect(readFileSync(lockPath, "utf-8")).toBe(held);
+    const state = ownerState({ pid: 424243, startedAt: "2024-01-01T00:00:00.000Z" });
+    expect(state).toEqual({
+      kind: "held",
+      owner: { pid: 424243, startedAt: "2024-01-01T00:00:00.000Z" },
+      proven: false,
+    });
   });
 
-  it("keeps a lock whose holder's liveness cannot be established", () => {
-    const lockPath = join(root, ".lock");
-    const held = JSON.stringify({ pid: 424244, startedAt: "2024-01-01T00:00:00.000Z" });
-    writeFileSync(lockPath, held);
+  it("reads an owner whose liveness no source establishes as held", () => {
     killFails(424244, "EINVAL");
-
-    expect(() => acquireLock(lockPath)).toThrow(/liveness could not be determined/);
-    expect(readFileSync(lockPath, "utf-8")).toBe(held);
+    const state = ownerState({ pid: 424244, startedAt: "2024-01-01T00:00:00.000Z" });
+    expect(state).toEqual({
+      kind: "held",
+      owner: { pid: 424244, startedAt: "2024-01-01T00:00:00.000Z" },
+      proven: false,
+    });
   });
 
-  it("keeps a lockfile that parses but carries no pid", () => {
-    const lockPath = join(root, ".lock");
-    const held = JSON.stringify({ startedAt: "2024-01-01T00:00:00.000Z" });
-    writeFileSync(lockPath, held);
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-    expect(() => acquireLock(lockPath)).toThrow(/race with another process/);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("is unreadable"));
-    expect(readFileSync(lockPath, "utf-8")).toBe(held);
+  it("reads a live pid that started at another instant as gone", () => {
+    // This process is alive under its own pid, and the recorded start time is
+    // from 2024: the number was handed on, so the session is free.
+    const state = ownerState({ pid: process.pid, startedAt: "2024-01-01T00:00:00.000Z" });
+    expect(state).toEqual({
+      kind: "gone",
+      owner: { pid: process.pid, startedAt: "2024-01-01T00:00:00.000Z" },
+    });
   });
 
-  it("reclaims its own stale lock", () => {
-    const lockPath = join(root, ".lock");
-    writeFileSync(
-      lockPath,
-      JSON.stringify({ pid: process.pid, startedAt: "2024-01-01T00:00:00.000Z" })
+  it("reads an owner file that carries no usable pid as no owner at all", () => {
+    const dir = join(root, "sessions", "sess_torn");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "owner.json"), JSON.stringify({ startedAt: "2024-01-01T00:00:00Z" }));
+    expect(readOwner(dir)).toBeNull();
+    writeFileSync(join(dir, "owner.json"), "{not json");
+    expect(readOwner(dir)).toBeNull();
+  });
+
+  it("names a proven live owner in the line a caller is shown", () => {
+    const owner = { pid: process.pid, startedAt: ownStartedAt() };
+    expect(describeOwner({ kind: "held", owner, proven: true })).toContain(
+      `pid ${process.pid}, started `
     );
-
-    const release = acquireLock(lockPath);
-    expect(JSON.parse(readFileSync(lockPath, "utf-8")).startedAt).not.toBe(
-      "2024-01-01T00:00:00.000Z"
+    expect(describeOwner({ kind: "gone", owner })).toBe(
+      `left by pid ${process.pid}, which is gone`
     );
-    release();
-  });
-
-  it("rethrows a create failure that is not a lost race", () => {
-    const lockPath = join(root, "readonly", ".lock");
-    failFs("openSync", lockPath, "EACCES");
-
-    expect(() => acquireLock(lockPath)).toThrow(/EACCES/);
-    expect(existsSync(lockPath)).toBe(false);
-  });
-
-  it("keeps an unreadable lockfile and fails the O_EXCL create", () => {
-    const lockPath = join(root, ".lock");
-    writeFileSync(lockPath, "{not json");
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-    expect(() => acquireLock(lockPath)).toThrow(/race with another process/);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("is unreadable"));
-    expect(readFileSync(lockPath, "utf-8")).toBe("{not json");
+    expect(describeOwner({ kind: "unowned" })).toBe("held by no server");
   });
 });
 
