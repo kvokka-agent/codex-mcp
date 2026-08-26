@@ -22,7 +22,7 @@ The core principle: **reuse the user's local Codex configuration, and expose the
 | `codex_reply`   | continue session                                                | return immediately, or `waitForResult` |
 | `codex_setup`   | report codex executable, auth and app-server readiness          | sync                                 |
 | `codex_session` | list/get/cancel/interrupt/fork/clean/clean background terminals | sync                                 |
-| `codex_check`   | poll events + respond to approvals/user input                   | sync, or long-poll via `waitMs`      |
+| `codex_check`   | report status + respond to approvals/user input                 | sync, or long-poll via `waitMs`      |
 
 ## Upgrade Execution Entry
 
@@ -154,11 +154,11 @@ src/
 
 - Single MCP stdio server, per-session child process (`app-server` or `exec --json` fallback).
 - `codex` / `codex_reply` are non-blocking: they return early and rely on `codex_check(action="poll")`.
-- Event buffering uses cursor pagination with pinning for critical events.
+- `codex_check` answers with the state of a session — status, progress, open actions, terminal result — and never with the events of its turn; those go to `events.jsonl` and to Codex's own rollout log.
 - Approval flow is asynchronous: app-server request -> buffered action -> client response via `codex_check`.
 - Exec fallback: auto-detected at startup; uses `codex exec --json` + `exec resume` for multi-turn. `CODEX_MCP_MODE` forces the mode; `CODEX_MCP_COMMAND` / `CODEX_MCP_PATH` select the binary.
 - Disk persistence writes session metadata, PID info, and results under `CODEX_MCP_STATE_DIR` (default `~/.codex-mcp/state`); startup recovers sessions, prunes old ones, and reaps orphan child processes.
-- `codex_check(action="poll")` supports long polling through `pollOptions.waitMs`; `codex` / `codex_reply` support a foreground wait through `waitForResult`.
+- `codex_check(action="poll")` supports long polling through `waitMs`, which returns on a status change, a new action or the end of the turn; `codex` / `codex_reply` support a foreground wait through `waitForResult`.
 - Full protocol behavior, event mapping, and lifecycle diagrams live in `docs/DESIGN.md`.
 
 ## Code Style & Conventions

@@ -1,6 +1,6 @@
 # codex-mcp Design
 
-`codex-mcp` is an MCP stdio server that exposes the Codex `app-server` JSON-RPC protocol through 5 tools (`codex`, `codex_reply`, `codex_setup`, `codex_session`, `codex_check`) and 7 read-only resources. Each session runs in its own `codex` child process; MCP clients drive it by polling a cursor-paginated event stream.
+`codex-mcp` is an MCP stdio server that exposes the Codex `app-server` JSON-RPC protocol through 5 tools (`codex`, `codex_reply`, `codex_setup`, `codex_session`, `codex_check`) and 7 read-only resources. Each session runs in its own `codex` child process; MCP clients drive it by checking the session's status and answering what it waits for.
 
 ## Document Boundary (AGENTS vs DESIGN)
 
@@ -291,39 +291,28 @@ Takes an optional `cwd` and returns:
 - `clean`: batch-removes sessions matching `statuses` and `olderThanMs`, returning `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }`. `dryRun` fills `matchedSessionIds` only.
 - `clean_background_terminals`: sends `thread/backgroundTerminals/clean` for the thread. The client asks for the `experimentalApi` capability during `initialize`, so a backend that carries the method serves it; a CLI build that does not know the capability answers `INTERNAL`.
 
-### Tool 5: `codex_check` — Poll Events And Answer Requests
+### Tool 5: `codex_check` — Report Status And Answer Requests
 
 ```text
 ├── action: "poll" | "respond_permission" | "respond_user_input"
 ├── sessionId: string
 │
 │ # poll
-├── cursor?: number          # event offset, default the session's last consumed cursor
-├── maxEvents?: number       # poll default 1 (minimum 1), respond_* default 0
-├── responseMode?: "minimal" | "delta_compact" | "full"  # default minimal
-├── pollOptions?: {
-│     includeEvents?: boolean   # default true
-│     includeActions?: boolean  # default true
-│     includeResult?: boolean   # default true
-│     skipDeltas?: boolean      # default false, drop delta events and advance the cursor past them
-│     finalOnly?: boolean       # default false, forces includeEvents=false and includeResult=true
-│     maxBytes?: number         # default unlimited, best-effort truncation when exceeded
-│     waitMs?: number           # long-poll budget in ms, clamped to 120000
-│   }
+├── waitMs?: number          # long-poll budget in ms, clamped to 120000; poll only
 │
 │ # respond_permission
 ├── requestId?: string       # approval request id
 ├── decision?: "accept" | "acceptForSession" | "acceptWithExecpolicyAmendment" | "applyNetworkPolicyAmendment" | "decline" | "cancel"
 ├── execpolicy_amendment?: string[]        # acceptWithExecpolicyAmendment only
 ├── network_policy_amendment?: { action: "allow" | "deny"; host: string }  # applyNetworkPolicyAmendment only
-├── denyMessage?: string     # recorded in the codex-mcp approval_result event, never sent to app-server
+├── denyMessage?: string     # recorded in the session's event log, never sent to app-server
 │
 │ # respond_user_input
 ├── requestId?: string       # user-input request id
 └── answers?: Record<string, { answers: string[] }>  # question id → answers
 ```
 
-**poll response:**
+**response (the same for every action):**
 
 ```json
 {
@@ -335,16 +324,10 @@ Takes an optional `cwd` and returns:
     "lastEventAt": "2026-02-15T...",
     "activeTurnId": "turn_1",
     "pendingActionCount": 0,
-    "lastMethod": "item/commandExecution/outputDelta",
     "tokens": { "input": 1200, "output": 340, "total": 1540 }
   },
   "interactionState": "working",
   "recommendedNextAction": "poll",
-  "events": [
-    { "id": 0, "type": "output", "data": {}, "timestamp": "..." },
-    { "id": 1, "type": "progress", "data": {}, "timestamp": "..." }
-  ],
-  "nextCursor": 2,
   "actions": [
     {
       "type": "approval",
@@ -362,6 +345,16 @@ Takes an optional `cwd` and returns:
 }
 ```
 
+`result` carries the finished turn's answer on the first check that sees a terminal
+status, and nothing on the checks after it.
+
+The events of the turn are not part of this payload and of no payload the caller
+receives. Codex writes the whole run to its rollout log under
+`~/.codex/sessions/**/rollout-*.jsonl`, and this server writes its own view to the
+session's `events.jsonl` under the state directory. Both are read from disk, by whoever
+opens them; sending either through an MCP client would put the run through the model's
+context a second time.
+
 ### Static Resources (Not Tools)
 
 The server exposes 7 read-only MCP resources carrying metadata and usage guidance. They take no part in agent lifecycle control:
@@ -369,7 +362,7 @@ The server exposes 7 read-only MCP resources carrying metadata and usage guidanc
 - `codex-mcp:///server-info` (`application/json`): server version, runtime, platform, `clientMode`, and the resource index
 - `codex-mcp:///compat-report` (`application/json`): cross-backend capability report
 - `codex-mcp:///config` (`text/markdown`): parameter guide and the mapping to `codex app-server -c`
-- `codex-mcp:///gotchas` (`text/markdown`): polling, cursors, approval timeouts, and exec-mode failure modes
+- `codex-mcp:///gotchas` (`text/markdown`): checking a session, approval timeouts, and exec-mode failure modes
 - `codex-mcp:///quickstart` (`text/markdown`): the minimal end-to-end workflow
 - `codex-mcp:///errors` (`text/markdown`): error-code reference and recovery hints
 - `codex-mcp:///delegation-guide` (`text/markdown`): approval/sandbox presets per task type
@@ -412,7 +405,7 @@ Constraints:
 - `error` → `running`: `codex_reply` retried
 - A late approval request against a `cancelled` or `error` session gets an immediate rejection and creates no pending request, so the status never jumps back.
 
-An `error` notification with `willRetry: true` keeps the status and emits a pinned `progress` event whose `data.method` is `codex-mcp/reconnect` and whose `phase` is `retrying`, so clients can show reconnect state without treating it as terminal.
+An `error` notification with `willRetry: true` keeps the status and writes a `progress` line whose `data.method` is `codex-mcp/reconnect` and whose `phase` is `retrying`; the session stays `running`, so a client sees a turn that is still going rather than a failure.
 
 ## Foreground Execution
 
@@ -441,94 +434,75 @@ Every `codex`, `codex_reply`, and `codex_check` response carries three orchestra
 
 `reasoning` covers `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`, and `item/plan/delta`. `acting` covers `item/commandExecution/outputDelta`, `item/commandExecution/terminalInteraction`, `item/fileChange/outputDelta`, `item/mcpToolCall/progress`, `turn/diff/updated`, and `turn/plan/updated`.
 
-## Event Buffering
+## The Event Log
 
-### EventBuffer
+Every notification and server-initiated request the manager handles is written to the
+session's `events.jsonl` under the state directory, as one line
+`{ seq, type, data, timestamp }`. The manager holds no copy of it: what a session keeps
+in memory is its status, its open requests, its progress counters and the result of its
+last turn.
 
-```typescript
-interface EventBuffer {
-  events: SessionEvent[];
-  maxSize: number; // 1000 (soft limit)
-  hardMaxSize: number; // 2000 (hard limit)
-  nextId: number; // monotonic
-}
-
-interface SessionEvent {
-  id: number;
-  type: "output" | "progress" | "approval_request" | "approval_result" | "result" | "error";
-  data: unknown;
-  timestamp: string;
-  pinned: boolean;
-}
-```
+The log is read from disk. `codex_check` returns none of it, and a restart reads it only
+for the sequence number to continue from.
 
 ### Event Type Mapping
 
-> The left column is the real `method` of the app-server JSON-RPC notification or request, as generated by `codex app-server generate-json-schema`. It appears in `codex_check` responses at `events[].data.method`.
+> The left column is the real `method` of the app-server JSON-RPC notification or request, as generated by `codex app-server generate-json-schema`. It appears in the log at `data.method`.
 
-| app-server method                       | codex-mcp event type | Pinned | Notes                                                                     |
-| --------------------------------------- | -------------------- | ------ | --------------------------------------------------------------------------- |
-| `item/agentMessage/delta`               | output               | No     | Agent text increment                                                        |
-| `item/completed` (ThreadItem)           | output/progress      | No     | By `item.type`: `agentMessage`/`userMessage` → output; everything else → progress |
-| `item/started`                          | progress             | No     | Item started                                                                |
-| `rawResponseItem/completed` (ResponseItem) | progress          | No     | ExecClient's `raw_response_item`; a ResponseItem, so no `agentMessage` type and no final answer to read |
-| `item/commandExecution/outputDelta`     | progress             | No     | Command output increment, after shell-noise filtering                       |
-| `item/commandExecution/terminalInteraction` | progress         | No     | Terminal interaction                                                        |
-| `item/fileChange/outputDelta`           | progress             | No     | File-change increment                                                       |
-| `item/reasoning/textDelta`              | progress             | No     | Reasoning text increment                                                    |
-| `item/reasoning/summaryTextDelta`       | progress             | No     | Reasoning summary increment                                                 |
-| `item/reasoning/summaryPartAdded`       | progress             | No     | Reasoning summary part                                                      |
-| `item/plan/delta`                       | progress             | No     | Plan increment (EXPERIMENTAL)                                               |
-| `item/mcpToolCall/progress`             | progress             | No     | MCP tool call progress                                                      |
-| `turn/started`                          | progress             | No     | Turn started; the source of `activeTurnId`                                  |
-| `turn/completed`                        | result               | Yes    | Turn finished                                                               |
-| `turn/diff/updated`                     | progress             | No     | Turn-level unified diff                                                     |
-| `turn/plan/updated`                     | progress             | No     | Turn-level plan update                                                      |
-| `thread/started`                        | progress             | No     | Thread started; refreshes `threadId` when the notification carries a new one |
-| `thread/archived`, `thread/unarchived`, `thread/name/updated`, `thread/tokenUsage/updated` | progress | No | Thread state                                                          |
-| `model/rerouted`                        | progress             | No     | Backend rerouted the model                                                  |
-| `fuzzyFileSearch/sessionUpdated`, `fuzzyFileSearch/sessionCompleted` | progress | No | Fuzzy file search                                                    |
-| `windows/worldWritableWarning`          | progress             | No     | Windows permission warning                                                  |
-| `account/login/completed`               | progress             | No     | Login completed                                                             |
-| `error` (`willRetry: false`)            | error                | Yes    | Terminal error                                                              |
-| `error` (`willRetry: true`)             | progress             | Yes    | Rewritten to `codex-mcp/reconnect`                                          |
-| `item/commandExecution/requestApproval` | approval_request     | Yes    | Command approval (server-initiated request)                                 |
-| `item/fileChange/requestApproval`       | approval_request     | Yes    | File-change approval (server-initiated request)                             |
-| `item/tool/requestUserInput`            | approval_request     | Yes    | User input (server-initiated request)                                       |
-| approval response (codex-mcp internal)  | approval_result      | Yes    | The decision, including timeouts                                            |
-| `codex-mcp/ttl_warning` (codex-mcp internal) | progress        | No     | 60 seconds before TTL cleanup                                               |
+| app-server method                       | codex-mcp event type | Notes                                                                     |
+| --------------------------------------- | -------------------- | --------------------------------------------------------------------------- |
+| `item/agentMessage/delta`               | output               | Agent text increment                                                        |
+| `item/completed` (ThreadItem)           | output/progress      | By `item.type`: `agentMessage`/`userMessage` → output; everything else → progress |
+| `item/started`                          | progress             | Item started                                                                |
+| `rawResponseItem/completed` (ResponseItem) | progress          | ExecClient's `raw_response_item`; a ResponseItem, so no `agentMessage` type and no final answer to read |
+| `item/commandExecution/outputDelta`     | progress             | Command output increment, after shell-noise filtering                       |
+| `item/commandExecution/terminalInteraction` | progress         | Terminal interaction                                                        |
+| `item/fileChange/outputDelta`           | progress             | File-change increment                                                       |
+| `item/reasoning/textDelta`              | progress             | Reasoning text increment                                                    |
+| `item/reasoning/summaryTextDelta`       | progress             | Reasoning summary increment                                                 |
+| `item/reasoning/summaryPartAdded`       | progress             | Reasoning summary part                                                      |
+| `item/plan/delta`                       | progress             | Plan increment (EXPERIMENTAL)                                               |
+| `item/mcpToolCall/progress`             | progress             | MCP tool call progress                                                      |
+| `turn/started`                          | progress             | Turn started; the source of `activeTurnId`                                  |
+| `turn/completed`                        | result               | Turn finished                                                               |
+| `turn/diff/updated`                     | progress             | Turn-level unified diff                                                     |
+| `turn/plan/updated`                     | progress             | Turn-level plan update                                                      |
+| `thread/started`                        | progress             | Thread started; refreshes `threadId` when the notification carries a new one |
+| `thread/archived`, `thread/unarchived`, `thread/name/updated`, `thread/tokenUsage/updated` | progress | Thread state                                                          |
+| `model/rerouted`                        | progress             | Backend rerouted the model                                                  |
+| `fuzzyFileSearch/sessionUpdated`, `fuzzyFileSearch/sessionCompleted` | progress | Fuzzy file search                                                    |
+| `windows/worldWritableWarning`          | progress             | Windows permission warning                                                  |
+| `account/login/completed`               | progress             | Login completed                                                             |
+| `error` (`willRetry: false`)            | error                | Terminal error                                                              |
+| `error` (`willRetry: true`)             | progress             | Rewritten to `codex-mcp/reconnect`                                          |
+| `item/commandExecution/requestApproval` | approval_request     | Command approval (server-initiated request)                                 |
+| `item/fileChange/requestApproval`       | approval_request     | File-change approval (server-initiated request)                             |
+| `item/tool/requestUserInput`            | approval_request     | User input (server-initiated request)                                       |
+| approval response (codex-mcp internal)  | approval_result      | The decision, including timeouts                                            |
+| `codex-mcp/ttl_warning` (codex-mcp internal) | progress        | 60 seconds before TTL cleanup                                               |
 
 Notifications outside this table are ignored.
 
 ### Shell Noise Filtering
 
-On Windows, PowerShell profile output (oh-my-posh banners, PSReadLine, terminal-integration escape sequences) leaks into every command execution. `item/commandExecution/outputDelta` deltas are stripped of those lines before they enter the buffer, and a delta that was entirely noise produces no event. `CODEX_MCP_DISABLE_NOISE_FILTER=1` turns the filter off.
-
-### Eviction
-
-1. `events.length > maxSize`: evict the oldest non-pinned event.
-2. All events pinned: evict the oldest `approval_result` first.
-3. `events.length > hardMaxSize`: `shift` the oldest event, pinned included.
-
-### Cursor Pagination
-
-- The client sends `cursor` (the previous `nextCursor`); omitting it continues from the session's last consumed cursor.
-- The server returns events with `id >= cursor` plus `nextCursor`.
-- When the earliest buffered event id is greater than the cursor, older events were evicted and the response carries `cursorResetTo`.
-
-### Poll Shaping
-
-- `responseMode` controls per-event payload size: `minimal` (default), `delta_compact`, `full`.
-- `pollOptions.skipDeltas` omits `item/agentMessage/delta`, `item/commandExecution/outputDelta`, `item/fileChange/outputDelta`, `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`, and `item/plan/delta` while advancing the cursor past them, so the client never re-reads them.
-- `pollOptions.finalOnly` forces `includeEvents=false` and `includeResult=true`, keeps `actions[]`, and advances the cursor past every unseen event. It is the result-centric poll.
-- `pollOptions.maxBytes` caps the serialized response; when the cap bites, the response sets `truncated` and lists `truncatedFields`.
-- `respond_permission` and `respond_user_input` advance the cursor monotonically — `max(cursor, sessionLastCursor)` — so a stale cursor from an MCP host replays nothing.
+On Windows, PowerShell profile output (oh-my-posh banners, PSReadLine, terminal-integration escape sequences) leaks into every command execution. `item/commandExecution/outputDelta` deltas are stripped of those lines before they reach the log, and a delta that was entirely noise produces no line. `CODEX_MCP_DISABLE_NOISE_FILTER=1` turns the filter off.
 
 ### Long Polling
 
-`pollOptions.waitMs` turns a poll into a long poll. The handler polls, and when the response has no events, no actions, and no result it waits on `SessionManager.waitForChange` and polls again, until data appears, the request aborts, or the budget runs out. `waitMs` is clamped to 120000 ms.
+`waitMs` turns a check into a long poll. The handler reads the session signal — its
+status, the ids of its open actions, and the completion instant of its last result — and
+returns at once when the session already waits on the caller. Otherwise it waits on
+`SessionManager.waitForChange` and reads the signal again, until it differs from the one
+it started with, the request aborts, or the budget runs out. `waitMs` is clamped to
+120000 ms.
 
-`waitForChange` resolves on any state change: a pushed event, a new pending request, a status change, or a session eviction. A session accepts 4 concurrent waiters; the fifth rejects, and the caller falls back to an immediate poll.
+`notifyWaiters` wakes waiters on that same signal and on nothing else, so a stream of
+deltas or token-counter updates leaves a waiter asleep. A measured run of ten parallel
+sessions delivered 20.2% agent-message deltas and 25.7% token-counter updates; waking on
+those turned a 120-second long poll into a 4.8-second median round trip.
+
+A session accepts 4 concurrent waiters; the fifth rejects, and the caller falls back to
+an immediate read.
 
 ## Permission Model — Three Layers
 
@@ -878,7 +852,7 @@ input: [..., { type: "localImage", path: imagePath }]
 - `codex_session(action="get")` returns redacted info by default; `includeSensitive=true` adds `cwd`, `profile`, `config`, and `threadId`.
 - Approval requests carry the command text verbatim, and the client decides how to show it.
 - `INTERNAL` error messages pass through path redaction.
-- The answer to a user-input question marked `isSecret` reaches codex as given and enters the event buffer and `events.jsonl` as `<secret>`.
+- The answer to a user-input question marked `isSecret` reaches codex as given and enters `events.jsonl` as `<secret>`.
 
 ### Approval Timeout
 
@@ -886,9 +860,9 @@ input: [..., { type: "localImage", path: imagePath }]
 - A user-input request that times out is answered with an empty `answers` map, which says the caller answered nothing.
 - A timeout declines the operation without interrupting the agent.
 
-## Client Polling Guide
+## Client Guide
 
-### Polling Strategy
+### Checking Strategy
 
 `codex_check` returns `pollInterval` as a **minimum** interval; a client waiting longer for a slow task is behaving correctly:
 
@@ -898,32 +872,30 @@ status = "running"          → pollInterval: 120000ms (at least 2 minutes; 3-10
 status = "idle"/"error"/"cancelled" → pollInterval: undefined (terminal, stop polling)
 ```
 
-Long stretches without an event are normal while the model reasons and mean nothing about failure. A client that wants to hear about the next event sooner passes `pollOptions.waitMs` instead of shortening the interval. A client that prefers its own backoff multiplies the interval by 1.5 when a poll returns nothing and resets it when events arrive.
+Long stretches with no change are normal while the model reasons and mean nothing about failure. A client that wants to hear about the next change as it happens passes `waitMs` instead of shortening the interval: one call then covers the whole stretch and costs one round trip.
 
 ### Typical Loop
 
 ```text
 1. codex({ prompt, approvalPolicy, sandbox }) → sessionId
 2. loop:
-   a. codex_check({ action: "poll", sessionId, cursor })
-   b. render events[]
-   c. answer any pending actions[]
+   a. codex_check({ action: "poll", sessionId, waitMs: 120000 })
+   b. answer every entry of actions[]
       - codex_check({ action: "respond_permission", requestId, decision })
       - codex_check({ action: "respond_user_input", requestId, answers })
-   d. branch on status:
-      - "idle": the turn finished; continue with codex_reply or stop
-      - "error": read the error and decide whether codex_reply retries
+   c. branch on status:
+      - "idle": the turn finished; read result and continue with codex_reply or stop
+      - "error": read result.error and decide whether codex_reply retries
       - "cancelled": the session is over, leave the loop
-      - "running" / "waiting_approval": keep polling
-   e. cursor = nextCursor
-   f. wait at least pollInterval
+      - "running" / "waiting_approval": check again
+   d. without waitMs, wait at least pollInterval
 3. optionally codex_session({ action: "cancel" }) to release the child process
 ```
 
 ### Notes
 
-- Always send back `nextCursor` so events arrive once.
-- A `cursorResetTo` means older events were evicted; continue from the returned cursor.
+- `result` arrives once, on the first check that sees a terminal status.
+- The turn's own history is in the Codex rollout log under `~/.codex/sessions/`; no check returns it.
 - Approvals expire, so answer them within `approvalTimeoutMs`.
 - `codex-mcp/ttl_warning` gives 60 seconds of notice before a session is cleaned up; a `codex_reply` or another tool call refreshes `lastActiveAt` and postpones the cleanup.
 - A session recovered after a server restart reports `status: "error"` with `cancelledReason` naming the restart, and its last result is still readable.

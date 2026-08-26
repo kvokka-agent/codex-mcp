@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING: `codex_check` reports the state of a session, not the history of its turn.** Measured over ten parallel Codex sessions, the event stream cost 44,584,229 tokens of client context across 1,144 API turns: `poll` returned exactly one event in 502 of 502 calls, and every event was a round trip that re-read the whole context. The stream was 25.7% `thread/tokenUsage/updated`, 23.6% `item/started`, 22.5% `item/completed` and 20.2% `item/agentMessage/delta` — a transcript Codex already writes to its own rollout log under `~/.codex/sessions/**/rollout-*.jsonl`. Every action of `codex_check` now answers `{ sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }`, and no delta reaches a caller in any mode.
+- **BREAKING: `codex_check` no longer takes `events[]`, `cursor`, `nextCursor`, `cursorResetTo`, `maxEvents`, `responseMode` or `pollOptions`.** `pollOptions.waitMs` became the top-level `waitMs`, and `includeEvents`, `includeActions`, `includeResult`, `skipDeltas`, `finalOnly` and `maxBytes` are gone with the stream they shaped. A call that still sends one of them is refused with a message naming what replaced it, rather than answering something it did not ask for. `respond_permission` and `respond_user_input` answer with that same payload, so the separate compact ACK is gone too.
+- **BREAKING: the terminal `result` is handed over once.** The check that first sees `idle`, `error` or `cancelled` carries the turn's final answer; the checks after it report the status alone.
+- A long poll wakes on what the caller acts on — a status change, a new entry in `actions[]`, the end of the turn — and sleeps through deltas and token-counter updates. `pollWithWait` used to return as soon as any event existed, so under a delta stream a `waitMs` of 120000 gave a measured median round trip of 4.8 s. `MAX_WAIT_MS` (120000) and `MAX_WAITERS_PER_SESSION` (4) are unchanged.
+- `progress` no longer carries `lastMethod`: it reports the phase, the pending action count, the time of the last event, the active turn id and the backend's token counters.
+
+### Removed
+
+- The in-memory event buffer, with its cursors, its pinning, its soft and hard eviction limits, its delta coalescing and its byte-budget truncation. A session holds its status, its open requests, its progress counters and its last result. The events of a turn are written to `events.jsonl` under the state directory as before, and a restart reads that file only for the sequence number to continue from.
+
 ## [2.2.0] - 2026-08-26
 
 First release of this fork. It carries the 2.1.1-2.1.7 work published on npm by @leo000001,
