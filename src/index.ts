@@ -22,6 +22,44 @@ import { decideStdinShutdown } from "./utils/stdin-shutdown.js";
 
 const STDIN_SHUTDOWN_CHECK_MS = 750;
 const STDIN_SHUTDOWN_MAX_WAIT_MS = process.platform === "win32" ? 15_000 : 10_000;
+/**
+ * How long a shutdown waits on a write to the client.
+ *
+ * A client that died leaves a pipe nothing drains: the SDK's write returns
+ * false and waits for a `drain` event that never comes. The wait is bounded so
+ * the shutdown finishes on its own instead of on the force-exit timer.
+ */
+const CLIENT_WRITE_DEADLINE_MS = 1_000;
+
+/**
+ * Await `work`, giving up after `timeoutMs` and saying which step it was.
+ *
+ * Nothing after a shutdown step depends on its result, so a step that failed or
+ * ran out of time is reported and the shutdown carries on.
+ */
+async function withDeadline(
+  work: Promise<unknown>,
+  timeoutMs: number,
+  what: string
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    if (timer.unref) timer.unref();
+  });
+  try {
+    const outcome = await Promise.race([work.then(() => "done" as const), deadline]);
+    if (outcome === "timeout") {
+      console.error(`[codex-mcp] ${what} did not finish within ${timeoutMs}ms — carrying on`);
+    }
+  } catch (err) {
+    console.error(
+      `[codex-mcp] ${what} failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function main(): Promise<void> {
   const preflight = runStdioPreflight();
@@ -52,34 +90,18 @@ async function main(): Promise<void> {
   const createClient = (): ICodexClient =>
     clientMode === "exec" ? new ExecClient() : new AppServerClient();
 
-  // Initialize disk persistence. A failure here leaves persistence undefined and is
+  // Open the state directory. A failure here leaves persistence undefined and is
   // reported on stderr by startDiskPersistence; the server serves requests without it.
   const { persistence, recovered, pruned } = startDiskPersistence();
-  if (persistence) {
-    console.error("[codex-mcp] STATE_DIR lock acquired");
+  const held = recovered.filter((session) => session.owner.kind === "held");
+  if (recovered.length > held.length) {
+    console.error(`[codex-mcp] Read ${recovered.length - held.length} session(s) from disk`);
   }
-  if (recovered.length > 0) {
-    console.error(`[codex-mcp] Recovered ${recovered.length} session(s) from disk`);
+  if (held.length > 0) {
+    console.error(`[codex-mcp] ${held.length} session(s) belong to another running codex-mcp`);
   }
   if (pruned > 0) {
     console.error(`[codex-mcp] Pruned ${pruned} old session(s)`);
-  }
-
-  // Reap any orphaned child processes from the previous server run. Each counter names a
-  // different outcome, and the two that leave processes behind are the ones an operator acts on.
-  const reaped = await reapOrphanProcesses(recovered);
-  if (reaped.reaped > 0) console.error(`[codex-mcp] Reaped ${reaped.reaped} orphan process(es)`);
-  if (reaped.unconfirmed > 0) {
-    console.error(
-      `[codex-mcp] ${reaped.unconfirmed} orphan process(es) were signalled but their exit was not` +
-        ` confirmed — they may still be running; check them and kill them by hand`
-    );
-  }
-  if (reaped.skipped > 0) {
-    console.error(
-      `[codex-mcp] Left ${reaped.skipped} recorded pid(s) alone: the process behind each could not` +
-        ` be confirmed as ours, so no signal was sent`
-    );
   }
 
   const serverCwd = process.cwd();
@@ -91,10 +113,39 @@ async function main(): Promise<void> {
   const server = ctx.server;
   const sessionManager = ctx.sessionManager;
 
-  // Ingest recovered sessions into the in-memory session manager
+  // Take into memory the sessions no other running server holds.
   if (recovered.length > 0) {
     sessionManager.ingestRecovered(recovered);
   }
+
+  /**
+   * Reap the codex processes the adopted sessions left behind.
+   *
+   * It runs after the transport is connected, for two reasons. Nothing holds
+   * this process's event loop until then, so an await here that resolves on a
+   * timer alone lets Node exit before a client ever sees the server. And a
+   * confirmed orphan is given five seconds to exit gracefully, which is five
+   * seconds a client would spend waiting for a server that is already able to
+   * answer.
+   */
+  const reapAdoptedOrphans = async (): Promise<void> => {
+    const adopted = recovered.filter((session) => session.owner.kind !== "held");
+    if (adopted.length === 0) return;
+    const reaped = await reapOrphanProcesses(adopted);
+    if (reaped.reaped > 0) console.error(`[codex-mcp] Reaped ${reaped.reaped} orphan process(es)`);
+    if (reaped.unconfirmed > 0) {
+      console.error(
+        `[codex-mcp] ${reaped.unconfirmed} orphan process(es) were signalled but their exit was not` +
+          ` confirmed — they may still be running; check them and kill them by hand`
+      );
+    }
+    if (reaped.skipped > 0) {
+      console.error(
+        `[codex-mcp] Left ${reaped.skipped} recorded pid(s) alone: the process behind each could not` +
+          ` be confirmed as ours, so no signal was sent`
+      );
+    }
+  };
 
   const transport = new StdioServerTransport();
 
@@ -146,9 +197,19 @@ async function main(): Promise<void> {
       `[codex-mcp] shutdown triggered (reason=${reason}, activeSessions=${runningCount}, total=${activeSessions.length})`
     );
 
+    // The disk comes first, and synchronously. A shutdown usually starts because
+    // the client went away, and every write to that client from here on can block
+    // for as long as the kernel buffer stays full: an MCP notification sent
+    // afterwards would take the record of these sessions down with it.
     try {
-      if (server.isConnected()) {
-        await server.sendLoggingMessage({
+      sessionManager.finalizeForShutdown();
+    } catch (err) {
+      console.error("[codex-mcp] Failed to write the sessions down on shutdown:", err);
+    }
+
+    if (server.isConnected()) {
+      await withDeadline(
+        server.sendLoggingMessage({
           level: "info",
           data: {
             event: "server_stopping",
@@ -156,25 +217,13 @@ async function main(): Promise<void> {
             activeSessions: runningCount,
             totalSessions: activeSessions.length,
           },
-        });
-      }
-    } catch {
-      // ignore — client may not support logging notifications
+        }),
+        CLIENT_WRITE_DEADLINE_MS,
+        "the server_stopping notification"
+      );
     }
 
-    try {
-      // Flush persistence and release lock before server close
-      persistence?.flushAll();
-      persistence?.releaseLockIfHeld();
-    } catch {
-      // best-effort
-    }
-
-    try {
-      await server.close();
-    } catch {
-      // Ignore close errors during shutdown
-    }
+    await withDeadline(server.close(), CLIENT_WRITE_DEADLINE_MS, "the transport close");
 
     persistence?.destroy();
     process.exitCode = lastExitCode;
@@ -201,14 +250,11 @@ async function main(): Promise<void> {
       process.stdin.destroyed || process.stdin.readableEnded || !process.stdin.readable;
     const elapsedMs = Date.now() - stdinClosedAt;
     const active = hasActiveSessions();
-    const connected = server.isConnected();
-
     const decision = decideStdinShutdown({
       stdinUnavailable,
       elapsedMs,
       maxWaitMs: STDIN_SHUTDOWN_MAX_WAIT_MS,
       hasActiveSessions: active,
-      isConnected: connected,
     });
 
     if (decision === "clear") {
@@ -261,12 +307,11 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   // Windows: Ctrl+Break / console close scenarios.
   process.on("SIGBREAK", () => void shutdown("SIGBREAK"));
-  process.on("beforeExit", () => {
-    // Do not eagerly shutdown while transport still appears connected.
-    if (!server.isConnected()) {
-      void shutdown("beforeExit");
-    }
-  });
+  // `beforeExit` fires with an empty event loop: nothing is left to serve, so the
+  // sessions are written down before the process goes. `server.isConnected()`
+  // cannot gate this — the stdio transport reports itself connected for the life
+  // of the process — and `shutdown` runs once whatever calls it.
+  process.on("beforeExit", () => void shutdown("beforeExit"));
   process.on("uncaughtException", handleUnexpectedError);
   process.on("unhandledRejection", handleUnexpectedError);
 
@@ -282,6 +327,8 @@ async function main(): Promise<void> {
 
   await server.connect(transport);
   console.error(`codex-mcp server started (cwd: ${serverCwd})`);
+
+  await reapAdoptedOrphans();
 }
 
 main().catch((err) => {

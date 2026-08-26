@@ -6,7 +6,6 @@ const base = {
   elapsedMs: 0,
   maxWaitMs: 10_000,
   hasActiveSessions: false,
-  isConnected: false,
 };
 
 describe("decideStdinShutdown", () => {
@@ -14,15 +13,12 @@ describe("decideStdinShutdown", () => {
     expect(decideStdinShutdown({ ...base, stdinUnavailable: false })).toBe("clear");
   });
 
-  it("keeps serving while the transport still reports connected", () => {
-    expect(
-      decideStdinShutdown({
-        ...base,
-        isConnected: true,
-        hasActiveSessions: false,
-        elapsedMs: 999_999,
-      })
-    ).toBe("reschedule");
+  it("shuts down on an ended stdin whatever the transport reports about itself", () => {
+    // StdioServerTransport never hears the end of stdin, so isConnected() stays
+    // true for the life of the process and cannot gate this decision.
+    expect(decideStdinShutdown({ ...base, hasActiveSessions: false, elapsedMs: 999_999 })).toBe(
+      "shutdown_now"
+    );
   });
 
   it("shuts down immediately when no session is active", () => {
@@ -48,7 +44,6 @@ describe("decideStdinShutdown", () => {
         elapsedMs: 10_000,
         maxWaitMs: 1,
         hasActiveSessions: true,
-        isConnected: true,
       })
     ).toBe("clear");
   });
