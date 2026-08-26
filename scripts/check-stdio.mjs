@@ -129,7 +129,14 @@ async function main() {
     stdio: ["ignore", stdoutFd, stderrFd],
     windowsHide: true,
     shell: false,
-    env: { ...process.env, CODEX_MCP_STDIO_MODE: args.stdioMode },
+    env: {
+      ...process.env,
+      CODEX_MCP_STDIO_MODE: args.stdioMode,
+      // The server takes a single-writer lock on its state directory and recovers
+      // whatever sessions it finds there. Left at the default the check would do
+      // that to the caller's real ~/.codex-mcp/state.
+      CODEX_MCP_STATE_DIR: process.env.CODEX_MCP_STATE_DIR ?? path.join(tmpDir, "state"),
+    },
   });
   let exitCode = null;
   let exitSignal = null;

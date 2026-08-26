@@ -1,8 +1,14 @@
 #!/usr/bin/env node
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import {
+  getDefaultEnvironment,
+  StdioClientTransport,
+} from "@modelcontextprotocol/sdk/client/stdio.js";
 
 function usage(exitCode = 0) {
   const msg = [
@@ -80,10 +86,23 @@ async function main() {
       ? ["-y", "@kvokka/codex-mcp"]
       : ["dist/index.js"];
 
+  // StdioClientTransport hands the child only its own allowlist of variables, so
+  // CODEX_MCP_STATE_DIR set for this run would be dropped and the server would take
+  // the lock on the caller's real state directory and recover its sessions.
+  const codexEnv = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([key, value]) => key.startsWith("CODEX_MCP_") && value !== undefined
+    )
+  );
+  codexEnv.CODEX_MCP_STATE_DIR =
+    codexEnv.CODEX_MCP_STATE_DIR ??
+    path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codex-mcp-smoke-")), "state");
+
   const transport = new StdioClientTransport({
     command,
     args: cmdArgs,
     cwd: args.cwd,
+    env: { ...getDefaultEnvironment(), ...codexEnv },
     stderr: "pipe",
   });
 
