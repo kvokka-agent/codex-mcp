@@ -48,11 +48,11 @@ Three things about that file:
 - The server name is `codex-mcp`. The plugin's hook matcher and the `codex`
   subagent both address tools called `mcp__codex-mcp__*`, so a different name
   silently takes the tools out of the plugin's reach.
-- `CODEX_MCP_STATE_DIR` keeps the run out of `~/.codex-mcp/state`. That default
-  directory is where an installed `@kvokka/codex-mcp` keeps its sessions, and
-  its lock admits one writer: a development server pointed at it recovers the
-  other installation's sessions on startup and reaps their child processes.
-  `.codex-mcp-state/` at the repository root is git-ignored.
+- `CODEX_MCP_STATE_DIR` keeps the run out of `~/.codex-mcp/state`, where an
+  installed `@kvokka/codex-mcp` keeps its sessions. A development server pointed
+  at that directory would leave the installed server's live sessions alone, but
+  it would list them, prune the finished ones and adopt whatever the installed
+  server left behind. `.codex-mcp-state/` at the repository root is git-ignored.
 
 Claude Code picks the file up on the next start in that directory. To reach the
 build from every project instead, register it once at user scope:
@@ -156,17 +156,17 @@ Claude Code files every line under the project it was launched from:
 Each line is JSON; the server's output arrives as `{"error": "Server stderr: …"}`
 and the client's own connection trace as `{"debug": …}`. Startup answers the
 first questions there — which codex binary was resolved, whether the app-server
-probe passed or the run fell back to `exec`, and whether the state directory
-lock was acquired.
+probe passed or the run fell back to `exec`, and how many sessions the state
+directory held.
 
 Outside a client, `node dist/index.js` writes the same lines to the terminal.
 
-**What the state directory holds.** One directory per session under
-`sessions/`, and `.lock` for as long as a server holds the directory:
+**What the state directory holds.** One directory per session under `sessions/`:
 
 ```text
 <state dir>/sessions/<session id>/
 ├── meta.json      what the session was started with, and its status
+├── owner.json     the codex-mcp process driving it, while one does
 ├── events.jsonl   every protocol event of the turn
 ├── result.json    the terminal answer
 └── pid.json       the child process and its spawn time
