@@ -640,12 +640,13 @@ codex app-server [-c key=value]... [-p profile]
 `src/index.ts` shuts down on SIGINT, SIGTERM, SIGBREAK, an unhandled runtime error, or a stdin close that passes the guard:
 
 1. Stop accepting new tool calls.
-2. Flush the persistence event logs and release the STATE_DIR lock.
-3. `SessionManager.destroy()` clears every pending request timer.
-4. Send SIGTERM to every child process (`stdin.end` + kill), then SIGKILL after 5 seconds.
-5. Close the MCP transport, then force-exit after 5 seconds (10 on Windows) if cleanup hangs.
+2. `SessionManager.finalizeForShutdown()` — synchronously: every session still `running` or `waiting_approval` is written as `abandoned`, the event logs are flushed, and every `owner.json` this server wrote is removed. It comes first because a shutdown usually starts when the client went away, and every write to that client from here on can block until the force-exit timer fires.
+3. The `server_stopping` notification and the transport close, each given one second. A client that died leaves a pipe nothing drains, so the SDK's write waits for a `drain` event that never arrives; the deadline reports the step and the shutdown carries on.
+4. `SessionManager.destroy()` clears every pending request timer.
+5. Send SIGTERM to every child process (`stdin.end` + kill), then SIGKILL after 5 seconds.
+6. Force-exit after 5 seconds (10 on Windows) if cleanup hangs anyway.
 
-`src/utils/stdin-shutdown.ts` guards the stdin path: while the transport still reports itself connected, a stdin `end` or `close` is treated as transient and the server keeps serving. Otherwise the server exits at once when no session is active, and waits up to 10 seconds (15 on Windows) for active sessions before forcing the exit.
+`src/utils/stdin-shutdown.ts` decides the stdin path. On stdio there is one client, on the other end of that pipe, so a stdin that has really ended is the end of the session — `StdioServerTransport` subscribes to neither `end` nor `close`, so `isConnected()` answers true for the life of the process and cannot gate the decision. A transient close-like signal is caught by the availability check instead: a stream that is readable again clears the shutdown. The server exits at once when no session is active, and waits up to 10 seconds (15 on Windows) for active sessions before forcing the exit.
 
 ### STDIO Preflight
 
@@ -670,18 +671,22 @@ State lives under `CODEX_MCP_STATE_DIR`, defaulting to `~/.codex-mcp/state`.
 
 ```text
 STATE_DIR/
-├── .lock                      # PID lockfile, single writer
 └── sessions/
     └── <sessionId>/
         ├── meta.json          # session metadata
+        ├── owner.json         # the codex-mcp process driving this session
         ├── pid.json           # child-process identity for the orphan reaper
         ├── result.json        # final turn result
         └── events.jsonl       # append-only event log
 ```
 
+Several codex-mcp servers share one state directory. Each writes its own sessions and
+reads the others'; what a server may act on is decided per session by `owner.json`.
+
 ### Write Path
 
-- `meta.json` holds `schemaVersion`, `sessionId`, `status`, `createdAt`, `lastActiveAt`, `cancelledAt`, `cancelledReason`, `threadId`, `model`, `cwd`, `approvalPolicy`, `sandbox`, and `profile`. `SessionManager` writes it when the session is created and on every status change, skipping a write when the status is unchanged.
+- `meta.json` holds `schemaVersion`, `sessionId`, `status`, `createdAt`, `lastActiveAt`, `cancelledAt`, `cancelledReason`, `threadId`, `model`, `cwd`, `approvalPolicy`, `sandbox`, `profile`, `personality`, `config`, `developerInstructions` and `approvalTimeoutMs` — everything `thread/resume` takes, so another server can pick the thread up. `SessionManager` writes it whenever any of those changes, so the thread id reaches the file the moment Codex hands it over rather than at the next status change; `lastActiveAt` alone does not trigger a write.
+- `owner.json` holds `{ pid, startedAt }` of the codex-mcp process driving the session. It is written when the session is created or resumed and removed when the session ends, is evicted, or the server shuts down.
 - `pid.json` holds `{ pid, spawnedAt, command }` and is written right after the child process starts.
 - `result.json` holds the final `TurnResult` and is written when a turn completes or ends in error.
 - `events.jsonl` holds one `{ seq, type, data, timestamp }` object per line. `EventLog` writes it with a tiered flush: `approval_request`, `approval_result`, `result`, and `error` flush immediately; everything else batches and flushes every 100 ms, and shutdown forces a final flush. Nothing in the current session write path calls `appendEvent`, so the file exists only for sessions whose events another writer produced.
@@ -698,15 +703,26 @@ Every JSON file is written through `atomicWriteJson`: write a sibling temp file,
 
 `SessionManager.ingestRecovered` then loads them into memory:
 
-- A session whose persisted status was `running` or `waiting_approval` becomes `error` with `cancelledReason: "Server restarted while session was active"`, because its child process is gone.
+- A session another running server holds is left on disk and never enters memory.
+- A session whose owner is gone is adopted and its stale `owner.json` removed. One that was `running` or `waiting_approval` becomes `abandoned`: the work was cut off, nothing failed, and `codex_session(action="resume")` picks the thread back up.
 - Other statuses carry over; an unrecognized status becomes `error`.
 - `result.json` becomes `lastResult`, so a client can still read the outcome of a completed session.
 - The event-log sequence resumes at `lastSeq + 1`.
 - A session id already in memory is skipped.
 
-### Lockfile
+### Session ownership
 
-`STATE_DIR/.lock` holds `{ pid, startedAt }` and is created with `O_EXCL`. A lock held by a dead PID is reclaimed; a lock held by a live foreign PID throws, and the message names the file to delete if the lock is stale. `startDiskPersistence()` in `src/session/persistence.ts` decides what happens next: it hands back the adapter, the recovered sessions and the prune count when it takes the lock, and warns on stderr and hands back nothing when any startup step fails — creating the state directory, taking the lock, pruning or scanning. A server that lost the lock keeps serving from memory and never reads, writes, prunes or reaps inside the state directory another server owns.
+`src/persistence/session-owner.ts` decides who holds a session. `owner.json` carries the owner's pid and the instant that process started, because a pid is handed on as soon as its process exits:
+
+- The pid is alive and its OS start time matches the record, within 5 seconds → **held**. The session is listed, and resume, prune and reap leave it alone.
+- The pid is gone, or it is alive with another start time → **gone**. The session is free: the successor removes the claim and adopts it.
+- Liveness or start time no source could read → **held, unproven**. The reason is in the error a caller sees; nothing takes the session on a guess.
+
+`src/persistence/process-identity.ts` reads the start time — `Get-CimInstance Win32_Process` (then `wmic`) on Windows, `ps -p <pid> -o pgid=,lstart=` elsewhere, falling back to `/proc/<pid>/stat` on Linux. The orphan reaper identifies child processes through the same module.
+
+`startDiskPersistence()` in `src/session/persistence.ts` opens the directory: it hands back the adapter, the recovered sessions and the prune count, and warns on stderr and hands back nothing when creating the directory, pruning or scanning fails, leaving the server to run from memory.
+
+`codex_session(action="resume")` re-reads `owner.json` at the moment it is called rather than trusting what startup found, because a server that started since then may hold the session now.
 
 ### Retention
 
@@ -718,7 +734,9 @@ Every JSON file is written through `atomicWriteJson`: write a sibling temp file,
 
 ### Orphan Reaper
 
-`src/session/orphan-reaper.ts` runs after recovery and before the server accepts calls. For every recovered session that has a `pid.json`:
+`src/session/orphan-reaper.ts` runs after the transport is connected, over the sessions this server adopted — a session another server holds never reaches it, so its live codex process is never signalled. Nothing holds the event loop until the transport is connected, so an await before that point lets Node exit before a client ever sees the server; and a confirmed orphan is given five seconds to exit gracefully, which is five seconds a client would otherwise wait for a server already able to answer.
+
+For every adopted session that has a `pid.json`:
 
 1. `process.kill(pid, 0)` decides whether the PID is alive; a dead PID counts as already gone.
 2. The identity check compares the recorded `spawnedAt` against the process start time reported by the OS, with a 5-second tolerance: `wmic process where "ProcessId=<pid>" get CreationDate` on Windows, `ps -p <pid> -o lstart=` elsewhere. When `ps` gives nothing but `/proc/<pid>/stat` field 22 exists, the reaper accepts the process as an orphan only while the recorded spawn time is under 24 hours old.
@@ -755,6 +773,7 @@ codex app-server:
 
 - `INVALID_ARGUMENT`: parameter validation failed
 - `SESSION_NOT_FOUND`: no such session
+- `SESSION_HELD_BY_OTHER_SERVER`: another running codex-mcp drives this session
 - `SESSION_BUSY`: the session is running and takes no new message
 - `SESSION_NOT_RUNNING`: the action needs an active turn
 - `REQUEST_NOT_FOUND`: the approval or user-input request does not exist or is already resolved
