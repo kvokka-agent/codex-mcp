@@ -14,18 +14,18 @@ npm run build
 ## Development Workflow
 
 ```bash
-npm run typecheck    # Type check
-npm run build        # Build
-npm test             # Run tests
-npm run lint         # Lint (ESLint)
-npm run format:check # Check formatting (Prettier)
+npm run check        # The CI gate: lint, format, types, tests, build, and the two runtime scripts
 ```
+
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) sets up the loop that command does
+not cover: running your build inside a real Claude Code session, restarting the
+server after a rebuild, and reading its logs.
 
 ## Pull Requests
 
 1. Fork the repo and create a branch from `master` (or the repository default branch)
 2. Make your changes
-3. Ensure `npm run typecheck` and `npm run build` pass
+3. Ensure `npm run check` passes
 4. Submit a PR with a clear description
 
 ## Reporting Issues
