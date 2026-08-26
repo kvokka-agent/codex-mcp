@@ -1,0 +1,13 @@
+repos:
+  - repo: local
+    hooks:
+      - id: prettier
+        name: prettier
+        entry: npx prettier --write
+        language: system
+        files: \.ts$
+      - id: rumdl
+        name: rumdl
+        entry: npx --yes rumdl@0.2.60 check
+        language: system
+        files: \.md$
