@@ -63,6 +63,9 @@ const CRITICAL_EVENT_TYPES = new Set<SessionEventType>([
   "approval_request",
   "approval_result",
   "result",
+  // An `activity` line is what somebody tailing events.jsonl is reading, so it
+  // reaches the file when it happens rather than on the next batch.
+  "activity",
   "error",
 ]);
 

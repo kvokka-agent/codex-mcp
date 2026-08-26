@@ -112,6 +112,14 @@ export interface ProgressInfo {
   activeTurnId?: string;
   pendingActionCount: number;
   tokens?: ProgressTokens;
+  /**
+   * What Codex said it is doing right now, in one line of its own words.
+   *
+   * Codex marks it in its output as `%%%ACTIVITY: ...%%%` on the instruction the
+   * server puts on the thread, and the last line extracted overwrites the one
+   * before it — a heading, not a percentage, and not a history.
+   */
+  activity?: string;
 }
 
 export interface ExecutionInfo {
@@ -124,6 +132,7 @@ export interface ExecutionInfo {
 export type SessionEventType =
   | "output"
   | "progress"
+  | "activity"
   | "approval_request"
   | "approval_result"
   | "result"
@@ -183,7 +192,11 @@ export interface SessionInfo {
     lastEventAt: string;
     lastMethod?: string;
     tokens?: ProgressTokens;
+    /** Last activity line extracted from the agent-message stream. */
+    activity?: string;
   };
+  /** Developer instructions the thread was started with, reused when it is forked. */
+  developerInstructions?: string;
 }
 
 /** Public session info (redacted) */

@@ -131,6 +131,10 @@ export function createServer(
         total: z.number().optional(),
       })
       .optional(),
+    activity: z
+      .string()
+      .optional()
+      .describe("One line in Codex's own words saying what it is doing right now."),
   });
 
   const setupResultShape = {

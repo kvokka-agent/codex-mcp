@@ -218,6 +218,7 @@ function buildConfigGuideText(): string {
     "- `CODEX_MCP_STDIO_MODE`: `auto` (default) reports stdout contamination risk on stderr, `strict` refuses to start when stdio is attached to a terminal, `off` skips the check. An unknown value is treated as `auto`.",
     "- `CODEX_MCP_STATE_DIR`: directory holding session metadata, events and results. Default: `~/.codex-mcp/state`.",
     "- `CODEX_MCP_DISABLE_NOISE_FILTER`: set to `1` to keep shell-profile noise (oh-my-posh, PSReadLine banners) in command output events. Default: those lines are stripped.",
+    "- `CODEX_MCP_DISABLE_ACTIVITY_MARKER`: set to `1` to start threads without the activity-marker instruction, which leaves `progress.activity` empty. Default: the instruction is sent, and markers are extracted and cut from the result either way.",
     "",
     "## Version compatibility note",
     "",
@@ -229,6 +230,7 @@ function buildConfigGuideText(): string {
     "- `codex_session.includeSensitive`: default `false`.",
     `- \`codex_check.waitMs\`: default \`0\` (answer at once), maximum \`${MAX_LONG_POLL_WAIT_MS}\`; \`poll\` only.`,
     "- `progress` is included on `codex`, `codex_reply`, and `codex_check` responses.",
+    "- `advanced.developerInstructions` is appended after the server's activity-marker instruction, not instead of it.",
     "",
   ].join("\n");
 }
@@ -257,6 +259,7 @@ function buildGotchasText(): string {
     "- Terminal `result.text` is the turn's final assistant message.",
     "- `result.output` is exec-mode only, where the exec client fills it with that same message. The app-server `Turn` has no text field: `result.turn` carries `turn.status` and `turn.error`, and the answer stays in `result.text`.",
     "- `progress` normalizes the current phase, the pending action count, the time of the last event, the active turn id and the token totals the backend has reported.",
+    "- `progress.activity` is one line in Codex's own words saying what it is doing right now — `\"Разбираю падение теста в session-manager\"`. The server tells every thread it starts to mark such a line as `%%%ACTIVITY: ...%%%`, lifts it out of the agent-message stream and overwrites the previous one. It is a heading, not a percentage: it says nothing about how much is done, it is absent until the turn's first marker, and it is cut out of `result.text`.",
     "- A retryable interruption keeps the session `running` and shows up as a phase that does not advance; a failure the backend will not retry moves the session to `error`, where `result.error` says what happened.",
     "",
     "## Windows shell/profile issues",
@@ -361,7 +364,7 @@ function buildQuickstartText(): string {
     "```",
     "",
     "5. Keep checking until terminal status (`idle`, `error`, or `cancelled`); the check that first sees it carries `result`.",
-    "6. Read `progress.phase` / `progress.tokens` for a coarse execution snapshot.",
+    "6. Read `progress.phase` / `progress.tokens` for a coarse execution snapshot, and `progress.activity` for what Codex says it is doing right now.",
     "",
     "## Notes",
     "",

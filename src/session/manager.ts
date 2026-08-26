@@ -12,6 +12,11 @@ import { redactPaths } from "../utils/redact.js";
 import { interactionStateForStatus, recommendedNextActionForStatus } from "../utils/execution.js";
 import { resolveAndValidateFilePath } from "../utils/files.js";
 import {
+  ActivityMarkerScanner,
+  composeDeveloperInstructions,
+  stripActivityMarkers,
+} from "./activity-marker.js";
+import {
   buildEffortFallbackWarning,
   classifyTurnCompatibilityError,
   toFriendlyTurnCompatibilityError,
@@ -394,6 +399,8 @@ export class SessionManager {
     const now = new Date().toISOString();
     const approvalTimeoutMs = advanced?.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
 
+    const developerInstructions = composeDeveloperInstructions(advanced?.developerInstructions);
+
     const resolvedImages = advanced?.images
       ? advanced.images.map((p) => resolveAndValidateFilePath(p, cwd, "image"))
       : undefined;
@@ -412,6 +419,7 @@ export class SessionManager {
       pendingRequests: new Map(),
       lastAgentMessageText: undefined,
       progressState: { lastEventAt: now },
+      developerInstructions,
     };
 
     this.registerSession(session);
@@ -444,7 +452,7 @@ export class SessionManager {
         personality: advanced?.personality,
         ephemeral: advanced?.ephemeral,
         baseInstructions: advanced?.baseInstructions,
-        developerInstructions: advanced?.developerInstructions,
+        developerInstructions,
         config: advanced?.config,
       });
       const threadId = extractThreadId(threadStartResult);
@@ -957,7 +965,10 @@ export class SessionManager {
     const originalClient = this.getClientOrThrow(sessionId);
 
     // Fork the thread on the ORIGINAL client (which holds the thread state)
-    const forkResult = await originalClient.threadFork({ threadId: session.threadId });
+    const forkResult = await originalClient.threadFork({
+      threadId: session.threadId,
+      developerInstructions: session.developerInstructions,
+    });
     const forkedThreadId = extractThreadId(forkResult);
 
     // Create new session with its own app-server process
@@ -978,6 +989,7 @@ export class SessionManager {
       sandbox: session.sandbox,
       config: session.config,
       pendingRequests: new Map(),
+      developerInstructions: session.developerInstructions,
     };
 
     this.registerSession(newSession);
@@ -999,7 +1011,10 @@ export class SessionManager {
       });
 
       // Resume the forked thread on the new process
-      await newClient.threadResume({ threadId: forkedThreadId });
+      await newClient.threadResume({
+        threadId: forkedThreadId,
+        developerInstructions: session.developerInstructions,
+      });
       newSession.threadId = forkedThreadId;
 
       return {
@@ -1514,6 +1529,10 @@ export class SessionManager {
             const turnObj = p.turn as Record<string, unknown> | undefined;
             const status = normalizeOptionalString(turnObj?.status);
             session.activeTurnId = normalizeOptionalString(turnObj?.id);
+            // The new turn has not said what it is doing yet, and the line the
+            // previous one left would read as if it had.
+            scannerOf(session).reset();
+            if (session.progressState) session.progressState.activity = undefined;
             recordEvent(session, "progress", {
               method,
               ...p,
@@ -1541,7 +1560,11 @@ export class SessionManager {
           // app-server mode always answers from `lastAgentMessageText`. `output`
           // is ExecClient's own addition, set from the last `item.completed`
           // agentMessage of the turn (src/app-server/exec-client.ts).
-          const rawTurnOutput = normalizeOptionalString(turnObj?.output);
+          // `output` comes straight off the exec turn and has seen no stripping yet;
+          // `lastAgentMessageText` was stripped when its item completed.
+          const sentTurnOutput = normalizeOptionalString(turnObj?.output);
+          const rawTurnOutput =
+            sentTurnOutput === undefined ? undefined : stripActivityMarkers(sentTurnOutput);
           const finalText = rawTurnOutput ?? session.lastAgentMessageText;
           const askedForSchema = this.schemaConstrainedTurns.delete(sessionId);
           session.status = "idle";
@@ -1608,6 +1631,11 @@ export class SessionManager {
         }
 
         case Methods.AGENT_MESSAGE_DELTA:
+          if (typeof p.delta === "string") {
+            for (const line of scannerOf(session).push(p.delta)) {
+              recordActivity(session, line, normalizeOptionalString(p.itemId));
+            }
+          }
           recordEvent(session, "output", { method, delta: p.delta, itemId: p.itemId });
           break;
 
@@ -1631,7 +1659,10 @@ export class SessionManager {
             // is not required either: providers emit it inconsistently, and the
             // last completed message of a turn is its answer.
             if (itemType === "agentMessage" && completedItem && typeof item?.text === "string") {
-              session.lastAgentMessageText = item.text;
+              // The markers were lifted out of the deltas that built this text; what
+              // stays is the answer the caller reads.
+              session.lastAgentMessageText = stripActivityMarkers(item.text);
+              scannerOf(session).reset();
             }
             // Keep user/agent message-like items as output; everything else is
             // progress. A PlanThreadItem (`type: "plan"`, EXPERIMENTAL, reaching
@@ -2123,6 +2154,7 @@ function buildProgressInfo(session: SessionInfo): ProgressInfo {
     // restore path. Re-reading the finished turn here would let those older
     // counters win over a later update.
     tokens: session.progressState?.tokens,
+    activity: session.progressState?.activity,
   };
 }
 
@@ -2504,6 +2536,34 @@ type EventSink = (type: SessionEventType, data: unknown, timestamp: string) => v
 
 /** Disk mirror per session; a dropped session takes its sink with it. */
 const eventSinks = new WeakMap<SessionInfo, EventSink>();
+
+/** Marker scanner per session; a dropped session takes its carry buffer with it. */
+const activityScanners = new WeakMap<SessionInfo, ActivityMarkerScanner>();
+
+function scannerOf(session: SessionInfo): ActivityMarkerScanner {
+  let scanner = activityScanners.get(session);
+  if (!scanner) {
+    scanner = new ActivityMarkerScanner();
+    activityScanners.set(session, scanner);
+  }
+  return scanner;
+}
+
+/**
+ * Record what Codex said it is doing: overwrite the one line a poll reports, and
+ * append one `activity` record to the session's events.jsonl.
+ *
+ * It deliberately does not wake a long-poll waiter. An activity line is a
+ * heading a caller reads on its next poll, not something the caller answers, and
+ * waking on it would put the whole run back through the caller's context — the
+ * cost the event stream was removed for.
+ */
+function recordActivity(session: SessionInfo, activity: string, itemId?: string): void {
+  const next = session.progressState ?? { lastEventAt: new Date().toISOString() };
+  next.activity = activity;
+  session.progressState = next;
+  recordEvent(session, "activity", { activity, turnId: session.activeTurnId, itemId });
+}
 
 function setEventSink(session: SessionInfo, sink: EventSink): void {
   eventSinks.set(session, sink);
