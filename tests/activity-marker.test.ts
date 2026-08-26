@@ -310,6 +310,18 @@ describe("SessionManager and the activity marker", () => {
     expect(params.developerInstructions).toBe(ACTIVITY_MARKER_INSTRUCTION);
   });
 
+  it("carries the marker instruction into a fork and its resume", async () => {
+    client.emit_(Methods.TURN_COMPLETED, { turn: { id: "turn_mock", status: "completed" } });
+    await manager.forkSession(sessionId);
+
+    const [forkParams] = client.threadFork.mock.calls[0] as [{ developerInstructions?: string }];
+    const [resumeParams] = client.threadResume.mock.calls[0] as [
+      { developerInstructions?: string },
+    ];
+    expect(forkParams.developerInstructions).toBe(ACTIVITY_MARKER_INSTRUCTION);
+    expect(resumeParams.developerInstructions).toBe(ACTIVITY_MARKER_INSTRUCTION);
+  });
+
   it("reports no activity before the turn's first marker", () => {
     expect(poll().progress.activity).toBeUndefined();
   });
