@@ -7,7 +7,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ServerProcess } from "./helpers/server-harness.js";
+import { HARNESS_RUNS_HERE, ServerProcess } from "./helpers/server-harness.js";
 
 const servers: ServerProcess[] = [];
 const strays: ChildProcess[] = [];
@@ -69,7 +69,7 @@ afterEach(async () => {
   }
 });
 
-describe("startup", () => {
+describe.skipIf(!HARNESS_RUNS_HERE)("startup", () => {
   it("serves MCP while an orphan of a dead owner is still being reaped", async () => {
     const stateDir = freshStateDir();
     const orphan = spawnStubbornChild();
@@ -101,7 +101,7 @@ describe("startup", () => {
   }, 40_000);
 });
 
-describe("shutdown", () => {
+describe.skipIf(!HARNESS_RUNS_HERE)("shutdown", () => {
   it("exits when its client closes stdin while a turn is still running", async () => {
     const server = startServer();
     await server.initialize();
@@ -147,7 +147,7 @@ describe("shutdown", () => {
   }, 60_000);
 });
 
-describe("session metadata", () => {
+describe.skipIf(!HARNESS_RUNS_HERE)("session metadata", () => {
   it("writes threadId to meta.json while the first turn is still running", async () => {
     const stateDir = freshStateDir();
     const server = startServer(stateDir);
@@ -172,7 +172,7 @@ describe("session metadata", () => {
   }, 40_000);
 });
 
-describe("two servers on one state directory", () => {
+describe.skipIf(!HARNESS_RUNS_HERE)("two servers on one state directory", () => {
   it("both persist their own sessions and each sees the other's", async () => {
     const stateDir = freshStateDir();
     const first = startServer(stateDir);

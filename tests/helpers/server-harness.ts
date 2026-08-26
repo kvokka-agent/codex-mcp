@@ -19,6 +19,17 @@ export const REPO_ROOT = resolve(HERE, "..", "..");
 export const SERVER_ENTRY = join(REPO_ROOT, "dist", "index.js");
 export const FAKE_CODEX = join(HERE, "fake-codex.mjs");
 
+/**
+ * Whether this platform can run the suite at all.
+ *
+ * The codex stand-in is a Node script handed to the server as `CODEX_MCP_PATH`,
+ * and Windows spawns an executable by its extension: a `.mjs` is not one. The
+ * lifetime behaviour these tests measure — the startup event loop, the stdin
+ * end, the ownership of a session directory — is covered per platform by the
+ * unit tests around it.
+ */
+export const HARNESS_RUNS_HERE = process.platform !== "win32";
+
 /** Newest mtime under `dir`, so a stale bundle is rebuilt before it is spawned. */
 function newestMtimeMs(dir: string): number {
   let newest = 0;
@@ -36,7 +47,8 @@ export function ensureServerBuilt(): void {
   if (built) return;
   const bundle = statSync(SERVER_ENTRY, { throwIfNoEntry: false });
   if (!bundle || bundle.mtimeMs < newestMtimeMs(join(REPO_ROOT, "src"))) {
-    execFileSync("npm", ["run", "build"], { cwd: REPO_ROOT, stdio: "pipe" });
+    // shell: npm is a .cmd shim on Windows, which execFile cannot spawn.
+    execFileSync("npm", ["run", "build"], { cwd: REPO_ROOT, stdio: "pipe", shell: true });
   }
   built = true;
 }
