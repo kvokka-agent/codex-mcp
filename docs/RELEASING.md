@@ -4,6 +4,22 @@ A release starts with one label on a pull request and needs nothing else from yo
 Add `release:major`, `release:minor` or `release:patch` before the merge, and the
 merge itself raises the version, checks it, tags it and publishes it to npm.
 
+## Before the first release
+
+The three labels have to exist on the repository. Create them once:
+
+```bash
+gh label create release:major --repo kvokka/codex-mcp --color B60205 --description "Merging this cuts a major release"
+gh label create release:minor --repo kvokka/codex-mcp --color 0E8A16 --description "Merging this cuts a minor release"
+gh label create release:patch --repo kvokka/codex-mcp --color 1D76DB --description "Merging this cuts a patch release"
+```
+
+The npm trusted publisher for `@kvokka/codex-mcp` names the workflow that publishes,
+which is still `.github/workflows/publish.yml` — the release run calls that file
+rather than repeating what it does, and the OIDC token names the file holding the
+job. If the first release run reaches the publish job and npm rejects the token,
+that setting is where to look.
+
 ## The label
 
 | Label            | 2.2.0 becomes | Use it for                                            |
