@@ -207,3 +207,9 @@ These patterns are non-negotiable guardrails:
 - Use Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`).
 - Run `npm run build && npm test` before opening PR.
 - Do not commit generated or sensitive artifacts (`dist/`, `node_modules/`, `.env`).
+- Open every pull request against `kvokka/codex-mcp`. A fork such as
+  `kvokka-agent/codex-mcp` only holds the branch:
+  `gh pr create --repo kvokka/codex-mcp --base master --head <fork-owner>:<branch>`.
+- A `release:major`, `release:minor` or `release:patch` label on the pull request cuts
+  the release when it merges. `docs/RELEASING.md` states the path from the label to the
+  published package and names the six files that carry the version.
