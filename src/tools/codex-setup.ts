@@ -90,7 +90,10 @@ function probeCodexAuth(info: CodexExecutableInfo): CodexSetupResult["auth"] {
   }
   const state = classifyAuthResult(run.status, combined);
   return {
-    ok: state !== "unauthenticated",
+    // Only an answer the probe classified as authenticated clears this gate: an output no
+    // pattern matched says nothing about login state, and reporting it as ok would let a
+    // caller start a session that fails on authentication.
+    ok: state === "authenticated",
     state,
     detail: combined || (state === "authenticated" ? "Authenticated." : "Auth status unknown."),
   };

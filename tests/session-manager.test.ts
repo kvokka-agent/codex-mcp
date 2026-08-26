@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -20,8 +20,14 @@ class MockAppServerClient extends EventEmitter {
   threadResumeResult: unknown = { thread: { id: "thread_forked" } };
 
   supportsTurnOverrides = true;
+  childPid: number | undefined = undefined;
+  /** Spawn instant reported with the "spawn" event, as the real clients report theirs. */
+  spawnedAt = "2024-05-05T10:00:00.000Z";
 
-  start = vi.fn(async () => ({ userAgent: "mock" }));
+  start = vi.fn(async () => {
+    if (this.childPid !== undefined) this.emit("spawn", this.childPid, this.spawnedAt);
+    return { userAgent: "mock" };
+  });
   threadStart = vi.fn(async () => this.threadStartResult);
   threadFork = vi.fn(async () => this.threadForkResult);
   threadResume = vi.fn(async () => this.threadResumeResult);
@@ -2341,6 +2347,103 @@ describe("SessionManager protocol compatibility + approvals", () => {
   });
 });
 
+describe("SessionManager missing protocol ids", () => {
+  let manager: SessionManager;
+  let client: MockAppServerClient;
+  let errors: ReturnType<typeof vi.spyOn>;
+  const workspace = path.resolve(os.tmpdir(), "codex-mcp-tests");
+
+  beforeEach(() => {
+    errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    client = new MockAppServerClient();
+    manager = new SessionManager({
+      disableCleanup: true,
+      createClient: () => client as unknown as AppServerClient,
+    });
+  });
+
+  afterEach(() => {
+    manager.destroy();
+    vi.restoreAllMocks();
+  });
+
+  function logged(fragment: string): boolean {
+    return errors.mock.calls.some((call) => String(call[0]).includes(fragment));
+  }
+
+  it("reports an approval request that carries none of its correlation ids", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitServerRequest(1, Methods.COMMAND_APPROVAL, { command: "ls" });
+
+    expect(logged("carries no itemId, threadId, turnId")).toBe(true);
+    const action = manager.pollEvents(started.sessionId, 0, 50).actions![0]!;
+    expect(action.itemId).toBe("");
+  });
+
+  it("reports a file change approval that carries no itemId", async () => {
+    await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitServerRequest(2, Methods.FILE_CHANGE_APPROVAL, {
+      threadId: "thread_mock",
+      turnId: "turn_1",
+    });
+
+    expect(logged("carries no itemId")).toBe(true);
+  });
+
+  it("reports a user input request that carries no itemId", async () => {
+    await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitServerRequest(3, Methods.USER_INPUT_REQUEST, {
+      threadId: "thread_mock",
+      turnId: "turn_1",
+      questions: [{ id: "q1", question: "which?" }],
+    });
+
+    expect(logged("carries no itemId")).toBe(true);
+  });
+
+  it("stays silent when every correlation id is there", async () => {
+    await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitServerRequest(4, Methods.COMMAND_APPROVAL, {
+      itemId: "item_1",
+      threadId: "thread_mock",
+      turnId: "turn_1",
+      command: "ls",
+    });
+
+    expect(logged("carries no")).toBe(false);
+  });
+
+  it("reports a turn that completed without a turn id", async () => {
+    client.turnStartResult = {};
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { status: "completed", output: "done" },
+    });
+
+    expect(logged("turn/completed carries no turn id")).toBe(true);
+    expect(manager.getLastResult(started.sessionId)?.turnId).toBe("");
+  });
+
+  it("falls back to the active turn id without reporting anything", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.emitNotification(Methods.TURN_STARTED, { turn: { id: "turn_live" } });
+
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { status: "completed", output: "done" },
+    });
+
+    expect(logged("turn/completed carries no turn id")).toBe(false);
+    expect(manager.getLastResult(started.sessionId)?.turnId).toBe("turn_live");
+  });
+});
+
 describe("SessionManager disk persistence", () => {
   const workspace = path.resolve(os.tmpdir(), "codex-mcp-tests");
   let root: string;
@@ -2512,6 +2615,76 @@ describe("SessionManager disk persistence", () => {
 
     const recoveredPid = persistence.recoverSessions()[0]!.pidInfo!;
     expect(recoveredPid.pid).toBe(client.childPid);
+  });
+
+  it("records a process the client spawns after start, as exec does per turn", async () => {
+    // ExecClient has no process until its first turn, so the pid reaches disk
+    // when the client reports the spawn, not when start() returns.
+    const execLike = new MockAppServerClient();
+    const execManager = new SessionManager({
+      disableCleanup: true,
+      persistence,
+      createClient: () => execLike as unknown as AppServerClient,
+    });
+    try {
+      const { sessionId } = await execManager.createSession("hi", workspace, {}, "medium");
+      expect(existsSync(path.join(root, "sessions", sessionId, "pid.json"))).toBe(false);
+
+      execLike.emit("spawn", 777, "2024-05-05T11:22:33.000Z");
+
+      const pidInfo = JSON.parse(
+        readFileSync(path.join(root, "sessions", sessionId, "pid.json"), "utf-8")
+      );
+      expect(pidInfo.pid).toBe(777);
+    } finally {
+      execManager.destroy();
+    }
+  });
+
+  it("dates the pid record by the spawn, not by the end of the handshake", async () => {
+    const { sessionId } = await manager.createSession(
+      "hi",
+      workspace,
+      { model: "gpt-5-codex" },
+      "medium"
+    );
+
+    const record = JSON.parse(
+      readFileSync(path.join(root, "sessions", sessionId, "pid.json"), "utf-8")
+    ) as { pid: number; spawnedAt: string; model?: string };
+
+    expect(record.pid).toBe(client.childPid);
+    expect(record.model).toBe("gpt-5-codex");
+    // The reaper matches this against the OS start time within five seconds, so it carries
+    // the spawn instant the client reported rather than the clock at write time.
+    expect(record.spawnedAt).toBe(client.spawnedAt);
+  });
+
+  it("leaves nothing on disk when the session fails to start", async () => {
+    client.threadStart.mockRejectedValueOnce(new Error("thread/start refused"));
+
+    await expect(manager.createSession("hi", workspace, {}, "medium")).rejects.toThrow(
+      "thread/start refused"
+    );
+
+    expect(readdirSync(path.join(root, "sessions"))).toEqual([]);
+    expect(persistence.recoverSessions()).toEqual([]);
+  });
+
+  it("keeps the cancellation result readable after a restart", async () => {
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+    await manager.cancelSession(sessionId, "user stopped it");
+    persistence.flushAll();
+
+    const restarted = new SessionManager({ disableCleanup: true, persistence });
+    try {
+      restarted.ingestRecovered(persistence.recoverSessions());
+      const result = restarted.getLastResult(sessionId);
+      expect(result?.status).toBe("cancelled");
+      expect(result?.error).toBe("user stopped it");
+    } finally {
+      restarted.destroy();
+    }
   });
 
   it("keeps the session alive and reports once when the event log cannot be written", async () => {

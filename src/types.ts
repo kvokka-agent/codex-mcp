@@ -93,7 +93,10 @@ export type RecommendedNextAction = "poll" | "respond_permission" | "respond_use
 
 export type ExecutionMode = "background" | "foreground";
 
-export type ExecutionFallbackReason = "wait_for_result_timeout" | "interactive_poll_required";
+export type ExecutionFallbackReason =
+  | "wait_for_result_timeout"
+  | "interactive_poll_required"
+  | "wait_refused";
 
 export type ProgressPhase =
   | "starting"
@@ -192,7 +195,8 @@ export interface SessionInfo {
   cancelledAt?: string;
   cancelledReason?: string;
   approvalTimeoutMs?: number;
-  cwd: string;
+  /** Absent when the session was recovered from a meta.json that recorded no cwd. */
+  cwd?: string;
   model?: string;
   profile?: string;
   approvalPolicy?: ApprovalPolicy;
@@ -221,7 +225,7 @@ export interface PublicSessionInfo {
 /** Sensitive session info */
 export interface SensitiveSessionInfo extends PublicSessionInfo {
   threadId?: string;
-  cwd: string;
+  cwd?: string;
   profile?: string;
   config?: Record<string, unknown>;
 }

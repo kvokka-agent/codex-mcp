@@ -512,6 +512,54 @@ describe("executeCodexCheck", () => {
       expect(res.sessionId).toBe(sessionId);
       expect(waitSpy).not.toHaveBeenCalled();
     });
+
+    it("stops retrying when the session has no waiter slot left", async () => {
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      const blockers = new AbortController();
+      // MAX_WAITERS_PER_SESSION is 4, so these fill every slot of the session.
+      const held = [0, 1, 2, 3].map(() =>
+        manager.waitForChange(sessionId, 60_000, blockers.signal)
+      );
+      const pollSpy = vi.spyOn(manager, "pollEvents");
+      const started = Date.now();
+
+      const res = expectCheck(
+        await executeCodexCheck(
+          { action: "poll", sessionId, cursor: 0, pollOptions: { waitMs: 200 } },
+          manager
+        )
+      );
+
+      expect(res.sessionId).toBe(sessionId);
+      expect(res.events).toEqual([]);
+      // One poll before the refused wait and one after it — no retry loop.
+      expect(pollSpy).toHaveBeenCalledTimes(2);
+      expect(Date.now() - started).toBeLessThan(100);
+      expect(logged).toHaveBeenCalledTimes(1);
+      expect(String(logged.mock.calls[0]![0])).toContain("Long-poll wait refused");
+
+      blockers.abort();
+      await Promise.all(held);
+    });
+
+    it("wakes on a notification delivered between the poll and the waiter registration", async () => {
+      const started = Date.now();
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, cursor: 0, pollOptions: { waitMs: 120_000 } },
+        manager
+      );
+      // The long poll has run its synchronous part: pollEvents read an empty
+      // buffer and the waiter is registered. This is the exact window the
+      // single-threaded loop leaves between those two steps, so a notification
+      // delivered here must still end the wait.
+      emitOutput("boundary");
+
+      const res = expectCheck(await pending);
+
+      expect(res.events).toHaveLength(1);
+      expect((res.events[0].data as { delta?: string }).delta).toBe("boundary");
+      expect(Date.now() - started).toBeLessThan(1000);
+    });
   });
 
   describe("respond_permission", () => {

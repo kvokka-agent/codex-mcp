@@ -7,7 +7,7 @@ import {
   waitForCodexSessionForegroundResult,
 } from "../src/utils/execution.js";
 import type { SessionManager } from "../src/session/manager.js";
-import type { ProgressInfo, SessionStatus } from "../src/types.js";
+import { ErrorCode, type ProgressInfo, type SessionStatus } from "../src/types.js";
 
 interface FakeManagerParts {
   statuses?: SessionStatus[];
@@ -167,14 +167,21 @@ describe("waitForCodexSessionForegroundResult", () => {
     expect(Number.isNaN(Date.parse(out.completedAt!))).toBe(false);
   });
 
-  it("reports the error status when the session lookup throws", async () => {
+  it("lets a session evicted mid-wait reach the caller as the lookup error", async () => {
+    // A status invented here would claim the turn ended, and getLastResult would throw the same
+    // error one line down anyway.
     const manager = fakeManager({
       getSession: () => {
-        throw new Error("gone");
+        throw new Error(`Error [${ErrorCode.SESSION_NOT_FOUND}]: Session 'sess_1' not found`);
+      },
+      getLastResult: () => {
+        throw new Error("getLastResult must not be reached for a session that is gone");
       },
     });
-    const out = await waitForCodexSessionForegroundResult(manager, "sess_1", 5_000);
-    expect(out.status).toBe("error");
+
+    await expect(waitForCodexSessionForegroundResult(manager, "sess_1", 5_000)).rejects.toThrow(
+      ErrorCode.SESSION_NOT_FOUND
+    );
   });
 
   it("returns the pending action types when the session waits for approval", async () => {
@@ -205,21 +212,47 @@ describe("waitForCodexSessionForegroundResult", () => {
     expect(waitForChange.mock.calls[0]![0]).toBe("sess_1");
   });
 
-  it("passes the abort signal down to waitForChange and reports the timeout fallback", async () => {
-    const controller = new AbortController();
+  it("reports a refused wait as such instead of as an expired budget", async () => {
+    // waitForChange resolves on timeout, abort and change alike; it rejects only when the
+    // session already holds the maximum number of waiters, and that happens immediately.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const waitForChange = vi.fn(async () => {
-      throw new Error("aborted");
+      throw new Error("[codex-mcp] Too many concurrent long-poll waiters for session 'sess_1'");
+    });
+    const manager = fakeManager({ statuses: ["running"], waitForChange });
+
+    const started = Date.now();
+    const out = await waitForCodexSessionForegroundResult(manager, "sess_1", 120_000);
+
+    expect(out).toEqual({ status: "running", fallbackReason: "wait_refused" });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(waitForChange).toHaveBeenCalledTimes(1);
+    expect(errors.mock.calls.map((call) => String(call[0])).join("\n")).toContain(
+      "Foreground wait refused for session 'sess_1': [codex-mcp] Too many concurrent long-poll waiters"
+    );
+    errors.mockRestore();
+  });
+
+  it("passes the abort signal down and stops waiting once the caller aborts", async () => {
+    const controller = new AbortController();
+    // An aborted signal makes the real waitForChange resolve at once, so a loop that ignored the
+    // abort would spin until the deadline.
+    const waitForChange = vi.fn(async () => {
+      controller.abort();
     });
     const manager = fakeManager({ statuses: ["running"], waitForChange });
 
     const out = await waitForCodexSessionForegroundResult(
       manager,
       "sess_1",
-      5_000,
+      120_000,
       controller.signal
     );
-    expect(out).toEqual({ status: "running", fallbackReason: "wait_for_result_timeout" });
+
+    expect(waitForChange).toHaveBeenCalledTimes(1);
     expect(waitForChange.mock.calls[0]![2]).toBe(controller.signal);
+    // The wait ended because the caller left, so no reason is claimed for it.
+    expect(out).toEqual({ status: "running" });
   });
 
   it("caps the per-iteration wait at five seconds", async () => {

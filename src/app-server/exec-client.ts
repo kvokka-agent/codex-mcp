@@ -183,6 +183,13 @@ export class ExecClient extends EventEmitter implements ICodexClient {
   private lastAgentMessageText = "";
   private turnCompleted = false;
   private schemaTmpDirs: string[] = [];
+  private _unappliedTurnOverrides: string[] = [];
+  /** JSONL records of the current turn that started with `{` and did not parse. */
+  private unparsedLines = 0;
+  /** JSONL events of the current turn this client knows how to translate. */
+  private recognizedEvents = 0;
+  /** JSONL events of the current turn whose type this client has no mapping for. */
+  private unmappedEvents = 0;
 
   // Handlers
   private notificationHandler: NotificationHandler | null = null;
@@ -203,6 +210,15 @@ export class ExecClient extends EventEmitter implements ICodexClient {
 
   get childPid(): number | undefined {
     return this.process?.pid ?? undefined;
+  }
+
+  /**
+   * Overrides the last started turn asked for that its command line could not
+   * carry. `codex exec resume` takes no `-s`/`-C`/`--output-schema`, so those
+   * requests reach neither the CLI nor the session it resumes.
+   */
+  get unappliedTurnOverrides(): readonly string[] {
+    return this._unappliedTurnOverrides;
   }
 
   async start(opts: AppServerSpawnOptions): Promise<InitializeResult> {
@@ -233,7 +249,9 @@ export class ExecClient extends EventEmitter implements ICodexClient {
   async threadBackgroundTerminalsClean(
     _params: ThreadBackgroundTerminalsCleanParams
   ): Promise<Record<string, never>> {
-    return {};
+    throw new Error(
+      `Error [${ErrorCode.EXEC_NOT_SUPPORTED}]: threadBackgroundTerminalsClean is not supported in exec mode`
+    );
   }
 
   async turnStart(params: TurnStartParams): Promise<TurnStartResult> {
@@ -247,6 +265,10 @@ export class ExecClient extends EventEmitter implements ICodexClient {
     this.turnId = `exec_turn_${randomUUID().slice(0, 12)}`;
     this.lastAgentMessageText = "";
     this.turnCompleted = false;
+    this._unappliedTurnOverrides = [];
+    this.unparsedLines = 0;
+    this.recognizedEvents = 0;
+    this.unmappedEvents = 0;
     this.buffer = "";
     this.decoder = new StringDecoder("utf8");
 
@@ -296,6 +318,9 @@ export class ExecClient extends EventEmitter implements ICodexClient {
       windowsHide: process.platform === "win32",
     });
     this.process = proc;
+    if (proc.pid !== undefined) {
+      this.emit("spawn", proc.pid, new Date().toISOString());
+    }
 
     // Close stdin immediately — exec reads prompt from args
     proc.stdin?.end();
@@ -315,30 +340,35 @@ export class ExecClient extends EventEmitter implements ICodexClient {
       // If turn wasn't completed via JSONL event, synthesize completion
       if (this.turnId && !this._destroyed && !this.turnCompleted) {
         this.turnCompleted = true;
-        if (code !== 0 && code !== null) {
+        // A clean exit whose stream this client could not read at all says
+        // nothing about how the turn went: reporting it as completed would turn
+        // "the CLI output was not understood" into an empty successful answer.
+        const outcomeUnknown = code === 0 && this.recognizedEvents === 0;
+        const failureMessage = outcomeUnknown
+          ? `exec process exited with code 0 without emitting any event this client understands (${this.unmappedEvents} unmapped event(s), ${this.unparsedLines} unparseable record(s)); the turn outcome is unknown`
+          : code !== 0 && code !== null
+            ? `exec process exited with code ${code}`
+            : signal
+              ? `exec process killed by signal ${signal}`
+              : undefined;
+
+        if (outcomeUnknown || (code !== 0 && code !== null)) {
           this.emitNotification(Methods.ERROR, {
             threadId: this.threadId,
             turnId: this.turnId,
-            error: { message: `exec process exited with code ${code}` },
+            error: { message: failureMessage },
             willRetry: false,
           });
         }
         // Synthesize TURN_COMPLETED so SessionManager transitions out of "running"
         const turnId = this.turnId ?? "";
-        this.emitNotification(Methods.TURN_COMPLETED, {
-          threadId: this.threadId,
-          turn: {
-            id: turnId,
-            status: code === 0 ? "completed" : "failed",
-            output: this.lastAgentMessageText || undefined,
-            ...(code !== 0 && code !== null
-              ? { error: { message: `exec process exited with code ${code}` } }
-              : signal
-                ? { error: { message: `exec process killed by signal ${signal}` } }
-                : {}),
-          },
+        const failed = outcomeUnknown || code !== 0;
+        this.emitTurnCompleted({
+          id: turnId,
+          status: failed ? "failed" : "completed",
+          output: this.lastAgentMessageText || undefined,
+          ...(failureMessage ? { error: { message: failureMessage } } : {}),
         });
-        this.turnId = null;
       }
       if (!this._destroyed) {
         this.emit("exit", code, signal);
@@ -362,12 +392,21 @@ export class ExecClient extends EventEmitter implements ICodexClient {
     this.serverRequestHandler = handler;
   }
 
-  respondToServer(_id: RequestId, _result: unknown): void {
-    // No-op: exec mode has no server-initiated requests
+  /**
+   * `codex exec` raises no server-initiated requests, so there is no request to
+   * answer and no channel to answer it on. Reporting a response as sent would
+   * tell the caller its approval reached codex.
+   */
+  respondToServer(id: RequestId, _result: unknown): void {
+    throw new Error(
+      `Error [${ErrorCode.EXEC_NOT_SUPPORTED}]: cannot respond to server request id=${String(id)}: exec mode raises no server requests`
+    );
   }
 
-  respondErrorToServer(_id: RequestId, _code: number, _message: string): void {
-    // No-op: exec mode has no server-initiated requests
+  respondErrorToServer(id: RequestId, _code: number, _message: string): void {
+    throw new Error(
+      `Error [${ErrorCode.EXEC_NOT_SUPPORTED}]: cannot respond to server request id=${String(id)}: exec mode raises no server requests`
+    );
   }
 
   async destroy(): Promise<void> {
@@ -470,19 +509,23 @@ export class ExecClient extends EventEmitter implements ICodexClient {
       this.spawnOpts?.approvalPolicy;
     if (approvalPolicy) args.push("-c", `approval_policy=${approvalPolicy}`);
 
-    // Output schema (exec supports --output-schema <file>; write to temp file)
+    // Output schema (exec supports --output-schema <file>; write to temp file).
+    // A turn that cannot carry the schema is not started: the caller asked for a
+    // schema-constrained answer and would otherwise read a free-form one as one.
     if (params.outputSchema && Object.keys(params.outputSchema).length > 0) {
+      let schemaPath: string;
       try {
         const tmpDir = mkdtempSync(join(tmpdir(), "codex-mcp-schema-"));
         this.schemaTmpDirs.push(tmpDir);
-        const schemaPath = join(tmpDir, "output-schema.json");
+        schemaPath = join(tmpDir, "output-schema.json");
         writeFileSync(schemaPath, JSON.stringify(params.outputSchema));
-        args.push("--output-schema", schemaPath);
       } catch (err) {
-        console.error(
-          `[exec-client] Failed to write output schema to temp file: ${err instanceof Error ? err.message : String(err)}`
+        throw new Error(
+          `Error [${ErrorCode.INTERNAL}]: Failed to write the output schema to a temp file, so the turn cannot be schema-constrained: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err }
         );
       }
+      args.push("--output-schema", schemaPath);
     }
 
     // Config overrides
@@ -515,20 +558,24 @@ export class ExecClient extends EventEmitter implements ICodexClient {
       "--skip-git-repo-check",
     ];
 
-    // Warn about unsupported overrides in resume mode
+    // Record the overrides this command line cannot carry, so the caller can be
+    // told what did not take effect rather than reading success as applied.
     if (params.sandboxPolicy) {
-      console.error(
-        "[exec-client] sandbox override ignored in resume mode (exec resume does not support -s)"
+      this.recordUnappliedOverride(
+        "sandbox",
+        "exec resume does not support -s; the resumed session keeps the sandbox of the first turn"
       );
     }
     if (params.cwd) {
-      console.error(
-        "[exec-client] cwd override ignored in resume mode (exec resume does not support -C)"
+      this.recordUnappliedOverride(
+        "cwd",
+        "exec resume does not support -C; the resumed session keeps the cwd of the first turn"
       );
     }
     if (params.outputSchema && Object.keys(params.outputSchema).length > 0) {
-      console.error(
-        "[exec-client] outputSchema ignored in resume mode (exec resume does not support --output-schema)"
+      this.recordUnappliedOverride(
+        "outputSchema",
+        "exec resume does not support --output-schema; the turn output is not schema-constrained"
       );
     }
 
@@ -569,12 +616,18 @@ export class ExecClient extends EventEmitter implements ICodexClient {
       const trimmed = line.trim();
       if (!trimmed || trimmed[0] !== "{") continue;
 
+      let event: Record<string, unknown>;
       try {
-        const event = JSON.parse(trimmed) as Record<string, unknown>;
-        this.handleExecEvent(event);
+        event = JSON.parse(trimmed) as Record<string, unknown>;
       } catch {
+        // A record that opened with `{` and did not parse is a lost event, not
+        // CLI banner text. Which event it was is unknowable, so the turn result
+        // reports the loss instead of standing on what did arrive.
+        this.unparsedLines++;
         console.error(`[exec-client] Failed to parse JSONL: ${trimmed.slice(0, 200)}`);
+        continue;
       }
+      this.handleExecEvent(event);
     }
   }
 
@@ -583,6 +636,8 @@ export class ExecClient extends EventEmitter implements ICodexClient {
    */
   private handleExecEvent(event: Record<string, unknown>): void {
     const type = event.type as string;
+    // Counted as understood here; the unmapped branch at the bottom takes it back.
+    this.recognizedEvents++;
 
     // Handle structured lifecycle events first (dot-notation from exec --json)
     switch (type) {
@@ -633,33 +688,21 @@ export class ExecClient extends EventEmitter implements ICodexClient {
       }
 
       case "turn.completed": {
-        const turnId = this.turnId ?? "";
-        this.turnCompleted = true;
-        this.emitNotification(Methods.TURN_COMPLETED, {
-          threadId: this.threadId,
-          turn: {
-            id: turnId,
-            status: "completed",
-            output: this.lastAgentMessageText || undefined,
-            usage: event.usage,
-          },
+        this.emitTurnCompleted({
+          id: this.turnId ?? "",
+          status: "completed",
+          output: this.lastAgentMessageText || undefined,
+          usage: event.usage,
         });
-        this.turnId = null;
         return;
       }
 
       case "turn.failed": {
-        const turnId = this.turnId ?? "";
-        this.turnCompleted = true;
-        this.emitNotification(Methods.TURN_COMPLETED, {
-          threadId: this.threadId,
-          turn: {
-            id: turnId,
-            status: "failed",
-            error: toTurnError(event.error, "Turn failed"),
-          },
+        this.emitTurnCompleted({
+          id: this.turnId ?? "",
+          status: "failed",
+          error: toTurnError(event.error, "Turn failed"),
         });
-        this.turnId = null;
         return;
       }
 
@@ -683,29 +726,17 @@ export class ExecClient extends EventEmitter implements ICodexClient {
           turn: { id: this.turnId, status: "inProgress" },
         });
       } else if (type === "task_complete") {
-        const turnId = this.turnId ?? "";
-        this.turnCompleted = true;
-        this.emitNotification(Methods.TURN_COMPLETED, {
-          threadId: this.threadId,
-          turn: {
-            id: turnId,
-            status: "completed",
-            output: this.lastAgentMessageText || undefined,
-          },
+        this.emitTurnCompleted({
+          id: this.turnId ?? "",
+          status: "completed",
+          output: this.lastAgentMessageText || undefined,
         });
-        this.turnId = null;
       } else if (type === "turn_aborted") {
-        const turnId = this.turnId ?? "";
-        this.turnCompleted = true;
-        this.emitNotification(Methods.TURN_COMPLETED, {
-          threadId: this.threadId,
-          turn: {
-            id: turnId,
-            status: "cancelled",
-            error: toTurnError(event.reason, "Turn aborted"),
-          },
+        this.emitTurnCompleted({
+          id: this.turnId ?? "",
+          status: "cancelled",
+          error: toTurnError(event.reason, "Turn aborted"),
         });
-        this.turnId = null;
       } else if (mappedMethod === Methods.ERROR) {
         this.emitError(event, type);
       } else {
@@ -721,6 +752,8 @@ export class ExecClient extends EventEmitter implements ICodexClient {
     // Unmapped events: log but don't emit to avoid silent drops in manager.
     // The manager's default branch ignores unknown methods, so emitting them
     // would be misleading. Logging ensures visibility during debugging.
+    this.recognizedEvents--;
+    this.unmappedEvents++;
     console.error(`[exec-client] Unmapped exec event type: ${type}`);
   }
 
@@ -737,6 +770,42 @@ export class ExecClient extends EventEmitter implements ICodexClient {
       error,
       willRetry: isRetryableError(String(error.message)),
     });
+  }
+
+  /**
+   * Emit the turn's final `turn/completed` notification.
+   *
+   * `codex exec` puts the agent's answer in an `item.completed` record rather
+   * than in the completion event, so the output reported here is the last such
+   * record of the turn. An unparsed record of the same turn could have been
+   * that message, which would make an earlier one the reported final answer —
+   * so a turn whose stream lost a record completes as failed instead.
+   */
+  private emitTurnCompleted(turn: Record<string, unknown>): void {
+    this.turnCompleted = true;
+    let finalTurn = turn;
+    if (turn.status === "completed" && this.unparsedLines > 0) {
+      const withoutOutput = { ...turn };
+      delete withoutOutput.output;
+      finalTurn = {
+        ...withoutOutput,
+        status: "failed",
+        error: {
+          message: `exec output stream lost ${this.unparsedLines} unparseable record(s); the agent's final message cannot be determined`,
+        },
+      };
+    }
+    this.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: this.threadId,
+      turn: finalTurn,
+    });
+    this.turnId = null;
+  }
+
+  /** Record an override this turn asked for that its command line cannot carry. */
+  private recordUnappliedOverride(name: string, reason: string): void {
+    this._unappliedTurnOverrides.push(name);
+    console.error(`[exec-client] ${name} override not applied: ${reason}`);
   }
 
   private emitNotification(method: string, params: unknown): void {

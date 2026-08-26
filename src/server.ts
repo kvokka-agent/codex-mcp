@@ -74,11 +74,14 @@ export function createServer(
     version: SERVER_VERSION,
   });
 
-  // Read-only MCP resources (helpful docs / metadata)
+  // Read-only MCP resources (helpful docs / metadata).
+  // The manager builds an AppServerClient when no factory is injected, so the mode is known
+  // without a probe; an injected factory can build anything, and only its caller knows what.
   registerResources(server, {
     version: SERVER_VERSION,
     sessionManager,
-    clientMode: options?.clientMode,
+    clientMode: options?.clientMode ?? (options?.createClient ? "unknown" : "app-server"),
+    diskPersistence: options?.persistence !== undefined,
   });
 
   const publicSessionInfoSchema = z.object({
@@ -103,7 +106,9 @@ export function createServer(
     requested: z.enum(["background", "foreground"]),
     effective: z.enum(["background", "foreground"]),
     waitForResultMs: z.number().int().positive().optional(),
-    fallbackReason: z.enum(["wait_for_result_timeout", "interactive_poll_required"]).optional(),
+    fallbackReason: z
+      .enum(["wait_for_result_timeout", "interactive_poll_required", "wait_refused"])
+      .optional(),
   });
 
   const interactionStateSchema = z.enum(["working", "waiting_input", "finished"]);

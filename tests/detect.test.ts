@@ -96,7 +96,64 @@ describe("detectClientMode", () => {
     await expect(detectClientMode("codex", false, {})).resolves.toBe("exec");
   });
 
-  it("reports exec when the binary cannot be spawned", async () => {
+  it("retries a probe that timed out instead of reading the timeout as an answer", async () => {
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const hanging = fakeProc();
+    const answering = fakeProc();
+    spawnMock
+      .mockImplementationOnce(() => hanging)
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => answering.emit("exit", 0));
+        return answering;
+      });
+
+    const pending = detectClientMode("codex", false, {});
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(killed).toEqual(["SIGTERM"]);
+
+    await expect(pending).resolves.toBe("app-server");
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("retrying once with 10000ms");
+  });
+
+  it("kills both probes and falls back to exec when the binary never answers", async () => {
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    spawnMock.mockImplementation(() => fakeProc());
+
+    const pending = detectClientMode("codex", false, {});
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(pending).resolves.toBe("exec");
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(killed).toEqual(["SIGTERM", "SIGTERM"]);
+
+    // The fallback is reported as a fallback, not as a reading of the binary.
+    const logged = errorSpy.mock.calls.flat().join(" ");
+    expect(logged).toContain("no answer");
+    expect(logged).toContain("probe still running after 10000ms");
+    expect(logged).toContain("CODEX_MCP_MODE");
+    expect(logged).not.toContain("not supported");
+  });
+
+  it("names an unsupported binary differently from a probe that gave no answer", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    procThatExits(2, "", "error: unrecognized subcommand 'app-server'");
+    await expect(detectClientMode("codex", false, {})).resolves.toBe("exec");
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("not supported");
+
+    errorSpy.mockClear();
+    procThatExits(1, "", "permission denied");
+    await expect(detectClientMode("codex", false, {})).resolves.toBe("exec");
+    const logged = errorSpy.mock.calls.flat().join(" ");
+    expect(logged).toContain("no answer");
+    expect(logged).toContain("permission denied");
+  });
+
+  it("reports the spawn failure rather than calling the subcommand unknown", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const proc = fakeProc();
     spawnMock.mockImplementation(() => {
       queueMicrotask(() => proc.emit("error", new Error("ENOENT")));
@@ -104,45 +161,45 @@ describe("detectClientMode", () => {
     });
 
     await expect(detectClientMode("missing-codex", false, {})).resolves.toBe("exec");
-  });
-
-  it("kills the probe and reports exec when it hangs", async () => {
-    vi.useFakeTimers();
-    const proc = fakeProc();
-    spawnMock.mockReturnValue(proc);
-
-    const pending = detectClientMode("codex", false, {});
-    await vi.advanceTimersByTimeAsync(5_000);
-    await expect(pending).resolves.toBe("exec");
-    expect(killed).toEqual(["SIGTERM"]);
-
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(killed).toEqual(["SIGTERM"]);
+    // A binary that cannot run says nothing about app-server, so no retry either.
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const logged = errorSpy.mock.calls.flat().join(" ");
+    expect(logged).toContain("probe process failed to run: ENOENT");
+    expect(logged).not.toContain("not supported");
   });
 
   it("force kills a probe that survives the graceful signal", async () => {
     vi.useFakeTimers();
-    const proc = fakeProc();
-    proc.kill = (signal?: NodeJS.Signals) => {
-      killed.push(signal ?? "SIGTERM");
-      return true;
-    };
-    spawnMock.mockReturnValue(proc);
+    spawnMock.mockImplementation(() => {
+      const proc = fakeProc();
+      proc.kill = (signal?: NodeJS.Signals) => {
+        killed.push(signal ?? "SIGTERM");
+        return true;
+      };
+      return proc;
+    });
 
     const pending = detectClientMode("codex", false, {});
     await vi.advanceTimersByTimeAsync(7_000);
-    await expect(pending).resolves.toBe("exec");
     expect(killed).toEqual(["SIGTERM", "SIGKILL"]);
+
+    await vi.advanceTimersByTimeAsync(12_000);
+    await expect(pending).resolves.toBe("exec");
+    expect(killed).toEqual(["SIGTERM", "SIGKILL", "SIGTERM", "SIGKILL"]);
   });
 
   it("ignores a late exit after the probe already settled", async () => {
     vi.useFakeTimers();
-    const proc = fakeProc();
-    spawnMock.mockReturnValue(proc);
+    const first = fakeProc();
+    const second = fakeProc();
+    spawnMock.mockImplementationOnce(() => first).mockImplementationOnce(() => second);
 
     const pending = detectClientMode("codex", false, {});
     await vi.advanceTimersByTimeAsync(5_000);
-    proc.emit("exit", 0);
+    // The timed-out probe exits cleanly after the retry already started; its
+    // answer belongs to a settled probe and must not decide the mode.
+    first.emit("exit", 0);
+    await vi.advanceTimersByTimeAsync(10_000);
 
     await expect(pending).resolves.toBe("exec");
   });

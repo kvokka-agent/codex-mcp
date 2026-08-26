@@ -35,6 +35,15 @@ type RuntimeMetadataProvider = Pick<
   "getActiveSessionCount" | "getObservedDefaultModel"
 >;
 
+export interface ResourceDeps {
+  version: string;
+  sessionManager: RuntimeMetadataProvider;
+  /** Backend the server drives, as the caller resolved it; `unknown` when it could not. */
+  clientMode: string;
+  /** Whether the state directory was claimed at startup, so session history outlives a restart. */
+  diskPersistence: boolean;
+}
+
 interface ResourceCatalogEntry {
   key: keyof typeof RESOURCE_URIS;
   name: string;
@@ -127,6 +136,14 @@ function asTextResource(uri: URL, text: string, mimeType: string): ReadResourceR
   };
 }
 
+/**
+ * The version the local codex CLI printed, or null when it printed no version.
+ *
+ * `spawnSync` reports a failed launch in `run.error` and a non-zero exit in `run.status`, and a
+ * codex build that does not know `--version` writes its usage error to stderr with exit 1. Only a
+ * successful run whose output carries a version number answers this question; anything else is
+ * "not detected", never the first word of an error message.
+ */
 function detectCodexCliVersion(timeoutMs = 1500): string | null {
   try {
     const executable = getDefaultCodexExecutable();
@@ -135,10 +152,10 @@ function detectCodexCliVersion(timeoutMs = 1500): string | null {
       timeout: timeoutMs,
       windowsHide: true,
     });
+    if (run.error || run.status !== 0) return null;
     const combined = `${run.stdout ?? ""}\n${run.stderr ?? ""}`.trim();
-    if (!combined) return null;
     const versionToken = combined.match(/v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/);
-    if (!versionToken) return combined.split(/\s+/)[0] ?? null;
+    if (!versionToken) return null;
     return versionToken[0].replace(/^v/, "");
   } catch {
     return null;
@@ -444,6 +461,12 @@ function buildDelegationGuideText(): string {
     "```",
     "If the task finishes within the timeout, the result is returned directly. Otherwise the response falls back to polling metadata (including `sessionId` and `threadId`).",
     "",
+    "When no result comes back, `execution.fallbackReason` says why the wait ended:",
+    "",
+    "- `wait_for_result_timeout`: the wait budget ran out while the turn was still running.",
+    "- `interactive_poll_required`: the turn asked for an approval or user input, which needs another tool call.",
+    "- `wait_refused`: the session already had the maximum number of waiters, so this call did not wait at all; it may return long before the requested budget.",
+    "",
     "**Constraint:** `waitForResult` blocks your tool call. If the task hits `waiting_approval`, you cannot respond — the timeout will always expire. Only use with `approvalPolicy: 'on-failure'` or `'never'`.",
     "",
     "## Async mode: poll loop",
@@ -483,13 +506,15 @@ function buildDelegationGuideText(): string {
   ].join("\n");
 }
 
-function buildCompatReport(
-  deps: { version: string; sessionManager: RuntimeMetadataProvider },
-  codexCliVersion: string | null
-): string {
+function buildCompatReport(deps: ResourceDeps, codexCliVersion: string | null): string {
   const runtimeWarnings: string[] = [];
   if (!codexCliVersion) {
     runtimeWarnings.push("Unable to detect local codex CLI version from PATH.");
+  }
+  if (!deps.diskPersistence) {
+    runtimeWarnings.push(
+      "Disk persistence is off: sessions are held in memory only and are lost when the server restarts."
+    );
   }
   return JSON.stringify(
     {
@@ -505,14 +530,15 @@ function buildCompatReport(
         pollOptionsBase: true,
         maxBytesTruncation: true,
         compatWarnings: true,
-        diskPersistence: true,
+        diskPersistence: deps.diskPersistence,
         diskResume: false,
         dynamicTools: false,
         toolPermissionControl: false,
       },
       featureNotes: {
-        diskPersistence:
-          "Session metadata, events and results are written under the state directory and read back at startup, so a restart keeps session history readable.",
+        diskPersistence: deps.diskPersistence
+          ? "Session metadata, events and results are written under the state directory and read back at startup, so a restart keeps session history readable."
+          : "The state directory was not claimed at startup — another codex-mcp holds its lock, or it could not be written. Sessions are held in memory only, and a restart drops their history.",
         diskResume:
           "A recovered session has no codex process behind it. `codex_reply` on it fails with SESSION_NOT_FOUND, and a session that was running at shutdown comes back as status `error` with a restart reason.",
       },
@@ -544,7 +570,7 @@ function buildCompatReport(
 
 export function registerResources(
   server: Pick<McpServer, "registerResource">,
-  deps: { version: string; sessionManager: RuntimeMetadataProvider; clientMode?: string }
+  deps: ResourceDeps
 ): void {
   let codexCliVersionCache: string | null | undefined;
   const getCodexCliVersion = (): string | null => {
@@ -574,7 +600,7 @@ export function registerResources(
             name: "codex-mcp",
             version: deps.version,
             codexCliVersion: getCodexCliVersion(),
-            clientMode: deps.clientMode ?? "app-server",
+            clientMode: deps.clientMode,
             node: process.version,
             platform: process.platform,
             arch: process.arch,

@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ExecClient } from "../src/app-server/exec-client.js";
@@ -118,6 +119,27 @@ describe("ExecClient lifecycle", () => {
     expect(client.childPid).toBeUndefined();
   });
 
+  it("reports every process it spawns, one per turn", async () => {
+    const client = new ExecClient();
+    const spawns: Array<{ pid: number; spawnedAt: string }> = [];
+    client.on("spawn", (pid: number, spawnedAt: string) => spawns.push({ pid, spawnedAt }));
+
+    await client.start({});
+    await client.threadStart({ cwd: "/work/repo" });
+    // No process exists yet: exec runs one per turn.
+    expect(spawns).toEqual([]);
+
+    await client.turnStart({ threadId: "t", input: [{ type: "text", text: "one" }] });
+    const first = lastProc();
+    expect(spawns.map((s) => s.pid)).toEqual([first.pid]);
+    expect(Number.isNaN(Date.parse(spawns[0]!.spawnedAt))).toBe(false);
+
+    emitLine(first, { type: "thread.started", thread_id: "thread_real" });
+    await client.turnStart({ threadId: "t", input: [{ type: "text", text: "two" }] });
+    expect(spawns.map((s) => s.pid)).toEqual([first.pid, lastProc().pid]);
+    expect(client.childPid).toBe(lastProc().pid);
+  });
+
   it("mints a distinct synthetic thread id per thread", async () => {
     const client = new ExecClient();
     await client.start({});
@@ -136,7 +158,9 @@ describe("ExecClient lifecycle", () => {
     await expect(client.threadResume({ threadId: "t" })).rejects.toThrow(
       /Error \[EXEC_NOT_SUPPORTED\]: threadResume is not supported/
     );
-    await expect(client.threadBackgroundTerminalsClean({ threadId: "t" })).resolves.toEqual({});
+    await expect(client.threadBackgroundTerminalsClean({ threadId: "t" })).rejects.toThrow(
+      /Error \[EXEC_NOT_SUPPORTED\]: threadBackgroundTerminalsClean is not supported/
+    );
   });
 
   it("refuses every operation after destroy", async () => {
@@ -160,11 +184,15 @@ describe("ExecClient lifecycle", () => {
     );
   });
 
-  it("accepts server responses as no-ops", async () => {
+  it("refuses to answer a server request it can never have raised", async () => {
     const { client } = await startedClient();
     client.onServerRequest(() => {});
-    expect(() => client.respondToServer(1, {})).not.toThrow();
-    expect(() => client.respondErrorToServer(1, -32000, "nope")).not.toThrow();
+    expect(() => client.respondToServer(1, {})).toThrow(
+      /Error \[EXEC_NOT_SUPPORTED\]: cannot respond to server request id=1/
+    );
+    expect(() => client.respondErrorToServer(1, -32000, "nope")).toThrow(
+      /Error \[EXEC_NOT_SUPPORTED\]: cannot respond to server request id=1/
+    );
   });
 });
 
@@ -338,6 +366,68 @@ describe("ExecClient argument building", () => {
     expect((params as { error: { message: string } }).error.message).toContain(
       "multi-turn context unavailable"
     );
+  });
+
+  it("refuses the turn when the output schema cannot be written to disk", async () => {
+    // Every platform's os.tmpdir() reads one of these, so the temp dir the
+    // client writes into does not exist and mkdtempSync fails.
+    for (const key of ["TMPDIR", "TMP", "TEMP"]) {
+      process.env[key] = join("/", "no-such-dir-for-codex-mcp-tests");
+    }
+
+    const client = new ExecClient();
+    await client.start({});
+    await client.threadStart({ cwd: "/x" });
+
+    await expect(
+      client.turnStart({
+        threadId: "t",
+        input: [{ type: "text", text: "p" }],
+        outputSchema: { type: "object" },
+      })
+    ).rejects.toThrow(/Error \[INTERNAL\]: Failed to write the output schema/);
+    // The turn the caller asked to be schema-constrained never ran.
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("names the overrides the resume command line could not carry", async () => {
+    const { client } = await startedClient();
+    await client.turnStart({
+      threadId: "t",
+      input: [{ type: "text", text: "one" }],
+      sandboxPolicy: { type: "workspaceWrite" },
+      cwd: "/work/repo",
+    });
+    emitLine(lastProc(), { type: "thread.started", thread_id: "cli_thread_7" });
+    // The first turn carries every override on its command line.
+    expect(client.unappliedTurnOverrides).toEqual([]);
+
+    await client.turnStart({
+      threadId: "t",
+      input: [{ type: "text", text: "two" }],
+      sandboxPolicy: { type: "readOnly" },
+      cwd: "/other",
+      outputSchema: { type: "object" },
+      model: "gpt-5-codex",
+    });
+
+    expect(spawnArgs(1)).not.toContain("-s");
+    expect(client.unappliedTurnOverrides).toEqual(["sandbox", "cwd", "outputSchema"]);
+  });
+
+  it("clears the unapplied overrides of the previous turn", async () => {
+    const { client } = await startedClient();
+    await client.turnStart({ threadId: "t", input: [{ type: "text", text: "one" }] });
+    emitLine(lastProc(), { type: "thread.started", thread_id: "cli_thread_7" });
+    await client.turnStart({
+      threadId: "t",
+      input: [{ type: "text", text: "two" }],
+      sandboxPolicy: { type: "readOnly" },
+    });
+    expect(client.unappliedTurnOverrides).toEqual(["sandbox"]);
+
+    await client.turnStart({ threadId: "t", input: [{ type: "text", text: "three" }] });
+    expect(client.unappliedTurnOverrides).toEqual([]);
   });
 
   it("kills the previous turn process before starting the next", async () => {
@@ -636,6 +726,30 @@ describe("ExecClient process exit", () => {
     expect(client.childPid).toBeUndefined();
   });
 
+  it("fails the turn when a clean exit follows a stream it could not read", async () => {
+    const { notifications, proc, turnId } = await runningTurn();
+    emitLine(proc, { type: "some_future_event_type" });
+    proc.emit("exit", 0, null);
+
+    const completion = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const turn = (completion[1] as { turn: Record<string, unknown> }).turn;
+    expect(turn.id).toBe(turnId);
+    expect(turn.status).toBe("failed");
+    expect(turn.output).toBeUndefined();
+    expect(String((turn.error as { message: string }).message)).toContain(
+      "without emitting any event this client understands (1 unmapped event(s), 0 unparseable record(s))"
+    );
+    expect(notifications).toContainEqual([
+      Methods.ERROR,
+      {
+        threadId: expect.any(String),
+        turnId,
+        error: { message: expect.stringContaining("the turn outcome is unknown") },
+        willRetry: false,
+      },
+    ]);
+  });
+
   it("reports an error and a failed turn when the process exits non-zero", async () => {
     const { notifications, proc, turnId } = await runningTurn();
     proc.emit("exit", 3, null);
@@ -679,6 +793,53 @@ describe("ExecClient process exit", () => {
         },
       },
     ]);
+  });
+
+  it("fails a completed turn whose stream lost a record instead of reporting an older message", async () => {
+    const { notifications, proc, turnId } = await runningTurn();
+    emitLine(proc, { type: "item.completed", item: { type: "agent_message", text: "draft" } });
+    // The final message of the turn arrives truncated and is lost.
+    proc.stdout.emit("data", Buffer.from('{"type":"item.completed","item":{"type":"agent_\n'));
+    emitLine(proc, { type: "turn.completed" });
+
+    const completion = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const turn = (completion[1] as { turn: Record<string, unknown> }).turn;
+    expect(turn.id).toBe(turnId);
+    expect(turn.status).toBe("failed");
+    expect(turn).not.toHaveProperty("output");
+    expect(String((turn.error as { message: string }).message)).toContain(
+      "lost 1 unparseable record(s)"
+    );
+  });
+
+  it("keeps the CLI's own failure when the stream also lost a record", async () => {
+    const { notifications, proc } = await runningTurn();
+    proc.stdout.emit("data", Buffer.from('{"type":"item.compl\n'));
+    emitLine(proc, { type: "turn.failed", error: { message: "model exploded" } });
+
+    const completion = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    expect((completion[1] as { turn: Record<string, unknown> }).turn).toMatchObject({
+      status: "failed",
+      error: { message: "model exploded" },
+    });
+  });
+
+  it("counts the lost records of one turn only", async () => {
+    const { client, notifications, proc } = await runningTurn();
+    proc.stdout.emit("data", Buffer.from('{"type":"item.compl\n'));
+    emitLine(proc, { type: "thread.started", thread_id: "cli_thread_7" });
+    emitLine(proc, { type: "turn.completed" });
+
+    await client.turnStart({ threadId: "t", input: [{ type: "text", text: "next" }] });
+    const second = lastProc();
+    emitLine(second, { type: "item.completed", item: { type: "agent_message", text: "clean" } });
+    emitLine(second, { type: "turn.completed" });
+
+    const completions = notifications.filter(([m]) => m === Methods.TURN_COMPLETED);
+    expect((completions[1]![1] as { turn: Record<string, unknown> }).turn).toMatchObject({
+      status: "completed",
+      output: "clean",
+    });
   });
 
   it("does not synthesize a second completion after turn.completed", async () => {

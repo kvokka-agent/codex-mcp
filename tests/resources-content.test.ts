@@ -10,7 +10,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
  */
 const spawnState = vi.hoisted(() => ({
   calls: [] as Array<{ command: string; args: string[] }>,
-  impl: (() => ({ stdout: "codex-cli 0.52.0", stderr: "" })) as (
+  impl: (() => ({ status: 0, stdout: "codex-cli 0.52.0", stderr: "" })) as (
     command: string,
     args: string[]
   ) => unknown,
@@ -111,50 +111,73 @@ class StubCodexClient extends EventEmitter {
   onServerRequest(): void {}
 }
 
+type OpenedServer = {
+  server: Awaited<ReturnType<typeof createServer>>["server"];
+  docs: Map<string, string>;
+  listedResources: Array<Record<string, unknown>>;
+  tools: Map<string, { inputSchema?: JsonSchema; outputSchema?: JsonSchema }>;
+};
+
+/** Everything a real MCP client can read off a server built with `options`. */
+async function openServer(options: Parameters<typeof createServer>[1]): Promise<OpenedServer> {
+  const created = createServer(process.cwd(), options);
+  const handlers = (
+    created.server as unknown as {
+      server: {
+        _requestHandlers: Map<
+          string,
+          (req: unknown, extra: unknown) => Promise<Record<string, never>>
+        >;
+      };
+    }
+  ).server._requestHandlers;
+
+  const call = async <T>(method: string, params: Record<string, unknown>): Promise<T> =>
+    (await handlers.get(method)!({ jsonrpc: "2.0", id: 1, method, params }, {})) as unknown as T;
+
+  const resourceList = await call<{ resources: Array<Record<string, unknown>> }>(
+    "resources/list",
+    {}
+  );
+
+  const docs = new Map<string, string>();
+  for (const resource of resourceList.resources) {
+    const read = await call<{ contents: Array<{ uri: string; text: string }> }>("resources/read", {
+      uri: resource.uri,
+    });
+    docs.set(String(resource.uri), read.contents[0].text);
+  }
+
+  const toolList = await call<{ tools: Array<Record<string, unknown>> }>("tools/list", {});
+  return {
+    server: created.server,
+    docs,
+    listedResources: resourceList.resources,
+    tools: new Map(
+      toolList.tools.map((tool) => [
+        String(tool.name),
+        tool as { inputSchema?: JsonSchema; outputSchema?: JsonSchema },
+      ])
+    ),
+  };
+}
+
 describe("resource documents served over MCP", () => {
   let server: Awaited<ReturnType<typeof createServer>>["server"];
   let docs: Map<string, string>;
   let listedResources: Array<Record<string, unknown>>;
-  let tools: Map<string, { inputSchema?: JsonSchema }>;
+  let tools: Map<string, { inputSchema?: JsonSchema; outputSchema?: JsonSchema }>;
   let allText: string;
 
   beforeAll(async () => {
-    const created = createServer(process.cwd(), { disableCleanup: true });
-    server = created.server;
-    const handlers = (
-      server as unknown as {
-        server: {
-          _requestHandlers: Map<
-            string,
-            (req: unknown, extra: unknown) => Promise<Record<string, never>>
-          >;
-        };
-      }
-    ).server._requestHandlers;
-
-    const call = async <T>(method: string, params: Record<string, unknown>): Promise<T> =>
-      (await handlers.get(method)!({ jsonrpc: "2.0", id: 1, method, params }, {})) as unknown as T;
-
-    const resourceList = await call<{ resources: Array<Record<string, unknown>> }>(
-      "resources/list",
-      {}
-    );
-    listedResources = resourceList.resources;
-
-    docs = new Map();
-    for (const resource of listedResources) {
-      const read = await call<{ contents: Array<{ uri: string; text: string }> }>(
-        "resources/read",
-        { uri: resource.uri }
-      );
-      docs.set(String(resource.uri), read.contents[0].text);
-    }
+    // No persistence adapter: this server keeps sessions in memory only, and the documents
+    // it serves have to say so.
+    const opened = await openServer({ disableCleanup: true });
+    server = opened.server;
+    docs = opened.docs;
+    listedResources = opened.listedResources;
+    tools = opened.tools;
     allText = Array.from(docs.values()).join("\n");
-
-    const toolList = await call<{ tools: Array<Record<string, unknown>> }>("tools/list", {});
-    tools = new Map(
-      toolList.tools.map((tool) => [String(tool.name), tool as { inputSchema?: JsonSchema }])
-    );
   });
 
   afterAll(async () => {
@@ -201,7 +224,11 @@ describe("resource documents served over MCP", () => {
     };
 
     expect(compat.toolCounts.core).toBe(tools.size);
-    expect(compat.runtimeWarnings).toEqual([]);
+    // The stubbed CLI answers `--version`, so the only warning left is the one this server earns:
+    // it was built without a persistence adapter.
+    expect(compat.runtimeWarnings).toEqual([
+      "Disk persistence is off: sessions are held in memory only and are lost when the server restarts.",
+    ]);
   });
 
   it("names every registered tool somewhere in the docs", () => {
@@ -384,10 +411,18 @@ describe("resource documents served over MCP", () => {
   });
 
   it("reports disk flags the recovered-session behavior backs up", async () => {
-    const compat = JSON.parse(docs.get(RESOURCE_URIS.compatReport)!) as {
+    // The flag follows the adapter the server was built with, so the report is read off a
+    // server that claimed a state directory.
+    const withDisk = await openServer({
+      disableCleanup: true,
+      persistence: {} as never,
+    });
+    const compat = JSON.parse(withDisk.docs.get(RESOURCE_URIS.compatReport)!) as {
       features: Record<string, boolean>;
       featureNotes: Record<string, string>;
+      runtimeWarnings: string[];
     };
+    await withDisk.server.close();
     const now = new Date().toISOString();
     const manager = new SessionManager({
       disableCleanup: true,
@@ -418,6 +453,8 @@ describe("resource documents served over MCP", () => {
 
       // The session survived the restart as history: it is listed and carries its restart reason.
       expect(compat.features.diskPersistence).toBe(true);
+      expect(compat.featureNotes.diskPersistence).toContain("read back at startup");
+      expect(compat.runtimeWarnings).toEqual([]);
       expect(manager.listSessions().map((s) => s.sessionId)).toContain("sess_recovered");
       expect(compat.featureNotes.diskResume).toContain(`status \`${recovered.status}\``);
 
@@ -428,6 +465,65 @@ describe("resource documents served over MCP", () => {
       expect(compat.featureNotes.diskResume).toContain(ErrorCode.SESSION_NOT_FOUND);
     } finally {
       manager.destroy();
+    }
+  });
+
+  it("denies disk persistence when the server holds no state directory", () => {
+    const compat = JSON.parse(docs.get(RESOURCE_URIS.compatReport)!) as {
+      features: Record<string, boolean>;
+      featureNotes: Record<string, string>;
+    };
+
+    expect(compat.features.diskPersistence).toBe(false);
+    expect(compat.featureNotes.diskPersistence).toContain("memory only");
+    expect(compat.featureNotes.diskPersistence).toContain("restart drops their history");
+  });
+
+  it("names the backend the server drives instead of assuming app-server", async () => {
+    // No injected factory: SessionManager builds an AppServerClient, so the mode is known.
+    expect(
+      (JSON.parse(docs.get(RESOURCE_URIS.serverInfo)!) as { clientMode: string }).clientMode
+    ).toBe("app-server");
+
+    const injected = await openServer({
+      disableCleanup: true,
+      createClient: () => new StubCodexClient() as never,
+    });
+    const declared = await openServer({
+      disableCleanup: true,
+      clientMode: "exec",
+      createClient: () => new StubCodexClient() as never,
+    });
+
+    try {
+      // An injected factory can build any client; the server is not told which, so it says so.
+      expect(
+        (JSON.parse(injected.docs.get(RESOURCE_URIS.serverInfo)!) as { clientMode: string })
+          .clientMode
+      ).toBe("unknown");
+      expect(
+        (JSON.parse(declared.docs.get(RESOURCE_URIS.serverInfo)!) as { clientMode: string })
+          .clientMode
+      ).toBe("exec");
+    } finally {
+      await injected.server.close();
+      await declared.server.close();
+    }
+  });
+
+  it("documents every execution.fallbackReason the codex tool may answer with", () => {
+    const guide = docs.get(RESOURCE_URIS.delegationGuide)!;
+    const execution = tools.get("codex")!.outputSchema!.properties!.execution as {
+      properties: { fallbackReason: { enum?: string[]; anyOf?: Array<{ enum?: string[] }> } };
+    };
+    const field = execution.properties.fallbackReason;
+    const reasons = field.enum ?? field.anyOf?.flatMap((entry) => entry.enum ?? []) ?? [];
+
+    expect(reasons.length).toBeGreaterThan(0);
+    for (const reason of reasons) {
+      expect(guide, `fallbackReason absent from the delegation guide: ${reason}`).toContain(
+        `- \`${reason}\`:`
+      );
     }
   });
 
@@ -492,6 +588,7 @@ describe("runtime metadata in server-info and compat-report", () => {
     activeSessions?: () => number;
     observedModel?: string | null;
     clientMode?: string;
+    diskPersistence?: boolean;
   }) {
     const reads = new Map<string, () => { contents: Array<{ text: string; mimeType: string }> }>();
     registerResources(
@@ -508,7 +605,8 @@ describe("runtime metadata in server-info and compat-report", () => {
       } as never,
       {
         version: deps.version ?? "0.0.0-test",
-        clientMode: deps.clientMode,
+        clientMode: deps.clientMode ?? "app-server",
+        diskPersistence: deps.diskPersistence ?? true,
         sessionManager: {
           getActiveSessionCount: deps.activeSessions ?? (() => 0),
           getObservedDefaultModel: () => deps.observedModel ?? null,
@@ -539,19 +637,48 @@ describe("runtime metadata in server-info and compat-report", () => {
   });
 
   it("strips a leading v and keeps prerelease suffixes", () => {
-    spawnState.impl = () => ({ stdout: "", stderr: "codex-cli v1.2.3-alpha.1\n" });
+    spawnState.impl = () => ({ status: 0, stdout: "", stderr: "codex-cli v1.2.3-alpha.1\n" });
 
     expect(register({}).json(RESOURCE_URIS.serverInfo).codexCliVersion).toBe("1.2.3-alpha.1");
   });
 
-  it("falls back to the first token when the output carries no version number", () => {
-    spawnState.impl = () => ({ stdout: "unknown-build (dev)\n", stderr: "" });
+  it("reports no version when the CLI output carries no version number", () => {
+    spawnState.impl = () => ({ status: 0, stdout: "unknown-build (dev)\n", stderr: "" });
 
-    expect(register({}).json(RESOURCE_URIS.serverInfo).codexCliVersion).toBe("unknown-build");
+    expect(register({}).json(RESOURCE_URIS.serverInfo).codexCliVersion).toBeNull();
+  });
+
+  it("reports no version when the CLI rejects --version instead of answering it", () => {
+    // A codex build without `--version` prints its usage error and exits non-zero; the first
+    // word of that message is not a version, and a caller must see the detection failure.
+    spawnState.impl = () => ({
+      status: 1,
+      stdout: "",
+      stderr: "error: unrecognized subcommand '--version'\n",
+    });
+    const resources = register({});
+
+    expect(resources.json(RESOURCE_URIS.serverInfo).codexCliVersion).toBeNull();
+    expect(resources.json(RESOURCE_URIS.compatReport).runtimeWarnings).toContain(
+      "Unable to detect local codex CLI version from PATH."
+    );
+  });
+
+  it("reports no version when the probe was killed before it finished answering", () => {
+    // A spawnSync that hits its timeout kills the child: it reports the error, leaves status
+    // null, and hands back whatever the process had written by then.
+    spawnState.impl = () => ({
+      status: null,
+      stdout: "codex-cli 9.9.9 (parti",
+      stderr: "",
+      error: new Error("spawnSync codex ETIMEDOUT"),
+    });
+
+    expect(register({}).json(RESOURCE_URIS.serverInfo).codexCliVersion).toBeNull();
   });
 
   it("reports no version and warns in the compat report when the CLI prints nothing", () => {
-    spawnState.impl = () => ({ stdout: undefined, stderr: undefined });
+    spawnState.impl = () => ({ status: 0, stdout: undefined, stderr: undefined });
     const resources = register({});
 
     expect(resources.json(RESOURCE_URIS.serverInfo).codexCliVersion).toBeNull();
@@ -568,9 +695,33 @@ describe("runtime metadata in server-info and compat-report", () => {
     expect(register({}).json(RESOURCE_URIS.serverInfo).codexCliVersion).toBeNull();
   });
 
-  it("defaults clientMode to app-server and echoes an explicit mode", () => {
-    expect(register({}).json(RESOURCE_URIS.serverInfo).clientMode).toBe("app-server");
+  it("echoes the client mode it was given without inventing one", () => {
     expect(register({ clientMode: "exec" }).json(RESOURCE_URIS.serverInfo).clientMode).toBe("exec");
+    expect(register({ clientMode: "unknown" }).json(RESOURCE_URIS.serverInfo).clientMode).toBe(
+      "unknown"
+    );
+  });
+
+  it("mirrors the persistence state it was given in flag, note and warning", () => {
+    const off = register({ diskPersistence: false }).json(RESOURCE_URIS.compatReport) as never as {
+      features: { diskPersistence: boolean };
+      featureNotes: { diskPersistence: string };
+      runtimeWarnings: string[];
+    };
+    const on = register({ diskPersistence: true }).json(RESOURCE_URIS.compatReport) as never as {
+      features: { diskPersistence: boolean };
+      featureNotes: { diskPersistence: string };
+      runtimeWarnings: string[];
+    };
+
+    expect(off.features.diskPersistence).toBe(false);
+    expect(off.featureNotes.diskPersistence).toContain("memory only");
+    expect(off.runtimeWarnings).toContain(
+      "Disk persistence is off: sessions are held in memory only and are lost when the server restarts."
+    );
+    expect(on.features.diskPersistence).toBe(true);
+    expect(on.featureNotes.diskPersistence).toContain("read back at startup");
+    expect(on.runtimeWarnings).toEqual([]);
   });
 
   it("marks the default model source unknown until a session reports one", () => {

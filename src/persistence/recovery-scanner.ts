@@ -9,6 +9,8 @@
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+import { isMissing } from "./fs-errors.js";
+
 export const SCHEMA_VERSION = 1;
 
 export interface RecoveredSessionMeta {
@@ -40,6 +42,11 @@ export interface RecoveredSession {
   events: Array<{ seq: number; [key: string]: unknown }>;
   /** Corrupt lines skipped in the middle of events.jsonl — a torn tail is not counted */
   corruptEventLines?: number;
+  /**
+   * Set when meta.json was there and unusable, so `meta` carries what the directory
+   * itself says rather than what the session wrote.
+   */
+  metaDamaged?: true;
   /** Highest sequence number found in events */
   lastSeq: number;
   /** Result from result.json if present */
@@ -86,50 +93,106 @@ function parseEventsJsonl(filePath: string): ParsedEventsJsonl {
   return { events: events.sort((a, b) => a.seq - b.seq), corruptLines };
 }
 
-function readJsonSafe<T>(filePath: string): T | null {
-  if (!existsSync(filePath)) return null;
+/** What one JSON file of a session directory turned out to be. */
+type JsonRead<T> =
+  | { state: "absent" }
+  /** The file is there and its content is not JSON — a write torn by a cut power. */
+  | { state: "damaged" }
+  | { state: "ok"; value: T };
+
+/**
+ * Read one JSON file of a session directory.
+ *
+ * A file that is not there, and one a concurrent prune removed, hold nothing. A file that
+ * is there and cannot be read is neither: it throws, so the caller of the scan decides,
+ * instead of the session being recovered as if the file had never been written.
+ */
+function readJson<T>(filePath: string): JsonRead<T> {
+  let raw: string;
   try {
-    return JSON.parse(readFileSync(filePath, "utf-8")) as T;
-  } catch {
-    return null;
+    raw = readFileSync(filePath, "utf-8");
+  } catch (err) {
+    if (isMissing(err)) return { state: "absent" };
+    throw err;
   }
+  try {
+    return { state: "ok", value: JSON.parse(raw) as T };
+  } catch {
+    return { state: "damaged" };
+  }
+}
+
+/** result.json and pid.json say nothing about the session when they are absent or torn. */
+function readJsonSafe<T>(filePath: string): T | null {
+  const read = readJson<T>(filePath);
+  return read.state === "ok" ? read.value : null;
+}
+
+/**
+ * The metadata of a session whose meta.json is there and unusable, built from what the
+ * directory itself says: the name it was written under, and its own mtime.
+ *
+ * `status` states the ignorance rather than guessing a session state — the SessionManager
+ * turns a status it does not know into `error`, which is what an unrestorable session is.
+ */
+function metaFromDirectory(sessionId: string, mtimeMs: number): RecoveredSessionMeta {
+  const at = new Date(mtimeMs).toISOString();
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    sessionId,
+    status: "unknown",
+    createdAt: at,
+    lastActiveAt: at,
+    cancelledReason: "meta.json on disk is unusable",
+  };
 }
 
 /**
  * Scan `sessionsDir` for persisted sessions and return recovered metadata.
  *
+ * A directory that is not there holds no sessions. A directory that is there and cannot
+ * be listed throws: an empty result would hand the caller a state directory that reads
+ * as freshly created, and the sessions it holds would be written over.
+ *
  * @param sessionsDir - Path to STATE_DIR/sessions/
  * @param maxEvents - Max events to load per session (default: 500, from tail)
  */
 export function scanRecoverableSessions(sessionsDir: string, maxEvents = 500): RecoveredSession[] {
-  if (!existsSync(sessionsDir)) return [];
+  // throwIfNoEntry: false — a state directory the previous run never created holds no
+  // sessions. existsSync cannot stand here: it answers false for a directory it may not
+  // stat, which is the very case that must not read as "no sessions".
+  if (!statSync(sessionsDir, { throwIfNoEntry: false })) return [];
 
   const results: RecoveredSession[] = [];
-  let entries: string[];
-  try {
-    entries = readdirSync(sessionsDir);
-  } catch {
-    return [];
-  }
+  const entries = readdirSync(sessionsDir);
 
   for (const entry of entries) {
     const sessionDir = join(sessionsDir, entry);
-    try {
-      if (!statSync(sessionDir).isDirectory()) continue;
-    } catch {
-      continue;
-    }
+    // throwIfNoEntry: false — an entry removed between the listing and this call, and a
+    // dangling symlink, are both nothing to recover. Any other stat failure throws.
+    const stat = statSync(sessionDir, { throwIfNoEntry: false });
+    if (!stat?.isDirectory()) continue;
 
-    const meta = readJsonSafe<RecoveredSessionMeta>(join(sessionDir, "meta.json"));
-    if (!meta || !meta.sessionId) continue;
+    const metaRead = readJson<RecoveredSessionMeta>(join(sessionDir, "meta.json"));
+    // A directory with no meta.json is a session that wrote none: nothing to recover.
+    if (metaRead.state === "absent") continue;
 
-    // Schema version check
-    if (meta.schemaVersion !== undefined && meta.schemaVersion > SCHEMA_VERSION) {
+    const stored = metaRead.state === "ok" && metaRead.value.sessionId ? metaRead.value : null;
+    if (!stored) {
+      // Dropping the directory would take its pid.json with it, and the orphan reaper
+      // would leave that session's codex process running for good.
       console.error(
-        `[recovery] Skipping session ${meta.sessionId}: schema version ${meta.schemaVersion} > ${SCHEMA_VERSION}`
+        `[recovery] Session ${entry}: meta.json is unusable — recovering the directory` +
+          ` without it, so its pid.json is still read`
+      );
+    } else if (stored.schemaVersion !== undefined && stored.schemaVersion > SCHEMA_VERSION) {
+      console.error(
+        `[recovery] Skipping session ${stored.sessionId}: schema version ${stored.schemaVersion} > ${SCHEMA_VERSION}`
       );
       continue;
     }
+
+    const meta = stored ?? metaFromDirectory(entry, stat.mtimeMs);
 
     const parsed = parseEventsJsonl(join(sessionDir, "events.jsonl"));
     if (parsed.corruptLines > 0) {
@@ -152,6 +215,7 @@ export function scanRecoverableSessions(sessionsDir: string, maxEvents = 500): R
       meta,
       events,
       corruptEventLines: parsed.corruptLines,
+      ...(stored ? {} : { metaDamaged: true as const }),
       lastSeq,
       result,
       pidInfo,

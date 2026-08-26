@@ -8,7 +8,11 @@ const { fsFaults } = vi.hoisted(() => ({ fsFaults: new Map<string, string>() }))
  * filesystem. A POSIX mode cannot stand in for this: Windows ignores the mode bits, so a
  * `chmod 0o500` directory stays writable and the error branch under test never runs there.
  */
-function failFs(call: "openSync" | "readdirSync" | "rmSync", path: string, code = "EACCES"): void {
+function failFs(
+  call: "openSync" | "readdirSync" | "readFileSync" | "rmSync" | "statSync",
+  path: string,
+  code = "EACCES"
+): void {
   fsFaults.set(`${call}\0${path}`, code);
 }
 
@@ -34,10 +38,18 @@ vi.mock("node:fs", async () => {
       failIfInjected("readdirSync", args[0]);
       return actual.readdirSync(...args);
     }) as typeof actual.readdirSync,
+    readFileSync: ((...args: Parameters<typeof actual.readFileSync>) => {
+      failIfInjected("readFileSync", args[0]);
+      return actual.readFileSync(...args);
+    }) as typeof actual.readFileSync,
     rmSync: ((...args: Parameters<typeof actual.rmSync>) => {
       failIfInjected("rmSync", args[0]);
       return actual.rmSync(...args);
     }) as typeof actual.rmSync,
+    statSync: ((...args: Parameters<typeof actual.statSync>) => {
+      failIfInjected("statSync", args[0]);
+      return actual.statSync(...args);
+    }) as typeof actual.statSync,
   };
 });
 
@@ -48,6 +60,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -246,17 +259,59 @@ describe("acquireLock", () => {
     expect(existsSync(lockPath)).toBe(true);
   });
 
+  /** Make `process.kill(pid, 0)` raise the errno a real kernel would. */
+  function killFails(pid: number, code: string): void {
+    vi.spyOn(process, "kill").mockImplementation(((target: number) => {
+      if (target !== pid) return true;
+      const err = new Error(`kill ${code}`) as NodeJS.ErrnoException;
+      err.code = code;
+      throw err;
+    }) as typeof process.kill);
+  }
+
   it("reclaims a lock left by a dead process", () => {
     const lockPath = join(root, ".lock");
     writeFileSync(lockPath, JSON.stringify({ pid: 424242, startedAt: "2024-01-01T00:00:00.000Z" }));
-    vi.spyOn(process, "kill").mockImplementation((pid) => {
-      if (pid === 424242) throw new Error("ESRCH");
-      return true;
-    });
+    killFails(424242, "ESRCH");
 
     const release = acquireLock(lockPath);
     expect(JSON.parse(readFileSync(lockPath, "utf-8")).pid).toBe(process.pid);
     release();
+  });
+
+  it("keeps a lock held by a live process of another user", () => {
+    const lockPath = join(root, ".lock");
+    const held = JSON.stringify({ pid: 424243, startedAt: "2024-01-01T00:00:00.000Z" });
+    writeFileSync(lockPath, held);
+    // EPERM is a running process this user may not signal — a shared STATE_DIR
+    // across accounts is where it appears.
+    killFails(424243, "EPERM");
+
+    expect(() => acquireLock(lockPath)).toThrow(
+      /STATE_DIR is locked by another process \(pid=42424/
+    );
+    expect(readFileSync(lockPath, "utf-8")).toBe(held);
+  });
+
+  it("keeps a lock whose holder's liveness cannot be established", () => {
+    const lockPath = join(root, ".lock");
+    const held = JSON.stringify({ pid: 424244, startedAt: "2024-01-01T00:00:00.000Z" });
+    writeFileSync(lockPath, held);
+    killFails(424244, "EINVAL");
+
+    expect(() => acquireLock(lockPath)).toThrow(/liveness could not be determined/);
+    expect(readFileSync(lockPath, "utf-8")).toBe(held);
+  });
+
+  it("keeps a lockfile that parses but carries no pid", () => {
+    const lockPath = join(root, ".lock");
+    const held = JSON.stringify({ startedAt: "2024-01-01T00:00:00.000Z" });
+    writeFileSync(lockPath, held);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(() => acquireLock(lockPath)).toThrow(/race with another process/);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("is unreadable"));
+    expect(readFileSync(lockPath, "utf-8")).toBe(held);
   });
 
   it("reclaims its own stale lock", () => {
@@ -405,15 +460,53 @@ describe("scanRecoverableSessions", () => {
     expect(recovered!.lastSeq).toBe(9);
   });
 
-  it("skips entries without usable metadata, plain files, and unreadable json", () => {
+  it("skips plain files and directories that hold no meta.json", () => {
     mkdirSync(join(root, "sessions"), { recursive: true });
     writeFileSync(join(root, "sessions", "stray.txt"), "not a session");
     writeSession("sess_no_meta", { events: '{"seq":0}\n' });
-    writeSession("sess_bad_meta", { meta: undefined });
-    writeFileSync(join(root, "sessions", "sess_bad_meta", "meta.json"), "{oops");
-    writeSession("sess_no_id", { meta: { status: "idle" } });
 
     expect(scanRecoverableSessions(join(root, "sessions"))).toEqual([]);
+  });
+
+  it("recovers a session whose meta.json is unparsable, keeping its pid for the reaper", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const dir = writeSession("sess_bad_meta", {
+      events: '{"seq":4}\n',
+      pid: { pid: 4242, spawnedAt: "2024-01-01T00:00:00.000Z" },
+    });
+    writeFileSync(join(dir, "meta.json"), "{oops");
+
+    const [recovered, ...rest] = scanRecoverableSessions(join(root, "sessions"));
+    expect(rest).toEqual([]);
+    // Dropping it would hide the live codex process behind pid.json from the reaper.
+    expect(recovered!.pidInfo).toEqual({ pid: 4242, spawnedAt: "2024-01-01T00:00:00.000Z" });
+    expect(recovered!.metaDamaged).toBe(true);
+    // The id is the name the directory was written under, and the times are its own.
+    expect(recovered!.sessionId).toBe("sess_bad_meta");
+    expect(recovered!.meta.status).toBe("unknown");
+    expect(recovered!.meta.createdAt).toBe(new Date(statSync(dir).mtimeMs).toISOString());
+    expect(recovered!.lastSeq).toBe(4);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[recovery] Session sess_bad_meta: meta.json is unusable")
+    );
+  });
+
+  it("recovers a session whose meta.json names no session", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    writeSession("sess_no_id", { meta: { status: "idle" }, pid: { pid: 77, spawnedAt: "x" } });
+
+    const [recovered] = scanRecoverableSessions(join(root, "sessions"));
+    expect(recovered!.sessionId).toBe("sess_no_id");
+    expect(recovered!.metaDamaged).toBe(true);
+    expect(recovered!.pidInfo).toEqual({ pid: 77, spawnedAt: "x" });
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("meta.json is unusable"));
+  });
+
+  it("leaves a readable session unmarked", () => {
+    writeSession("sess_fine", { meta: { sessionId: "sess_fine", status: "idle" } });
+
+    const [recovered] = scanRecoverableSessions(join(root, "sessions"));
+    expect(recovered!.metaDamaged).toBeUndefined();
   });
 
   it("skips an entry whose stat fails", () => {
@@ -423,7 +516,26 @@ describe("scanRecoverableSessions", () => {
     expect(scanRecoverableSessions(join(root, "sessions"))).toEqual([]);
   });
 
-  it("returns nothing when the sessions directory cannot be listed", () => {
+  it("throws when an entry is there and cannot be examined", () => {
+    const dir = writeSession("sess_locked_dir", {
+      meta: { sessionId: "sess_locked_dir", status: "idle" },
+    });
+    failFs("statSync", dir);
+
+    // Skipping it would leave a session on disk out of the recovered set, and the next
+    // session to take that id would write over it.
+    expect(() => scanRecoverableSessions(join(root, "sessions"))).toThrow(/EACCES/);
+  });
+
+  it("throws when the sessions directory cannot be examined", () => {
+    const sessions = join(root, "sessions");
+    writeSession("sess_unseen", { meta: { sessionId: "sess_unseen", status: "idle" } });
+    failFs("statSync", sessions);
+
+    expect(() => scanRecoverableSessions(sessions)).toThrow(/EACCES/);
+  });
+
+  it("throws when the sessions directory cannot be listed", () => {
     const sessions = join(root, "sessions");
     writeSession("sess_listed", {
       meta: {
@@ -436,7 +548,23 @@ describe("scanRecoverableSessions", () => {
     });
     failFs("readdirSync", sessions);
 
-    expect(scanRecoverableSessions(sessions)).toEqual([]);
+    // An empty result would report the session on disk as absent, and the caller would
+    // start over a state directory that still holds it.
+    expect(() => scanRecoverableSessions(sessions)).toThrow(/EACCES/);
+  });
+
+  it("skips a session whose meta.json a concurrent prune removed mid-read", () => {
+    writeSession("sess_racing", { meta: { sessionId: "sess_racing", status: "idle" } });
+    failFs("readFileSync", join(root, "sessions", "sess_racing", "meta.json"), "ENOENT");
+
+    expect(scanRecoverableSessions(join(root, "sessions"))).toEqual([]);
+  });
+
+  it("throws when a session's meta.json is there and cannot be read", () => {
+    writeSession("sess_locked", { meta: { sessionId: "sess_locked", status: "idle" } });
+    failFs("readFileSync", join(root, "sessions", "sess_locked", "meta.json"));
+
+    expect(() => scanRecoverableSessions(join(root, "sessions"))).toThrow(/EACCES/);
   });
 
   it("skips a session written by a newer schema", () => {
@@ -477,6 +605,26 @@ describe("pruneSessionDirs", () => {
 
   it("returns zero for a missing directory", () => {
     expect(pruneSessionDirs(join(root, "absent"))).toBe(0);
+  });
+
+  it("throws when the sessions directory cannot be examined", () => {
+    const sessions = join(root, "sessions");
+    const old = makeSession("old", iso(120_000));
+    failFs("statSync", sessions);
+
+    expect(() => pruneSessionDirs(sessions, { maxAgeMs: 60_000 })).toThrow(/EACCES/);
+    expect(existsSync(old)).toBe(true);
+  });
+
+  it("throws when the sessions directory cannot be listed", () => {
+    const sessions = join(root, "sessions");
+    makeSession("old", iso(120_000));
+    failFs("readdirSync", sessions);
+
+    // Zero would read as "retention ran and found nothing", while the sessions it could
+    // not list keep every byte they hold.
+    expect(() => pruneSessionDirs(sessions, { maxAgeMs: 60_000 })).toThrow(/EACCES/);
+    expect(existsSync(join(sessions, "old"))).toBe(true);
   });
 
   it("removes sessions older than maxAgeMs", () => {
@@ -559,6 +707,14 @@ describe("pruneSessionDirs", () => {
     symlinkSync(join(root, "nowhere"), join(root, "sessions", "dangling"));
 
     expect(pruneSessionDirs(join(root, "sessions"), { maxAgeMs: 1 })).toBe(0);
+  });
+
+  it("throws when an entry is there and cannot be examined", () => {
+    const dir = makeSession("locked", iso(120_000));
+    failFs("statSync", dir);
+
+    expect(() => pruneSessionDirs(join(root, "sessions"), { maxAgeMs: 60_000 })).toThrow(/EACCES/);
+    expect(existsSync(dir)).toBe(true);
   });
 
   it("reports a removal failure on stderr and does not count it", () => {

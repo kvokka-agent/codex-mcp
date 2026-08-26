@@ -123,6 +123,23 @@ describe("AppServerClient JSON-RPC", () => {
     expect(client.supportsTurnOverrides).toBe(true);
   });
 
+  it("reports the spawned pid before the initialize handshake is answered", async () => {
+    const client = new AppServerClient();
+    const spawns: Array<{ pid: number; spawnedAt: string }> = [];
+    client.on("spawn", (pid: number, spawnedAt: string) => spawns.push({ pid, spawnedAt }));
+
+    const started = client.start({} as AppServerSpawnOptions);
+    // The handshake is still unanswered, so the reaper already has the pid of a
+    // process whose startup outlives its identity window.
+    expect(spawns.map((s) => s.pid)).toEqual([proc.pid]);
+    expect(Number.isNaN(Date.parse(spawns[0]!.spawnedAt))).toBe(false);
+
+    const init = lastWritten();
+    reply(init.id!, { userAgent: "mock-app-server" });
+    await started;
+    expect(spawns).toHaveLength(1);
+  });
+
   it("matches concurrent responses to their own requests", async () => {
     const client = await startClient();
 
@@ -257,15 +274,55 @@ describe("AppServerClient JSON-RPC", () => {
     });
   });
 
-  it("logs instead of throwing when a response cannot be written", async () => {
+  it("throws when a response to a server request cannot be written", async () => {
     const client = await startClient();
+    proc.stdin.writes.length = 0;
     proc.stdin.writable = false;
 
-    expect(() => client.respondToServer(1, { decision: "accept" })).not.toThrow();
-    expect(() => client.respondErrorToServer(1, -1, "x")).not.toThrow();
-    expect(errorLog.mock.calls.flat().join(" ")).toContain(
-      "Failed to send JSON-RPC response for server request id=1"
+    expect(() => client.respondToServer(1, { decision: "accept" })).toThrow(
+      /Failed to send JSON-RPC response for server request id=1: .*stdin not writable/
     );
+    expect(() => client.respondErrorToServer(1, -1, "x")).toThrow(
+      /Failed to send JSON-RPC error response for server request id=1/
+    );
+    expect(proc.stdin.writes).toEqual([]);
+  });
+
+  it("throws the queue-overflow failure out of a response the backpressured child dropped", async () => {
+    const client = await startClient();
+    // Backpressure: every further write is queued rather than handed to stdin.
+    proc.stdin.writeReturn = false;
+    client.respondToServer(1, { decision: "decline" });
+    proc.stdin.writes.length = 0;
+
+    // Fill the 5MB queue, then the response that no longer fits.
+    const filler = { jsonrpc: "2.0", id: 2, result: { pad: "x".repeat(6 * 1024 * 1024) } };
+    expect(() => client.respondToServer(2, filler.result)).toThrow(/WRITE_QUEUE_DROPPED/);
+    expect(proc.stdin.writes).toEqual([]);
+  });
+
+  it("keeps reading stdout after a server-request handler throws", async () => {
+    const client = await startClient();
+    const seen: string[] = [];
+    client.onNotification((method) => seen.push(method));
+    client.onServerRequest(() => {
+      throw new Error("handler exploded");
+    });
+
+    emit(
+      JSON.stringify({ jsonrpc: "2.0", id: 9, method: Methods.COMMAND_APPROVAL, params: {} }) +
+        "\n" +
+        JSON.stringify({ jsonrpc: "2.0", method: Methods.TURN_STARTED, params: {} }) +
+        "\n"
+    );
+
+    // The throwing handler is reported as a handler failure, not as a protocol
+    // parse error, and the child stays alive to deliver the next line.
+    const logged = errorLog.mock.calls.flat().join(" ");
+    expect(logged).toContain("handler exploded");
+    expect(logged).not.toContain("PROTOCOL_PARSE_ERROR");
+    expect(seen).toEqual([Methods.TURN_STARTED]);
+    expect(client.destroyed).toBe(false);
   });
 
   it("tears down the child after an unparsable protocol line", async () => {
@@ -462,11 +519,10 @@ describe("AppServerClient JSON-RPC", () => {
     expect(client.childPid).toBeUndefined();
   });
 
-  it("logs when a server response is attempted before the process exists", () => {
+  it("throws when a server response is attempted before the process exists", () => {
     const client = new AppServerClient();
 
-    expect(() => client.respondToServer(1, {})).not.toThrow();
-    expect(errorLog.mock.calls.flat().join(" ")).toContain("app-server process not started");
+    expect(() => client.respondToServer(1, {})).toThrow("app-server process not started");
   });
 
   it("re-emits a spawn error and fails what was in flight", async () => {

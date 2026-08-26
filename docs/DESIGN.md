@@ -420,7 +420,9 @@ An `error` notification with `willRetry: true` keeps the status and emits a pinn
 
 - returns the final `result` and `completedAt` when the status becomes `idle`, `error`, or `cancelled`;
 - returns immediately with `execution.fallbackReason: "interactive_poll_required"` when the status becomes `waiting_approval`, because answering an approval needs another tool call;
-- returns session metadata with `execution.fallbackReason: "wait_for_result_timeout"` when the budget runs out.
+- returns session metadata with `execution.fallbackReason: "wait_for_result_timeout"` when the budget runs out;
+- returns session metadata with `execution.fallbackReason: "wait_refused"` when the session already holds its
+  maximum of four waiters, so the caller polls instead of waiting on a queue it cannot join.
 
 Every `codex`, `codex_reply`, and `codex_check` response carries three orchestration hints: `execution` (`requested` vs `effective` mode plus the fallback reason), `interactionState` (`working` / `waiting_input` / `finished`), and `recommendedNextAction` (`poll` / `respond_permission` / `respond_user_input` / `none`).
 
@@ -668,7 +670,7 @@ Every JSON file is written through `atomicWriteJson`: write a sibling temp file,
 
 ### Recovery
 
-`scanRecoverableSessions` runs at startup over `STATE_DIR/sessions/`:
+`scanRecoverableSessions` runs at startup over `STATE_DIR/sessions/`, after retention has pruned, so a directory retention removed never reaches `SessionManager`:
 
 - Reads `meta.json`; a directory without one, or with `schemaVersion` above the supported version, is skipped.
 - Parses `events.jsonl` line by line and stops at the first unparseable line, dropping the torn tail a crash left behind. It keeps the last 500 events.
@@ -684,11 +686,11 @@ Every JSON file is written through `atomicWriteJson`: write a sibling temp file,
 
 ### Lockfile
 
-`STATE_DIR/.lock` holds `{ pid, startedAt }` and is created with `O_EXCL`. A lock held by a dead PID is reclaimed; a lock held by a live foreign PID throws, and the message names the file to delete if the lock is stale. `startDiskPersistence()` in `src/session/persistence.ts` decides what happens next: it hands back the adapter, the recovered sessions and the prune count when it takes the lock, and warns and hands back nothing when it does not. A server that lost the lock keeps serving from memory and never reads, writes, prunes or reaps inside the state directory another server owns.
+`STATE_DIR/.lock` holds `{ pid, startedAt }` and is created with `O_EXCL`. A lock held by a dead PID is reclaimed; a lock held by a live foreign PID throws, and the message names the file to delete if the lock is stale. `startDiskPersistence()` in `src/session/persistence.ts` decides what happens next: it hands back the adapter, the recovered sessions and the prune count when it takes the lock, and warns on stderr and hands back nothing when any startup step fails — creating the state directory, taking the lock, pruning or scanning. A server that lost the lock keeps serving from memory and never reads, writes, prunes or reaps inside the state directory another server owns.
 
 ### Retention
 
-`pruneSessionDirs` runs at startup and removes session directories oldest-first, ordering by `meta.lastActiveAt` with the directory mtime as the fallback:
+`pruneSessionDirs` runs at startup, before the recovery scan, and removes session directories oldest-first, ordering by `meta.lastActiveAt` with the directory mtime as the fallback:
 
 1. Age: older than 7 days
 2. Count: beyond 200 retained sessions

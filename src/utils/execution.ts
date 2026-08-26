@@ -86,12 +86,10 @@ export async function waitForCodexSessionForegroundResult(
   const deadline = Date.now() + Math.min(waitForResultMs, 300_000);
 
   while (Date.now() < deadline) {
-    let status: SessionStatus;
-    try {
-      status = sessionManager.getSession(sessionId).status;
-    } catch {
-      status = "error";
-    }
+    // A session evicted mid-wait makes getSession throw SESSION_NOT_FOUND, and that reaches the
+    // caller: a status invented here would only make getLastResult throw the same error one line
+    // down, and would tell the caller its turn ended when the session simply went away.
+    const status = sessionManager.getSession(sessionId).status;
 
     if (TERMINAL_STATUSES.has(status)) {
       const finalResult = sessionManager.getLastResult(sessionId);
@@ -114,16 +112,27 @@ export async function waitForCodexSessionForegroundResult(
     if (remainingMs <= 0) break;
     try {
       await sessionManager.waitForChange(sessionId, remainingMs, signal);
-    } catch {
-      break;
+    } catch (err: unknown) {
+      // Timeout, abort and change notification all resolve; the only rejection is a session whose
+      // waiter slots are full. Waiting again re-rejects with no delay, so this call stops waiting
+      // and reports the refusal — the wait budget did not run out and may still be nearly intact.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[codex-mcp] Foreground wait refused for session '${sessionId}': ${message}`);
+      return {
+        status: sessionManager.getSession(sessionId).status,
+        fallbackReason: "wait_refused",
+      };
+    }
+
+    // An aborted signal makes waitForChange resolve at once; looping on it would spin until the
+    // deadline. The caller dropped the request, so report where the session stands and no reason.
+    if (signal?.aborted) {
+      return { status: sessionManager.getSession(sessionId).status };
     }
   }
 
-  let status: SessionStatus = "running";
-  try {
-    status = sessionManager.getSession(sessionId).status;
-  } catch {
-    status = "error";
-  }
-  return { status, fallbackReason: "wait_for_result_timeout" };
+  return {
+    status: sessionManager.getSession(sessionId).status,
+    fallbackReason: "wait_for_result_timeout",
+  };
 }

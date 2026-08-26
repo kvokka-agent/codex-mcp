@@ -150,14 +150,16 @@ describe("executeCodexSetup", () => {
     expect(result.nextSteps).toEqual(["Run `codex login` and rerun `codex_setup`."]);
   });
 
-  it("reports an unknown auth state and asks for explicit verification", async () => {
+  it("refuses readiness for an auth answer it could not classify", async () => {
+    // A CLI that reworded its login output leaves the probe with no verdict; calling that
+    // ready sends the caller into a session that fails on authentication.
     writeConfig(home);
     loginStatus(7, "unexpected output");
 
     const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.auth.state).toBe("unknown");
-    expect(result.auth.ok).toBe(true);
-    expect(result.ready).toBe(true);
+    expect(result.auth.ok).toBe(false);
+    expect(result.ready).toBe(false);
     expect(result.warnings).toEqual(["unexpected output"]);
     expect(result.nextSteps[0]).toContain("Verify Codex authentication explicitly");
   });
@@ -184,6 +186,7 @@ describe("executeCodexSetup", () => {
   });
 
   it("skips the auth probe for a codex-internal executable", async () => {
+    // The one unknown auth state that still counts as ready: the probe was deliberately skipped.
     writeConfig(home);
     process.env.CODEX_MCP_PATH = makeExecutable(path.join(root, "bin"), "codex-internal");
 

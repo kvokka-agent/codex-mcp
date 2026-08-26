@@ -345,6 +345,38 @@ describe("SessionManager cleanSessions", () => {
     expect(manager.listSessions()).toHaveLength(0);
   });
 
+  it("names the session directories a failed removal left on disk", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const idleId = await startIdleSession();
+    vi.spyOn(persistence, "removeSession").mockImplementation(() => {
+      throw new Error("rm boom");
+    });
+
+    const report = await manager.cleanSessions();
+
+    expect(report.removedCount).toBe(1);
+    expect(report.diskSessionsRemoved).toBe(0);
+    expect(report.message).toContain(idleId);
+    expect(report.message).toContain("rm boom");
+    expect(report.message).toContain("still on disk");
+    expect(
+      errors.mock.calls.some(
+        (call) =>
+          String(call[0]).includes("Failed to remove the session directory") &&
+          String(call[0]).includes("rm boom")
+      )
+    ).toBe(true);
+  });
+
+  it("says nothing about disk when removal was never asked for", async () => {
+    await startIdleSession();
+
+    const report = await manager.cleanSessions({ includeDisk: false });
+
+    expect(report.diskSessionsRemoved).toBe(0);
+    expect(report.message).toBeUndefined();
+  });
+
   it("reports a client that fails to shut down during eviction and still drops the session", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const idleId = await startIdleSession();

@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -17,9 +17,17 @@ class MockClient extends EventEmitter {
   turnStartResult: unknown = { turn: { id: "turn_mock" } };
 
   supportsTurnOverrides = true;
+  /** Undefined unless a test makes this client report what its last turn dropped. */
+  unappliedTurnOverrides: readonly string[] | undefined = undefined;
   childPid: number | undefined = undefined;
 
-  start = vi.fn(async () => ({ userAgent: "mock" }));
+  /** Spawn instant reported with the "spawn" event, as the real clients report theirs. */
+  spawnedAt = "2024-05-05T10:00:00.000Z";
+
+  start = vi.fn(async () => {
+    if (this.childPid !== undefined) this.emit("spawn", this.childPid, this.spawnedAt);
+    return { userAgent: "mock" };
+  });
   threadStart = vi.fn(async () => this.threadStartResult);
   threadFork = vi.fn(async () => ({ thread: { id: "thread_forked" } }));
   threadResume = vi.fn(async () => ({ thread: { id: "thread_forked" } }));
@@ -219,7 +227,7 @@ describe("SessionManager recovered sessions", () => {
         events: [
           { seq: 2, type: "output", data: { delta: "hello" }, timestamp: "2024-01-01T00:00:02Z" },
           { seq: 3, type: "telemetry", data: { ignored: true } },
-          { seq: 4, type: "progress", data: { note: "kept" } },
+          { seq: 4, type: "progress", data: { note: "kept" }, timestamp: "2024-01-01T00:00:04Z" },
         ],
       }),
     ]);
@@ -235,7 +243,14 @@ describe("SessionManager recovered sessions", () => {
       recovered({
         sessionId: "sess_opaque",
         lastSeq: 0,
-        events: [{ seq: 0, type: "progress", data: { unknownField: "x" } }],
+        events: [
+          {
+            seq: 0,
+            type: "progress",
+            data: { unknownField: "x" },
+            timestamp: "2024-01-01T00:00:00Z",
+          },
+        ],
       }),
     ]);
 
@@ -251,7 +266,9 @@ describe("SessionManager recovered sessions", () => {
       recovered({
         sessionId: "sess_scalar",
         lastSeq: 0,
-        events: [{ seq: 0, type: "progress", data: "plain text" }],
+        events: [
+          { seq: 0, type: "progress", data: "plain text", timestamp: "2024-01-01T00:00:00Z" },
+        ],
       }),
     ]);
 
@@ -260,6 +277,119 @@ describe("SessionManager recovered sessions", () => {
       pollOptions: { skipDeltas: true },
     });
     expect(poll.events[0].data).toBe("plain text");
+  });
+
+  it("keeps the instant the recovered session was last active", () => {
+    manager.ingestRecovered([
+      recovered({
+        sessionId: "sess_aged",
+        meta: { lastActiveAt: "2020-03-04T05:06:07.000Z" } as never,
+      }),
+    ]);
+
+    expect(manager.getSession("sess_aged").lastActiveAt).toBe("2020-03-04T05:06:07.000Z");
+    expect(manager.getProgress("sess_aged").lastEventAt).toBe("2020-03-04T05:06:07.000Z");
+  });
+
+  it("writes the recovered lastActiveAt back for a session that was active at shutdown", async () => {
+    const stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-aged-"));
+    const persistence = new SessionPersistence(stateDir);
+    const agedManager = new SessionManager({ disableCleanup: true, persistence });
+    try {
+      agedManager.ingestRecovered([
+        recovered({
+          sessionId: "sess_active",
+          meta: { status: "running", lastActiveAt: "2020-03-04T05:06:07.000Z" } as never,
+        }),
+      ]);
+
+      const meta = JSON.parse(
+        readFileSync(path.join(stateDir, "sessions", "sess_active", "meta.json"), "utf-8")
+      );
+      expect(meta.status).toBe("error");
+      expect(meta.lastActiveAt).toBe("2020-03-04T05:06:07.000Z");
+    } finally {
+      agedManager.destroy();
+      persistence.destroy();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves cwd unset when the recovered metadata records none", () => {
+    manager.ingestRecovered([
+      recovered({ sessionId: "sess_nocwd", meta: { cwd: undefined } as never }),
+    ]);
+
+    expect((manager.getSession("sess_nocwd", true) as { cwd?: string }).cwd).toBeUndefined();
+  });
+
+  it("skips a recovered session whose metadata records no lastActiveAt", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    manager.ingestRecovered([
+      recovered({ sessionId: "sess_undated", meta: { lastActiveAt: undefined } as never }),
+    ]);
+
+    expect(manager.listSessions()).toHaveLength(0);
+    expect(
+      errors.mock.calls.some(
+        (call) =>
+          String(call[0]).includes("Skipping recovered session sess_undated") &&
+          String(call[0]).includes("lastActiveAt")
+      )
+    ).toBe(true);
+  });
+
+  it("says an unreadable status is what made the recovered session an error", () => {
+    manager.ingestRecovered([
+      recovered({ sessionId: "sess_weird", meta: { status: "half-way" } as never }),
+    ]);
+
+    const info = manager.getSession("sess_weird");
+    expect(info.status).toBe("error");
+    expect(info.cancelledReason).toContain("half-way");
+  });
+
+  it("keeps the reason a recovered session already carries", () => {
+    manager.ingestRecovered([
+      recovered({
+        sessionId: "sess_damaged",
+        meta: { status: "unknown", cancelledReason: "meta.json on disk is unusable" } as never,
+      }),
+    ]);
+
+    expect(manager.getSession("sess_damaged").cancelledReason).toBe(
+      "meta.json on disk is unusable"
+    );
+  });
+
+  it("drops a restored event that carries no timestamp instead of dating it now", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    manager.ingestRecovered([
+      recovered({
+        sessionId: "sess_undated_event",
+        lastSeq: 3,
+        events: [
+          { seq: 2, type: "output", data: { delta: "kept" }, timestamp: "2024-01-01T00:00:02Z" },
+          { seq: 3, type: "output", data: { delta: "undated" } },
+        ],
+      }),
+    ]);
+
+    const poll = manager.pollEvents("sess_undated_event", 0, 50);
+    expect(poll.events.map((event) => event.id)).toEqual([2]);
+    expect(poll.events.every((event) => event.timestamp === "2024-01-01T00:00:02Z")).toBe(true);
+    // The dropped seq is still consumed, so a later event cannot reuse its id.
+    const buffer = (
+      manager as unknown as { sessions: Map<string, { eventBuffer: { nextId: number } }> }
+    ).sessions.get("sess_undated_event")!.eventBuffer;
+    expect(buffer.nextId).toBe(4);
+    expect(
+      errors.mock.calls.some((call) =>
+        String(call[0]).includes("Dropped 1 restored event(s) that carry no timestamp")
+      )
+    ).toBe(true);
   });
 
   it("resumes the event log sequence for a recovered session", () => {
@@ -311,6 +441,26 @@ describe("SessionManager session operations", () => {
     );
     expect(cleaned).toBeDefined();
     expect((cleaned!.data as Record<string, unknown>).status).toBe("requested");
+  });
+
+  it("pushes no event when the client refuses to clean background terminals", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.threadBackgroundTerminalsClean = vi.fn(async () => {
+      throw new Error("Error [EXEC_NOT_SUPPORTED]: not supported in exec mode");
+    });
+
+    await expect(manager.cleanBackgroundTerminals(started.sessionId)).rejects.toThrow(
+      "EXEC_NOT_SUPPORTED"
+    );
+
+    const poll = manager.pollEvents(started.sessionId, 0, 50);
+    expect(
+      poll.events.some(
+        (event) =>
+          (event.data as Record<string, unknown>)?.method ===
+          Methods.THREAD_BACKGROUND_TERMINALS_CLEAN
+      )
+    ).toBe(false);
   });
 
   it("refuses to clean background terminals of a cancelled session", async () => {
@@ -438,7 +588,10 @@ describe("SessionManager session operations", () => {
       const forked = await forkManager.forkSession(started.sessionId);
 
       expect(forked.status).toBe("idle");
-      expect(writePid).toHaveBeenCalledWith(forked.sessionId, 4242, { model: "gpt-a" });
+      expect(writePid).toHaveBeenCalledWith(forked.sessionId, 4242, {
+        model: "gpt-a",
+        spawnedAt: forkClient.spawnedAt,
+      });
     } finally {
       forkManager.destroy();
       persistence.destroy();
@@ -585,6 +738,233 @@ describe("SessionManager session operations", () => {
   });
 });
 
+describe("SessionManager persistence failures", () => {
+  let client: MockClient;
+  let stateDir: string;
+  let persistence: SessionPersistence;
+  let manager: SessionManager;
+  let errors: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    client = new MockClient();
+    stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-persist-fail-"));
+    persistence = new SessionPersistence(stateDir);
+    manager = new SessionManager({
+      disableCleanup: true,
+      persistence,
+      createClient: () => client as unknown as AppServerClient,
+    });
+  });
+
+  afterEach(() => {
+    manager.destroy();
+    persistence.destroy();
+    rmSync(stateDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  function loggedOnce(fragment: string, cause: string): number {
+    return errors.mock.calls.filter(
+      (call) => String(call[0]).includes(fragment) && String(call[0]).includes(cause)
+    ).length;
+  }
+
+  it("reports a pid.json that could not be written, naming the pid left unreaped", async () => {
+    client.childPid = 9911;
+    vi.spyOn(persistence, "writePidInfo").mockImplementation(() => {
+      throw new Error("EDQUOT: quota exceeded");
+    });
+
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    expect(started.status).toBe("running");
+    expect(loggedOnce("will not be reaped", "EDQUOT: quota exceeded")).toBe(1);
+    expect(errors.mock.calls.some((call) => String(call[0]).includes("9911"))).toBe(true);
+  });
+
+  it("reports every spawn whose pid.json could not be written", async () => {
+    client.childPid = 9911;
+    vi.spyOn(persistence, "writePidInfo").mockImplementation(() => {
+      throw new Error("EDQUOT: quota exceeded");
+    });
+
+    await manager.createSession("hi", workspace, {}, "medium");
+    client.emit("spawn", 9912, "2024-05-05T10:00:01.000Z");
+
+    expect(loggedOnce("will not be reaped", "EDQUOT: quota exceeded")).toBe(2);
+  });
+
+  it("reports the first metadata write that could not create the session directory", async () => {
+    vi.spyOn(persistence, "writeSessionMeta").mockImplementation(() => {
+      throw new Error("EACCES: create boom");
+    });
+
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    expect(started.status).toBe("running");
+    expect(loggedOnce("Failed to persist session metadata", "EACCES: create boom")).toBe(1);
+  });
+
+  it("reports a status change that could not be written and keeps the session running", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    vi.spyOn(persistence, "writeSessionMeta").mockImplementation(() => {
+      throw new Error("EACCES: status boom");
+    });
+
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { id: "turn_1", status: "completed", output: "done" },
+    });
+    await manager.cancelSession(started.sessionId, "by test");
+
+    expect(manager.getSession(started.sessionId).status).toBe("cancelled");
+    // One line per session, however many status changes fail after it.
+    expect(loggedOnce("Failed to persist session metadata", "EACCES: status boom")).toBe(1);
+  });
+
+  it("reports a turn result that could not be written", async () => {
+    vi.spyOn(persistence, "writeResult").mockImplementation(() => {
+      throw new Error("ENOSPC: result boom");
+    });
+
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { id: "turn_1", status: "completed", output: "done" },
+    });
+
+    expect(manager.getLastResult(started.sessionId)?.turnId).toBe("turn_1");
+    expect(loggedOnce("Failed to persist turn result", "ENOSPC: result boom")).toBe(1);
+  });
+});
+
+describe("SessionManager unapplied turn overrides", () => {
+  let client: MockClient;
+  let manager: SessionManager;
+
+  beforeEach(() => {
+    client = new MockClient();
+    manager = new SessionManager({
+      disableCleanup: true,
+      createClient: () => client as unknown as AppServerClient,
+    });
+  });
+
+  afterEach(() => {
+    manager.destroy();
+    vi.restoreAllMocks();
+  });
+
+  async function idleSession(): Promise<string> {
+    const started = await manager.createSession(
+      "hi",
+      workspace,
+      { sandbox: "workspace-write" },
+      "medium"
+    );
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { id: "turn_1", status: "completed", output: "done" },
+    });
+    return started.sessionId;
+  }
+
+  it("warns the caller that a narrowed sandbox was not applied", async () => {
+    const sessionId = await idleSession();
+    client.supportsTurnOverrides = false;
+
+    const reply = await manager.replyToSession(sessionId, "again", { sandbox: "read-only" });
+
+    expect(reply.status).toBe("running");
+    expect(reply.compatWarnings).toHaveLength(1);
+    expect(reply.compatWarnings![0]).toContain("read-only");
+    expect(reply.compatWarnings![0]).toContain("workspace-write");
+    // The session keeps the permissions the turn actually runs under.
+    expect((manager.getSession(sessionId) as { sandbox?: string }).sandbox).toBe("workspace-write");
+  });
+
+  it("names an unapplied cwd override alongside the sandbox", async () => {
+    const otherCwd = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-other-cwd-"));
+    try {
+      const sessionId = await idleSession();
+      client.supportsTurnOverrides = false;
+
+      const reply = await manager.replyToSession(sessionId, "again", { cwd: otherCwd });
+
+      expect(reply.compatWarnings![0]).toContain(otherCwd);
+      expect(reply.compatWarnings![0]).toContain("cwd");
+    } finally {
+      rmSync(otherCwd, { recursive: true, force: true });
+    }
+  });
+
+  it("stays silent when the client applies the overrides", async () => {
+    const sessionId = await idleSession();
+
+    const reply = await manager.replyToSession(sessionId, "again", { sandbox: "read-only" });
+
+    expect(reply.compatWarnings).toBeUndefined();
+    expect((manager.getSession(sessionId) as { sandbox?: string }).sandbox).toBe("read-only");
+  });
+
+  it("reports the overrides the client says it dropped", async () => {
+    const sessionId = await idleSession();
+    client.unappliedTurnOverrides = ["sandbox", "outputSchema"];
+
+    const reply = await manager.replyToSession(sessionId, "again", {
+      sandbox: "read-only",
+      outputSchema: { type: "object" },
+    });
+
+    expect(reply.compatWarnings).toHaveLength(1);
+    expect(reply.compatWarnings![0]).toContain("sandbox 'read-only'");
+    expect(reply.compatWarnings![0]).toContain("workspace-write");
+    expect(reply.compatWarnings![0]).toContain("outputSchema");
+  });
+
+  it("does not read the turn output as structured when the schema was dropped", async () => {
+    const sessionId = await idleSession();
+    client.unappliedTurnOverrides = ["outputSchema"];
+
+    await manager.replyToSession(sessionId, "again", { outputSchema: { type: "object" } });
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      turn: { id: "turn_2", status: "completed", output: '{"a":1}' },
+    });
+
+    expect(manager.getLastResult(sessionId)?.structuredOutput).toBeUndefined();
+  });
+
+  it("keeps the session sandbox when the client says the override was dropped", async () => {
+    const sessionId = await idleSession();
+    // The client applies overrides in general, and still dropped this one.
+    client.unappliedTurnOverrides = ["sandbox"];
+
+    await manager.replyToSession(sessionId, "again", { sandbox: "read-only" });
+
+    expect((manager.getSession(sessionId) as { sandbox?: string }).sandbox).toBe("workspace-write");
+  });
+
+  it("stays silent when the client reports an empty list", async () => {
+    const sessionId = await idleSession();
+    client.unappliedTurnOverrides = [];
+    client.supportsTurnOverrides = false;
+
+    const reply = await manager.replyToSession(sessionId, "again", { sandbox: "read-only" });
+
+    expect(reply.compatWarnings).toBeUndefined();
+  });
+
+  it("stays silent when nothing that needs applying was asked for", async () => {
+    const sessionId = await idleSession();
+    client.supportsTurnOverrides = false;
+
+    const reply = await manager.replyToSession(sessionId, "again", { model: "gpt-b" });
+
+    expect(reply.compatWarnings).toBeUndefined();
+  });
+});
+
 describe("SessionManager notification handling", () => {
   let client: MockClient;
   let manager: SessionManager;
@@ -668,6 +1048,149 @@ describe("SessionManager notification handling", () => {
     const result = manager.getLastResult(started.sessionId);
     expect(result?.text).toBe("the answer");
     expect(result?.output).toBeUndefined();
+  });
+
+  it("keeps the completed agent message the protocol sends without a status", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    // AgentMessageThreadItem carries id/text/phase and no status
+    // (codex-schema/v2/ItemCompletedNotification.json).
+    client.emitNotification(Methods.ITEM_COMPLETED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      item: { id: "item_1", type: "agentMessage", text: "the answer", phase: "final_answer" },
+    });
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { id: "turn_1", status: "completed", items: [] },
+    });
+
+    expect(manager.getLastResult(started.sessionId)?.text).toBe("the answer");
+  });
+
+  it("reads the final message as structured output when the turn asked for a schema", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium", {
+      outputSchema: { type: "object", properties: { answer: { type: "number" } } },
+    });
+
+    client.emitNotification(Methods.ITEM_COMPLETED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      item: { id: "item_1", type: "agentMessage", text: '{"answer": 42}' },
+    });
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { id: "turn_1", status: "completed", items: [] },
+    });
+
+    const result = manager.getLastResult(started.sessionId);
+    expect(result?.structuredOutput).toEqual({ answer: 42 });
+    expect(result?.text).toBe('{"answer": 42}');
+  });
+
+  it("reports no structured output for a turn that asked for no schema", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.ITEM_COMPLETED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      item: { id: "item_1", type: "agentMessage", text: '{"answer": 42}' },
+    });
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { id: "turn_1", status: "completed", items: [] },
+    });
+
+    expect(manager.getLastResult(started.sessionId)?.structuredOutput).toBeUndefined();
+  });
+
+  it("reports no structured output when the schema-constrained message is not JSON", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium", {
+      outputSchema: { type: "object" },
+    });
+
+    client.emitNotification(Methods.ITEM_COMPLETED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      item: { id: "item_1", type: "agentMessage", text: "sorry, I could not comply" },
+    });
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { id: "turn_1", status: "completed", items: [] },
+    });
+
+    const result = manager.getLastResult(started.sessionId);
+    expect(result?.structuredOutput).toBeUndefined();
+    expect(result?.text).toBe("sorry, I could not comply");
+  });
+
+  it("counts the tokens the tokenUsage notification nests under total", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    // Shape of ThreadTokenUsageUpdatedNotification
+    // (codex-schema/v2/ThreadTokenUsageUpdatedNotification.json).
+    client.emitNotification(Methods.THREAD_TOKEN_USAGE_UPDATED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      tokenUsage: {
+        total: {
+          cachedInputTokens: 2,
+          inputTokens: 30,
+          outputTokens: 12,
+          reasoningOutputTokens: 4,
+          totalTokens: 42,
+        },
+        last: {
+          cachedInputTokens: 0,
+          inputTokens: 7,
+          outputTokens: 3,
+          reasoningOutputTokens: 1,
+          totalTokens: 10,
+        },
+        modelContextWindow: 272000,
+      },
+    });
+
+    expect(manager.getProgress(started.sessionId).tokens).toEqual({
+      input: 30,
+      output: 12,
+      total: 42,
+    });
+  });
+
+  it("counts the tokens the exec token_count event nests under info", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    // Shape of TokenCountEventMsg (codex-schema/EventMsg.json), which exec mode
+    // forwards under the same method.
+    client.emitNotification(Methods.THREAD_TOKEN_USAGE_UPDATED, {
+      threadId: started.threadId,
+      turnId: "turn_1",
+      type: "token_count",
+      info: {
+        total_token_usage: {
+          cached_input_tokens: 1,
+          input_tokens: 100,
+          output_tokens: 20,
+          reasoning_output_tokens: 5,
+          total_tokens: 120,
+        },
+        last_token_usage: {
+          cached_input_tokens: 0,
+          input_tokens: 10,
+          output_tokens: 2,
+          reasoning_output_tokens: 0,
+          total_tokens: 12,
+        },
+        model_context_window: 272000,
+      },
+    });
+
+    expect(manager.getProgress(started.sessionId).tokens).toEqual({
+      input: 100,
+      output: 20,
+      total: 120,
+    });
   });
 
   it("reads a fractional progress value as a percentage", async () => {
@@ -782,6 +1305,67 @@ describe("SessionManager server-initiated requests", () => {
   afterEach(() => {
     manager.destroy();
     vi.restoreAllMocks();
+  });
+
+  it("wakes long-poll waiters when the answer to a server request cannot be sent", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.respondToServer = vi.fn(() => {
+      throw new Error("stdin closed");
+    });
+
+    const woken = manager.waitForChange(started.sessionId, 60_000);
+    client.emitServerRequest(10, Methods.DYNAMIC_TOOL_CALL, { name: "whatever" });
+
+    await expect(woken).resolves.toBeUndefined();
+    expect(
+      errors.mock.calls.some(
+        (call) =>
+          String(call[0]).includes("Failed to answer a server request") &&
+          String(call[0]).includes("stdin closed")
+      )
+    ).toBe(true);
+  });
+
+  it("reports an unhandled server request whose error reply cannot be sent", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.respondErrorToServer = vi.fn(() => {
+      throw new Error("stdin closed");
+    });
+
+    const woken = manager.waitForChange(started.sessionId, 60_000);
+    client.emitServerRequest(11, "some/unknown/method", {});
+
+    await expect(woken).resolves.toBeUndefined();
+    expect(
+      errors.mock.calls.some(
+        (call) =>
+          String(call[0]).includes("Failed to answer a server request") &&
+          String(call[0]).includes("some/unknown/method")
+      )
+    ).toBe(true);
+  });
+
+  it("reports a terminal session's refusal that cannot be delivered", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    await manager.cancelSession(started.sessionId, "by test");
+    client.respondToServer = vi.fn(() => {
+      throw new Error("stdin closed");
+    });
+
+    client.emitServerRequest(12, Methods.COMMAND_APPROVAL, {
+      itemId: "item_1",
+      threadId: started.threadId,
+      turnId: "turn_1",
+      command: "ls",
+    });
+
+    expect(
+      errors.mock.calls.some(
+        (call) =>
+          String(call[0]).includes("Failed to answer a server request") &&
+          String(call[0]).includes(Methods.COMMAND_APPROVAL)
+      )
+    ).toBe(true);
   });
 
   it("rejects a dynamic tool call it cannot serve", async () => {

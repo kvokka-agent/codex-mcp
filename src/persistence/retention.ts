@@ -4,6 +4,8 @@
 import { readdirSync, rmSync, statSync, readFileSync, type Dirent } from "node:fs";
 import { join } from "node:path";
 
+import { isMissing } from "./fs-errors.js";
+
 export interface RetentionPolicy {
   /** Maximum age in milliseconds (default: 7 days) */
   maxAgeMs?: number;
@@ -22,11 +24,6 @@ interface SessionDirInfo {
   sessionId: string;
   lastActiveAt: number; // epoch ms
   diskBytes: number;
-}
-
-function isMissing(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException).code;
-  return code === "ENOENT" || code === "ENOTDIR";
 }
 
 /**
@@ -62,41 +59,39 @@ export function getDirSize(dirPath: string): number {
 /**
  * Apply retention policy to `sessionsDir`, removing oldest sessions first.
  * Returns the number of sessions pruned.
+ *
+ * A directory that is not there has nothing to prune. A directory that is there and
+ * cannot be listed throws: reporting zero removals would tell the caller retention ran
+ * over an empty directory while the sessions in it keep the disk they hold.
  */
 export function pruneSessionDirs(sessionsDir: string, policy?: RetentionPolicy): number {
   const maxAgeMs = policy?.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
   const maxCount = policy?.maxCount ?? DEFAULT_MAX_COUNT;
   const maxDiskBytes = policy?.maxDiskBytes ?? DEFAULT_MAX_DISK_BYTES;
 
-  let entries: string[];
-  try {
-    entries = readdirSync(sessionsDir);
-  } catch {
-    return 0;
-  }
+  // throwIfNoEntry: false — a state directory the previous run never created has nothing
+  // to prune. existsSync cannot stand here: it answers false for a directory it may not
+  // stat, which is the very case that must not read as "nothing to prune".
+  if (!statSync(sessionsDir, { throwIfNoEntry: false })) return 0;
+  const entries = readdirSync(sessionsDir);
 
   // Collect info
   const now = Date.now();
   const dirs: SessionDirInfo[] = [];
   for (const entry of entries) {
     const dirPath = join(sessionsDir, entry);
-    try {
-      if (!statSync(dirPath).isDirectory()) continue;
-    } catch {
-      continue;
-    }
+    // throwIfNoEntry: false — an entry removed between the listing and this call, and a
+    // dangling symlink, are both nothing to prune. Any other stat failure throws.
+    const stat = statSync(dirPath, { throwIfNoEntry: false });
+    if (!stat?.isDirectory()) continue;
 
-    let lastActiveAt = 0;
+    let lastActiveAt: number;
     try {
       const meta = JSON.parse(readFileSync(join(dirPath, "meta.json"), "utf-8"));
       lastActiveAt = new Date(meta.lastActiveAt || meta.createdAt || 0).getTime();
     } catch {
-      // Use directory mtime as fallback
-      try {
-        lastActiveAt = statSync(dirPath).mtimeMs;
-      } catch {
-        lastActiveAt = 0;
-      }
+      // A session directory whose meta.json is unusable is dated by its own mtime.
+      lastActiveAt = stat.mtimeMs;
     }
 
     dirs.push({

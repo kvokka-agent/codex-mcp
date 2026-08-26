@@ -1,7 +1,61 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+/** Injected failures, keyed by `${call}\0${path}`, holding the errno code to raise. */
+const { fsFaults } = vi.hoisted(() => ({
+  fsFaults: new Map<string, { code: string; skip: number; times: number }>(),
+}));
+
+/**
+ * Make one `node:fs` call fail for one path; every other call and path reaches the real
+ * filesystem. A POSIX mode cannot stand in for this: Windows ignores the mode bits, so a
+ * `chmod 0o500` directory stays writable and the error branch under test never runs there.
+ *
+ * `skip` lets that many calls through first and `times` caps how many then fail, which is
+ * how one step of startup is singled out when the steps around it read the same path.
+ */
+function failFs(
+  call: "mkdirSync" | "readdirSync",
+  path: string,
+  code = "EACCES",
+  { skip = 0, times = Number.POSITIVE_INFINITY }: { skip?: number; times?: number } = {}
+): void {
+  fsFaults.set(`${call}\0${path}`, { code, skip, times });
+}
+
+vi.mock("node:fs", async () => {
+  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  const failIfInjected = (call: string, target: unknown): void => {
+    const fault = fsFaults.get(`${call}\0${String(target)}`);
+    if (!fault) return;
+    if (fault.skip > 0) {
+      fault.skip--;
+      return;
+    }
+    if (fault.times <= 0) return;
+    fault.times--;
+    const err = new Error(
+      `${fault.code}: injected failure, ${call} '${String(target)}'`
+    ) as NodeJS.ErrnoException;
+    err.code = fault.code;
+    throw err;
+  };
+  return {
+    ...actual,
+    default: actual,
+    mkdirSync: ((...args: Parameters<typeof actual.mkdirSync>) => {
+      failIfInjected("mkdirSync", args[0]);
+      return actual.mkdirSync(...args);
+    }) as typeof actual.mkdirSync,
+    readdirSync: ((...args: Parameters<typeof actual.readdirSync>) => {
+      failIfInjected("readdirSync", args[0]);
+      return actual.readdirSync(...args);
+    }) as typeof actual.readdirSync,
+  };
+});
+
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { SessionPersistence, startDiskPersistence } from "../src/session/persistence.js";
 import { SCHEMA_VERSION } from "../src/persistence/index.js";
@@ -42,6 +96,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  fsFaults.clear();
   persistence?.destroy();
   persistence = null;
   rmSync(root, { recursive: true, force: true });
@@ -238,6 +293,24 @@ describe("SessionPersistence", () => {
     expect(persistence.hasSessionOnDisk("sess_1")).toBe(true);
   });
 
+  it("hands a sessions directory it cannot list to the caller of prune", () => {
+    persistence = new SessionPersistence(root);
+    persistence.writeSessionMeta(makeSession());
+    failFs("readdirSync", join(root, "sessions"));
+
+    // Zero pruned would tell a running server retention succeeded over an empty disk.
+    expect(() => persistence!.prune({ maxAgeMs: 10_000 })).toThrow(/EACCES/);
+    expect(persistence.hasSessionOnDisk("sess_1")).toBe(true);
+  });
+
+  it("hands a sessions directory it cannot list to the caller of recoverSessions", () => {
+    persistence = new SessionPersistence(root);
+    persistence.writeSessionMeta(makeSession());
+    failFs("readdirSync", join(root, "sessions"));
+
+    expect(() => persistence!.recoverSessions()).toThrow(/EACCES/);
+  });
+
   it("holds the state dir lock until it is released", () => {
     persistence = new SessionPersistence(root);
     persistence.acquireLock();
@@ -267,25 +340,118 @@ describe("SessionPersistence", () => {
 });
 
 describe("startDiskPersistence", () => {
+  /** Collect stderr lines while `run` executes, so a warning can be asserted on. */
+  function captureConsoleError<T>(run: () => T): { result: T; errors: unknown[][] } {
+    const errors: unknown[][] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    try {
+      return { result: run(), errors };
+    } finally {
+      console.error = consoleError;
+    }
+  }
+
+  function activeSession(sessionId: string): SessionInfo {
+    const now = new Date().toISOString();
+    return makeSession({ sessionId, status: "running", createdAt: now, lastActiveAt: now });
+  }
+
   it("recovers and prunes when it owns STATE_DIR", () => {
-    persistence = new SessionPersistence(root);
-    persistence.writeSessionMeta(makeSession({ sessionId: "sess_owned", status: "running" }));
-    persistence.destroy();
+    const owner = new SessionPersistence(root);
+    owner.writeSessionMeta(activeSession("sess_owned"));
+    owner.destroy();
 
-    const second = new SessionPersistence(root);
-    const startup = startDiskPersistence(second);
-    persistence = second;
+    const startup = startDiskPersistence(root);
+    persistence = startup.persistence ?? null;
 
-    expect(startup.persistence).toBe(second);
+    expect(startup.persistence).toBeInstanceOf(SessionPersistence);
     expect(startup.recovered.map((r) => r.sessionId)).toContain("sess_owned");
     expect(existsSync(join(root, ".lock"))).toBe(true);
+  });
+
+  it("keeps pruned sessions out of what it hands back", () => {
+    // Retention defaults to 7 days, so a session last active 30 days ago is pruned.
+    const longAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const owner = new SessionPersistence(root);
+    owner.writeSessionMeta(
+      makeSession({ sessionId: "sess_stale", createdAt: longAgo, lastActiveAt: longAgo })
+    );
+    owner.writeSessionMeta(activeSession("sess_fresh"));
+    owner.destroy();
+
+    const startup = startDiskPersistence(root);
+    persistence = startup.persistence ?? null;
+
+    expect(startup.pruned).toBe(1);
+    expect(startup.recovered.map((r) => r.sessionId)).toEqual(["sess_fresh"]);
+    expect(existsSync(sessionFile("sess_stale", "meta.json"))).toBe(false);
+  });
+
+  it("serves without persistence when the state directory cannot be created", () => {
+    const stateDir = join(root, "read-only-home", "state");
+    failFs("mkdirSync", join(stateDir, "sessions"));
+
+    const { result: startup, errors } = captureConsoleError(() => startDiskPersistence(stateDir));
+
+    expect(startup.persistence).toBeUndefined();
+    expect(startup.recovered).toEqual([]);
+    expect(startup.pruned).toBe(0);
+    const warning = errors.find((args) =>
+      String(args[0]).includes("running without disk persistence")
+    );
+    expect(warning).toBeDefined();
+    expect(String((warning![1] as Error).message)).toContain("EACCES");
+  });
+
+  it("serves without persistence when retention cannot list the sessions directory", () => {
+    const owner = new SessionPersistence(root);
+    owner.writeSessionMeta(activeSession("sess_kept"));
+    owner.destroy();
+    // times 1: only retention's listing fails, so the scan after it would have succeeded.
+    failFs("readdirSync", join(root, "sessions"), "EACCES", { times: 1 });
+
+    const { result: startup, errors } = captureConsoleError(() => startDiskPersistence(root));
+
+    expect(startup.persistence).toBeUndefined();
+    expect(startup.recovered).toEqual([]);
+    expect(startup.pruned).toBe(0);
+    const warning = errors.find((args) =>
+      String(args[0]).includes("running without disk persistence")
+    );
+    expect(String((warning![1] as Error).message)).toContain("EACCES");
+    // The rollback gives STATE_DIR back, so the next server can take it.
+    expect(existsSync(join(root, ".lock"))).toBe(false);
+    expect(existsSync(sessionFile("sess_kept", "meta.json"))).toBe(true);
+  });
+
+  it("serves without persistence when the recovery scan cannot list the sessions directory", () => {
+    const owner = new SessionPersistence(root);
+    owner.writeSessionMeta(activeSession("sess_kept"));
+    owner.destroy();
+    // skip 1: retention lists the directory first, and this fault is for the scan after it.
+    failFs("readdirSync", join(root, "sessions"), "EACCES", { skip: 1 });
+
+    const { result: startup, errors } = captureConsoleError(() => startDiskPersistence(root));
+
+    expect(startup.persistence).toBeUndefined();
+    expect(startup.recovered).toEqual([]);
+    expect(startup.pruned).toBe(0);
+    const warning = errors.find((args) =>
+      String(args[0]).includes("running without disk persistence")
+    );
+    expect(String((warning![1] as Error).message)).toContain("EACCES");
+    expect(existsSync(join(root, ".lock"))).toBe(false);
+    expect(existsSync(sessionFile("sess_kept", "meta.json"))).toBe(true);
   });
 
   it("leaves another server's state untouched when the lock is held", () => {
     // The first server keeps its lock and its session directory. acquireLock treats a
     // lock held by this very process as reentrant, so the owner is the parent process.
     const owner = new SessionPersistence(root);
-    owner.writeSessionMeta(makeSession({ sessionId: "sess_live", status: "running" }));
+    owner.writeSessionMeta(activeSession("sess_live"));
     owner.writePidInfo("sess_live", 4242, { model: "gpt-5" });
     writeFileSync(
       join(root, ".lock"),
@@ -293,26 +459,17 @@ describe("startDiskPersistence", () => {
       "utf-8"
     );
 
-    const errors: unknown[][] = [];
-    const consoleError = console.error;
-    console.error = (...args: unknown[]) => {
-      errors.push(args);
-    };
+    const { result: startup, errors } = captureConsoleError(() => startDiskPersistence(root));
 
-    try {
-      const startup = startDiskPersistence(new SessionPersistence(root));
-
-      // No adapter, so SessionManager never writes into the owner's STATE_DIR.
-      expect(startup.persistence).toBeUndefined();
-      // No recovered sessions, so reapOrphanProcesses gets no live PID to kill.
-      expect(startup.recovered).toEqual([]);
-      expect(startup.pruned).toBe(0);
-      expect(errors.some((args) => String(args[0]).includes("another server owns STATE_DIR"))).toBe(
-        true
-      );
-    } finally {
-      console.error = consoleError;
-    }
+    // No adapter, so SessionManager never writes into the owner's STATE_DIR.
+    expect(startup.persistence).toBeUndefined();
+    // No recovered sessions, so reapOrphanProcesses gets no live PID to kill.
+    expect(startup.recovered).toEqual([]);
+    expect(startup.pruned).toBe(0);
+    const warning = errors.find((args) =>
+      String(args[0]).includes("running without disk persistence")
+    );
+    expect(String((warning![1] as Error).message)).toContain("STATE_DIR is locked by another");
 
     expect(existsSync(sessionFile("sess_live", "meta.json"))).toBe(true);
     expect(existsSync(sessionFile("sess_live", "pid.json"))).toBe(true);

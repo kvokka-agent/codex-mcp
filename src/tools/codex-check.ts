@@ -268,8 +268,24 @@ async function pollWithWait(
     }
 
     currentCursor = result.nextCursor;
-    await sessionManager.waitForChange(sessionId, remainingMs, signal).catch(() => undefined);
-    if (signal?.aborted) {
+
+    // waitForChange registers its notifier synchronously, so no state change
+    // can land between the poll above and the registration: a notification
+    // either preceded the poll (and is in `result`) or wakes this waiter.
+    let waitRefused = false;
+    try {
+      await sessionManager.waitForChange(sessionId, remainingMs, signal);
+    } catch (err: unknown) {
+      // Timeout, abort and notification all resolve; the only rejection is a
+      // session whose waiter slots are full. Looping on that re-rejects with
+      // no delay and burns the rest of the wait window, so the long poll
+      // degrades to one immediate read and lets the caller retry later.
+      waitRefused = true;
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[codex-mcp] Long-poll wait refused for session '${sessionId}': ${message}`);
+    }
+
+    if (waitRefused || signal?.aborted) {
       return sessionManager.pollEvents(sessionId, currentCursor, maxEvents, options);
     }
   }

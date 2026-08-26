@@ -16,7 +16,7 @@ import {
   checkDefaultCodexExecutableAvailability,
   getDefaultCodexExecutable,
 } from "./utils/codex-executable.js";
-import { SessionPersistence, startDiskPersistence } from "./session/persistence.js";
+import { startDiskPersistence } from "./session/persistence.js";
 import { reapOrphanProcesses } from "./session/orphan-reaper.js";
 import { decideStdinShutdown } from "./utils/stdin-shutdown.js";
 
@@ -52,8 +52,9 @@ async function main(): Promise<void> {
   const createClient = (): ICodexClient =>
     clientMode === "exec" ? new ExecClient() : new AppServerClient();
 
-  // Initialize disk persistence
-  const { persistence, recovered, pruned } = startDiskPersistence(new SessionPersistence());
+  // Initialize disk persistence. A failure here leaves persistence undefined and is
+  // reported on stderr by startDiskPersistence; the server serves requests without it.
+  const { persistence, recovered, pruned } = startDiskPersistence();
   if (persistence) {
     console.error("[codex-mcp] STATE_DIR lock acquired");
   }
@@ -64,9 +65,22 @@ async function main(): Promise<void> {
     console.error(`[codex-mcp] Pruned ${pruned} old session(s)`);
   }
 
-  // Reap any orphaned child processes from the previous server run.
+  // Reap any orphaned child processes from the previous server run. Each counter names a
+  // different outcome, and the two that leave processes behind are the ones an operator acts on.
   const reaped = await reapOrphanProcesses(recovered);
   if (reaped.reaped > 0) console.error(`[codex-mcp] Reaped ${reaped.reaped} orphan process(es)`);
+  if (reaped.unconfirmed > 0) {
+    console.error(
+      `[codex-mcp] ${reaped.unconfirmed} orphan process(es) were signalled but their exit was not` +
+        ` confirmed — they may still be running; check them and kill them by hand`
+    );
+  }
+  if (reaped.skipped > 0) {
+    console.error(
+      `[codex-mcp] Left ${reaped.skipped} recorded pid(s) alone: the process behind each could not` +
+        ` be confirmed as ours, so no signal was sent`
+    );
+  }
 
   const serverCwd = process.cwd();
   const ctx = createServer(serverCwd, {

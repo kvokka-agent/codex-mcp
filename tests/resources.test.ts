@@ -59,6 +59,7 @@ function collect(
     clientMode?: string;
     activeSessions?: number;
     observedModel?: string;
+    diskPersistence?: boolean;
   } = {}
 ): Registered[] {
   const registered: Registered[] = [];
@@ -83,7 +84,8 @@ function collect(
 
   registerResources(fakeServer as never, {
     version: overrides.version ?? "0.0.0-test",
-    clientMode: overrides.clientMode,
+    clientMode: overrides.clientMode ?? "app-server",
+    diskPersistence: overrides.diskPersistence ?? true,
     sessionManager: {
       getActiveSessionCount: () => overrides.activeSessions ?? 3,
       getObservedDefaultModel: () =>
@@ -208,12 +210,11 @@ describe("resources", () => {
     }
   });
 
-  it("defaults clientMode to app-server and marks the model unknown until a session observes one", () => {
+  it("marks the model unknown until a session observes one", () => {
     const payload = readJson(
       resource(collect({ observedModel: undefined }), RESOURCE_URIS.serverInfo)
     );
 
-    expect(payload.clientMode).toBe("app-server");
     expect(payload.defaultModel).toBeUndefined();
     expect(payload.defaultModelSource).toBe("unknown");
   });
@@ -230,6 +231,7 @@ describe("resources", () => {
     expect(features.respondApprovalAlias).toBe(false);
     expect(features.responseModeMinimal).toBe(true);
     expect(features.compatWarnings).toBe(true);
+    expect(features.diskPersistence).toBe(true);
     expect(features.diskResume).toBe(false);
     expect(features.dynamicTools).toBe(false);
 
@@ -246,6 +248,20 @@ describe("resources", () => {
     expect(Object.keys(toolCounts)).toEqual(["core"]);
     expect(Number.isInteger(toolCounts.core)).toBe(true);
     expect(toolCounts.core as number).toBeGreaterThan(0);
+  });
+
+  it("says session history is memory-only when the server claimed no state directory", () => {
+    const payload = readJson(
+      resource(collect({ diskPersistence: false }), RESOURCE_URIS.compatReport)
+    );
+
+    expect((payload.features as Record<string, unknown>).diskPersistence).toBe(false);
+    expect((payload.featureNotes as Record<string, string>).diskPersistence).toContain(
+      "memory only"
+    );
+    expect(payload.runtimeWarnings).toContain(
+      "Disk persistence is off: sessions are held in memory only and are lost when the server restarts."
+    );
   });
 
   it("warns only when the codex CLI version cannot be detected", () => {

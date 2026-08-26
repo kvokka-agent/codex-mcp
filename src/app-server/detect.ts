@@ -10,12 +10,34 @@ import { resolveCodexInvocation } from "./codex-bin.js";
 export type ClientMode = "app-server" | "exec";
 
 const DETECTION_TIMEOUT_MS = 5_000;
+/**
+ * Budget for the second attempt. The first probe pays the cold cost — page
+ * cache miss on a slow filesystem, on-access virus scan — that a retry does
+ * not, so an answer that missed the first budget usually fits this one.
+ */
+const DETECTION_RETRY_TIMEOUT_MS = 10_000;
+const KILL_GRACE_MS = 2_000;
+
+/**
+ * What the probe learned. `indeterminate` is not evidence about the binary:
+ * the probe itself did not produce an answer.
+ */
+type ProbeOutcome =
+  | { kind: "supported"; detail: string }
+  | { kind: "unsupported"; detail: string }
+  | { kind: "indeterminate"; detail: string; timedOut: boolean };
 
 /**
  * Detect whether the codex binary supports app-server mode.
  *
  * 1. If CODEX_MCP_MODE is set, use it directly.
  * 2. Otherwise probe `<binary> app-server --help` with a timeout.
+ *
+ * A probe that produced no answer picks exec mode, the mode that works on the
+ * widest set of CLIs, and says on stderr that the choice is a fallback rather
+ * than a reading of this binary — the two are indistinguishable in the mode
+ * itself, and every fork, resume and approval of the process depends on which
+ * one happened.
  */
 export async function detectClientMode(
   codexCommand: string,
@@ -27,11 +49,46 @@ export async function detectClientMode(
     return override;
   }
 
+  let outcome = await runProbe(codexCommand, codexIsPath, env, DETECTION_TIMEOUT_MS);
+  if (outcome.kind === "indeterminate" && outcome.timedOut) {
+    console.error(
+      `[codex-mcp] app-server probe did not answer within ${DETECTION_TIMEOUT_MS}ms; retrying once with ${DETECTION_RETRY_TIMEOUT_MS}ms`
+    );
+    outcome = await runProbe(codexCommand, codexIsPath, env, DETECTION_RETRY_TIMEOUT_MS);
+  }
+
+  switch (outcome.kind) {
+    case "supported":
+      console.error(`[codex-mcp] app-server probe: supported (${outcome.detail})`);
+      return "app-server";
+    case "unsupported":
+      console.error(`[codex-mcp] app-server probe: not supported (${outcome.detail})`);
+      return "exec";
+    default:
+      console.error(
+        `[codex-mcp] app-server probe: no answer (${outcome.detail}). ` +
+          `Using exec mode as a fallback for the whole process lifetime — fork, resume and approvals stay unavailable. ` +
+          `Set CODEX_MCP_MODE=app-server or CODEX_MCP_MODE=exec to skip the probe.`
+      );
+      return "exec";
+  }
+}
+
+/** Run one probe, turning a spawn-time exception into an outcome. */
+async function runProbe(
+  codexCommand: string,
+  codexIsPath: boolean,
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number
+): Promise<ProbeOutcome> {
   try {
-    const supported = await probeAppServer(codexCommand, codexIsPath, env);
-    return supported ? "app-server" : "exec";
-  } catch {
-    return "exec";
+    return await probeAppServer(codexCommand, codexIsPath, env, timeoutMs);
+  } catch (err) {
+    return {
+      kind: "indeterminate",
+      detail: `probe could not be started: ${err instanceof Error ? err.message : String(err)}`,
+      timedOut: false,
+    };
   }
 }
 
@@ -41,8 +98,9 @@ export async function detectClientMode(
 function probeAppServer(
   codexCommand: string,
   codexIsPath: boolean,
-  env: NodeJS.ProcessEnv
-): Promise<boolean> {
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number
+): Promise<ProbeOutcome> {
   return new Promise((resolve) => {
     const invocation = resolveCodexInvocation(["app-server", "--help"], {
       env,
@@ -51,11 +109,11 @@ function probeAppServer(
     });
 
     let settled = false;
-    const settle = (result: boolean) => {
+    const settle = (outcome: ProbeOutcome) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(result);
+      resolve(outcome);
     };
 
     let stdout = "";
@@ -74,23 +132,40 @@ function probeAppServer(
       stderr += chunk.toString();
     });
 
-    proc.on("error", () => {
-      // ENOENT or other spawn failure
-      settle(false);
+    proc.on("error", (err) => {
+      // ENOENT or another spawn failure: this says the binary could not be run,
+      // not that it lacks the subcommand.
+      settle({
+        kind: "indeterminate",
+        detail: `probe process failed to run: ${err instanceof Error ? err.message : String(err)}`,
+        timedOut: false,
+      });
     });
 
     proc.on("exit", (code) => {
       if (code === 0) {
-        settle(true);
+        settle({ kind: "supported", detail: "probe exited 0" });
+        return;
+      }
+      const combined = (stdout + stderr).toLowerCase();
+      const isUnknown =
+        combined.includes("unknown") ||
+        combined.includes("unrecognized") ||
+        combined.includes("not found") ||
+        combined.includes("no such subcommand");
+      if (isUnknown) {
+        settle({
+          kind: "unsupported",
+          detail: `probe exited ${code} calling the subcommand unknown`,
+        });
+      } else if (combined.includes("app-server")) {
+        settle({ kind: "supported", detail: `probe exited ${code} documenting the subcommand` });
       } else {
-        // Check if stderr/stdout suggests "unknown subcommand"
-        const combined = (stdout + stderr).toLowerCase();
-        const isUnknown =
-          combined.includes("unknown") ||
-          combined.includes("unrecognized") ||
-          combined.includes("not found") ||
-          combined.includes("no such subcommand");
-        settle(!isUnknown && combined.includes("app-server"));
+        settle({
+          kind: "indeterminate",
+          detail: `probe exited ${code} without mentioning the subcommand: ${summarize(stdout + stderr)}`,
+          timedOut: false,
+        });
       }
     });
 
@@ -109,10 +184,21 @@ function probeAppServer(
         } catch {
           /* ignore */
         }
-      }, 2000);
+      }, KILL_GRACE_MS);
       if (forceKill.unref) forceKill.unref();
-      settle(false);
-    }, DETECTION_TIMEOUT_MS);
+      settle({
+        kind: "indeterminate",
+        detail: `probe still running after ${timeoutMs}ms`,
+        timedOut: true,
+      });
+    }, timeoutMs);
     if (timer.unref) timer.unref();
   });
+}
+
+/** One line of probe output for the log, capped so a help page cannot fill it. */
+function summarize(output: string): string {
+  const trimmed = output.trim().replace(/\s+/g, " ");
+  if (!trimmed) return "no output";
+  return trimmed.length > 120 ? `${trimmed.slice(0, 120)}…` : trimmed;
 }

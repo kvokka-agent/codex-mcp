@@ -53,6 +53,8 @@ export interface PidInfo {
 export interface PidDetails {
   command?: string;
   model?: string;
+  /** The instant the client spawned the process, which the reaper matches against the OS start time. */
+  spawnedAt?: string;
 }
 
 // ── Critical event types that require immediate flush ────────────────
@@ -122,13 +124,15 @@ export class SessionPersistence {
   /**
    * Persist PID info for orphan detection.
    *
-   * The orphan reaper matches a live PID against `spawnedAt`; `command` and `model`
-   * only describe the process for a reader of the file.
+   * The orphan reaper matches a live PID against `spawnedAt` within five seconds, so the
+   * caller passes the spawn instant: taking the clock here dates the record to the end of
+   * the startup handshake instead. `command` and `model` only describe the process for a
+   * reader of the file.
    */
   writePidInfo(sessionId: string, pid: number, details: PidDetails = {}): void {
     const info: PidInfo = {
       pid,
-      spawnedAt: new Date().toISOString(),
+      spawnedAt: details.spawnedAt ?? new Date().toISOString(),
       command: details.command,
       model: details.model,
     };
@@ -236,23 +240,28 @@ export interface DiskPersistenceStartup {
 /**
  * Take ownership of STATE_DIR and read back what the previous run left there.
  *
- * Recovery, pruning and orphan reaping all act on another server's live sessions
- * when STATE_DIR is shared, so a server that loses the lock runs in memory only.
+ * Serving MCP requests needs no disk state, so every step here is best-effort: creating
+ * the state directory, taking the lock, pruning and scanning all run under one rollback
+ * that reports the reason on stderr and hands back a server that runs in memory only.
+ * Recovery, pruning and orphan reaping act on another server's live sessions when
+ * STATE_DIR is shared, which is why losing the lock takes that same rollback.
  */
-export function startDiskPersistence(persistence: SessionPersistence): DiskPersistenceStartup {
+export function startDiskPersistence(stateDir?: string): DiskPersistenceStartup {
+  let persistence: SessionPersistence | undefined;
   try {
+    persistence = new SessionPersistence(stateDir);
     persistence.acquireLock();
+    // Prune first: a directory retention deletes must not come back in `recovered`,
+    // where SessionManager would list it and write the session back to disk.
+    const pruned = persistence.prune();
+    return { persistence, recovered: persistence.recoverSessions(), pruned };
   } catch (err) {
     console.error(
-      "[codex-mcp] WARNING: another server owns STATE_DIR — running without disk persistence:",
+      "[codex-mcp] WARNING: STATE_DIR unusable — running without disk persistence:",
       err
     );
+    // Releases the lock only when this process took it; another server's lock is left alone.
+    persistence?.destroy();
     return { recovered: [], pruned: 0 };
   }
-
-  return {
-    persistence,
-    recovered: persistence.recoverSessions(),
-    pruned: persistence.prune(),
-  };
 }

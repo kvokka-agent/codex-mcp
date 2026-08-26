@@ -2,9 +2,11 @@
  * SessionManager — manages Codex session lifecycle, event buffering, and approval flow.
  */
 import { randomUUID } from "crypto";
+import { isAbsolute } from "path";
 import { AppServerClient } from "../app-server/client.js";
 import type { ICodexClient } from "../app-server/client-interface.js";
 import type { AppServerSpawnOptions } from "../app-server/lifecycle.js";
+import type { PidDetails } from "./persistence.js";
 import { resolveAndValidateCwd } from "../utils/cwd.js";
 import { redactPaths } from "../utils/redact.js";
 import { resolveAndValidateFilePath } from "../utils/files.js";
@@ -150,6 +152,10 @@ const REASONING_PROGRESS_METHODS = new Set<string>([
   Methods.REASONING_SUMMARY_PART_ADDED,
   Methods.PLAN_DELTA,
 ]);
+/** Operation names of `reportPersistFailure`, which also key its one-line-per-session set. */
+const PERSIST_OP_META = "session metadata";
+const PERSIST_OP_RESULT = "turn result";
+
 const ACTING_PROGRESS_METHODS = new Set<string>([
   Methods.COMMAND_OUTPUT_DELTA,
   Methods.COMMAND_TERMINAL_INTERACTION,
@@ -173,6 +179,10 @@ export class SessionManager {
   private ttlWarningEmitted = new Set<string>();
   /** Sessions whose event persistence already reported a failure — keeps stderr to one line. */
   private eventPersistFailed = new Set<string>();
+  /** Persistence failures already reported, keyed `${operation}\0${sessionId}`. */
+  private persistFailureReported = new Set<string>();
+  /** Sessions whose running turn was started with an `outputSchema`. */
+  private schemaConstrainedTurns = new Set<string>();
   /** Long-poll notifiers: set of resolve callbacks waiting for any change in a session. */
   private sessionNotifiers = new Map<string, Set<() => void>>();
 
@@ -189,6 +199,11 @@ export class SessionManager {
   /**
    * Ingest recovered sessions from disk into the in-memory session store.
    * Marks previously-running sessions as error, preserves completed results.
+   *
+   * Every field comes from the recovered metadata, timestamps included: a session that
+   * was cut off keeps the instant it was last active, so idle cleanup and the retention
+   * policy — which both date a session by `lastActiveAt` — still measure its real age
+   * after a restart instead of measuring the restart.
    */
   ingestRecovered(
     recovered: import("../persistence/recovery-scanner.js").RecoveredSession[]
@@ -202,27 +217,43 @@ export class SessionManager {
         "error",
         "cancelled",
       ]);
+      const createdAt = normalizeOptionalString(rec.meta.createdAt);
+      const lastActiveAt = normalizeOptionalString(rec.meta.lastActiveAt);
+      if (!createdAt || !lastActiveAt) {
+        // Both timestamps decide when cleanup cancels the session and when retention drops
+        // its directory. Reading the clock for a missing one would date every restart as
+        // fresh activity and keep the directory for good, so the session stays out.
+        console.error(
+          `[codex-mcp] Skipping recovered session ${rec.sessionId}: meta.json records no ` +
+            `${!createdAt ? "createdAt" : "lastActiveAt"}`
+        );
+        continue;
+      }
       const wasActive = rec.meta.status === "running" || rec.meta.status === "waiting_approval";
-      // Validate status from disk — unknown statuses default to "error"
-      const resolvedStatus: SessionStatus = wasActive
-        ? "error"
-        : VALID_STATUSES.has(rec.meta.status)
-          ? (rec.meta.status as SessionStatus)
-          : "error";
-      const now = new Date().toISOString();
+      const knownStatus = VALID_STATUSES.has(rec.meta.status)
+        ? (rec.meta.status as SessionStatus)
+        : null;
+      // A status the manager cannot read is an unrestorable session, which is an error —
+      // and the reason says so, so "codex failed" stays apart from "the status was
+      // unreadable".
+      const resolvedStatus: SessionStatus = wasActive ? "error" : (knownStatus ?? "error");
+      const recoveredReason = normalizeOptionalString(rec.meta.cancelledReason);
       const session: SessionInfo = {
         sessionId: rec.meta.sessionId,
-        threadId: rec.meta.threadId as string | undefined,
+        threadId: normalizeOptionalString(rec.meta.threadId),
         status: resolvedStatus,
         lastEventCursor: 0,
-        createdAt: rec.meta.createdAt,
-        lastActiveAt: now,
-        cancelledAt: rec.meta.cancelledAt,
+        createdAt,
+        lastActiveAt,
+        cancelledAt: normalizeOptionalString(rec.meta.cancelledAt),
         cancelledReason: wasActive
           ? "Server restarted while session was active"
-          : rec.meta.cancelledReason,
-        cwd: rec.meta.cwd ?? ".",
-        model: rec.meta.model as string | undefined,
+          : (recoveredReason ??
+            (knownStatus === null
+              ? `Recovered with a status this server cannot read: ${JSON.stringify(rec.meta.status)}`
+              : undefined)),
+        cwd: normalizeOptionalString(rec.meta.cwd),
+        model: normalizeOptionalString(rec.meta.model),
         approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
         sandbox: rec.meta.sandbox as SandboxMode | undefined,
         eventBuffer: createEventBuffer(),
@@ -235,11 +266,11 @@ export class SessionManager {
               ? (rec.result as TurnResult).output
               : undefined,
         progressState: {
-          lastEventAt: rec.meta.lastActiveAt ?? now,
+          lastEventAt: lastActiveAt,
           tokens: extractTokens((rec.result as TurnResult | undefined)?.turn),
         },
       };
-      restoreEventBuffer(session.eventBuffer, rec.events);
+      restoreEventBuffer(session.eventBuffer, rec.events, rec.sessionId);
       this.sessions.set(rec.sessionId, session);
       // Resume event log sequence numbering
       if (rec.lastSeq >= 0) {
@@ -277,6 +308,22 @@ export class SessionManager {
   }
 
   /**
+   * Report a persistence write that failed.
+   *
+   * The session goes on running from memory, so what the caller is told and what a
+   * restart would find drift apart from here on: one stderr line per session and
+   * operation says which write was lost and why, without a line per turn.
+   */
+  private reportPersistFailure(operation: string, sessionId: string, err: unknown): void {
+    const key = `${operation}\0${sessionId}`;
+    if (this.persistFailureReported.has(key)) return;
+    this.persistFailureReported.add(key);
+    console.error(
+      `[codex-mcp] Failed to persist ${operation}: session=${sessionId} error=${describeError(err)}`
+    );
+  }
+
+  /**
    * Best-effort persist session metadata to disk when status changes.
    * Deduplicates writes if status hasn't changed since last persist.
    */
@@ -287,8 +334,21 @@ export class SessionManager {
     try {
       this.persistence.writeSessionMeta(session);
       this.lastPersistedStatus.set(session.sessionId, session.status);
-    } catch {
-      /* best-effort */
+    } catch (err) {
+      this.reportPersistFailure(PERSIST_OP_META, session.sessionId, err);
+    }
+  }
+
+  /**
+   * Record whether the turn about to start constrains its final message with a
+   * JSON Schema — `turn/completed` carries no schema of its own, so this is what
+   * tells the completion handler to read the message as structured output.
+   */
+  private markTurnOutputSchema(sessionId: string, outputSchema?: Record<string, unknown>): void {
+    if (outputSchema && Object.keys(outputSchema).length > 0) {
+      this.schemaConstrainedTurns.add(sessionId);
+    } else {
+      this.schemaConstrainedTurns.delete(sessionId);
     }
   }
 
@@ -299,8 +359,10 @@ export class SessionManager {
     if (!this.persistence || !session.lastResult) return;
     try {
       this.persistence.writeResult(session.sessionId, session.lastResult);
-    } catch {
-      /* best-effort */
+    } catch (err) {
+      // A result that never reaches result.json comes back as `lastResult: null` after a
+      // restart, which reads exactly like a turn that produced nothing.
+      this.reportPersistFailure(PERSIST_OP_RESULT, session.sessionId, err);
     }
   }
 
@@ -386,8 +448,11 @@ export class SessionManager {
     // Persist session metadata to disk
     try {
       this.persistence?.writeSessionMeta(session);
-    } catch {
-      /* best-effort */
+    } catch (err) {
+      // The first write is what creates the session directory: without it nothing about
+      // this session survives a restart, while the compat report still says
+      // `diskPersistence: true`.
+      this.reportPersistFailure(PERSIST_OP_META, sessionId, err);
     }
 
     try {
@@ -396,15 +461,6 @@ export class SessionManager {
 
       // Start app-server subprocess
       await client.start(spawnOpts);
-
-      // Persist PID info for orphan detection on next startup.
-      if (client.childPid !== undefined) {
-        try {
-          this.persistence?.writePidInfo(sessionId, client.childPid, { model: spawnOpts.model });
-        } catch {
-          /* best-effort */
-        }
-      }
 
       // Start thread
       const threadStartResult = await client.threadStart({
@@ -430,6 +486,7 @@ export class SessionManager {
       }
 
       // Start first turn
+      this.markTurnOutputSchema(sessionId, advanced?.outputSchema);
       const turnStart = await this.startTurnWithCompatibilityFallback(client, {
         threadId,
         input,
@@ -458,7 +515,10 @@ export class SessionManager {
       });
       await client.destroy();
       this.clients.delete(sessionId);
-      this.sessions.delete(sessionId);
+      // Drop the half-created session from memory and from disk: the caller gets
+      // an error and no session id, and a leftover directory would come back as
+      // a recovered session on the next server start.
+      this.evictSession(sessionId, true);
       throw err;
     }
   }
@@ -511,8 +571,15 @@ export class SessionManager {
 
     const input: UserInput[] = [{ type: "text", text: prompt }];
 
+    // A recovered session whose meta.json recorded no cwd has no base to resolve a
+    // relative override against, and the server's own cwd is not that base.
+    if (overrides?.cwd !== undefined && session.cwd === undefined && !isAbsolute(overrides.cwd)) {
+      throw new Error(
+        `Error [${ErrorCode.INVALID_ARGUMENT}]: Session '${sessionId}' records no cwd, so a relative cwd override cannot be resolved — pass an absolute path`
+      );
+    }
     const resolvedCwd = overrides?.cwd
-      ? resolveAndValidateCwd(overrides.cwd, session.cwd)
+      ? resolveAndValidateCwd(overrides.cwd, session.cwd ?? overrides.cwd)
       : undefined;
 
     const turnParams: TurnStartParams = {
@@ -533,6 +600,7 @@ export class SessionManager {
     }
 
     let compatWarnings: string[] | undefined;
+    this.markTurnOutputSchema(sessionId, overrides?.outputSchema);
     try {
       const turnStart = await this.startTurnWithCompatibilityFallback(client, turnParams);
       compatWarnings = turnStart.compatWarnings;
@@ -540,17 +608,57 @@ export class SessionManager {
       const startedTurnId = extractTurnId(turnStartResult);
       if (startedTurnId) session.activeTurnId = startedTurnId;
 
-      // Only persist cwd/sandbox overrides if the client actually supports them
-      // on this turn. ExecClient in resume mode does not support -s/-p/-C, so
-      // persisting those values would cause session metadata to drift from reality.
+      // What the client did with the overrides this turn asked for, read after
+      // `turnStart` because that is the call the answer describes.
+      // `unappliedTurnOverrides` is the client naming what its command line could not
+      // carry; a client that reports none still says through `supportsTurnOverrides`
+      // that cwd and sandbox do not reach a turn past the first.
       const canOverride = client.supportsTurnOverrides;
-      if (resolvedCwd && canOverride) session.cwd = resolvedCwd;
+      const requestedValue: Record<string, string | undefined> = {
+        sandbox: overrides?.sandbox,
+        cwd: resolvedCwd,
+      };
+      const requestedNames = Object.entries(requestedValue)
+        .filter(([, value]) => value !== undefined)
+        .map(([name]) => name);
+      const unapplied = client.unappliedTurnOverrides ?? (canOverride ? [] : requestedNames);
+      const applied = (name: string): boolean => !unapplied.includes(name);
+
+      if (resolvedCwd && canOverride && applied("cwd")) session.cwd = resolvedCwd;
       if (overrides?.model) session.model = overrides.model;
       if (overrides?.approvalPolicy) {
         session.approvalPolicy = overrides.approvalPolicy as ApprovalPolicy;
       }
-      if (overrides?.sandbox && canOverride) {
+      if (overrides?.sandbox && canOverride && applied("sandbox")) {
         session.sandbox = overrides.sandbox as SandboxMode;
+      }
+
+      if (unapplied.length > 0) {
+        if (unapplied.includes("outputSchema")) {
+          // The turn output is not schema-constrained, so reading its text as structured
+          // output would hand the caller a shape the model was never asked for.
+          this.schemaConstrainedTurns.delete(sessionId);
+        }
+        // A caller narrowing the sandbox and reading `status: "running"` would otherwise
+        // take the narrower permissions for granted while codex keeps writing under the
+        // wider ones.
+        const effectiveValue: Record<string, string | undefined> = {
+          sandbox: session.sandbox,
+          cwd: session.cwd,
+        };
+        const named = unapplied.map((name) => {
+          const asked = requestedValue[name];
+          const kept = effectiveValue[name];
+          if (asked !== undefined && kept !== undefined) {
+            return `${name} '${asked}' (the turn keeps '${kept}')`;
+          }
+          return asked !== undefined ? `${name} '${asked}'` : name;
+        });
+        compatWarnings = [
+          ...(compatWarnings ?? []),
+          `This turn did not apply ${named.join(", ")}. Start a new session to change ` +
+            `${unapplied.length === 1 ? "it" : "them"}.`,
+        ];
       }
     } catch (err) {
       session.status = "error";
@@ -711,6 +819,7 @@ export class SessionManager {
       error: session.cancelledReason,
       completedAt: new Date().toISOString(),
     };
+    this.persistResult(session);
     pushEvent(
       session.eventBuffer,
       "result",
@@ -799,6 +908,8 @@ export class SessionManager {
     removedCount: number;
     diskSessionsRemoved: number;
     dryRun: boolean;
+    /** Set when a session directory removal was asked for and failed; names the sessions. */
+    message?: string;
   }> {
     const statuses = new Set(options?.statuses ?? CLEANABLE_SESSION_STATUSES);
     const olderThanMs = options?.olderThanMs;
@@ -829,6 +940,7 @@ export class SessionManager {
 
     let diskSessionsRemoved = 0;
     const removedSessionIds: string[] = [];
+    const diskFailures: string[] = [];
     for (const sessionId of matchedSessionIds) {
       const evicted = this.evictSession(sessionId, includeDisk);
       if (evicted.deleted) {
@@ -836,6 +948,9 @@ export class SessionManager {
       }
       if (evicted.diskRemoved) {
         diskSessionsRemoved++;
+      }
+      if (evicted.diskError) {
+        diskFailures.push(`${sessionId} (${evicted.diskError})`);
       }
     }
 
@@ -845,6 +960,15 @@ export class SessionManager {
       removedCount: removedSessionIds.length,
       diskSessionsRemoved,
       dryRun: false,
+      // Without this, a failed removal reports the same numbers as `includeDisk: false`
+      // and the caller reads a directory that is still there as cleaned.
+      ...(diskFailures.length > 0
+        ? {
+            message:
+              `${diskFailures.length} session director${diskFailures.length === 1 ? "y is" : "ies are"} ` +
+              `still on disk: ${diskFailures.join(", ")}`,
+          }
+        : {}),
     };
   }
 
@@ -908,16 +1032,6 @@ export class SessionManager {
         config: session.config,
       });
 
-      if (newClient.childPid !== undefined) {
-        try {
-          this.persistence?.writePidInfo(newSessionId, newClient.childPid, {
-            model: session.model,
-          });
-        } catch {
-          /* best-effort */
-        }
-      }
-
       // Resume the forked thread on the new process
       await newClient.threadResume({ threadId: forkedThreadId });
       newSession.threadId = forkedThreadId;
@@ -942,7 +1056,7 @@ export class SessionManager {
         );
       }
       this.clients.delete(newSessionId);
-      this.sessions.delete(newSessionId);
+      this.evictSession(newSessionId, true);
       throw new Error(
         `Error [${ErrorCode.THREAD_FORK_RESUME_FAILED}]: Failed to resume forked thread '${forkedThreadId}' in new app-server process: ${errorMessage}`
       );
@@ -1490,6 +1604,25 @@ export class SessionManager {
   ): void {
     const session = this.sessions.get(sessionId)!;
 
+    // Persist PID info for orphan detection on the next startup. The client
+    // reports every process it spawns: app-server spawns one in `start()`,
+    // exec spawns one per turn, so the file follows the live child.
+    client.on("spawn", (pid: number, spawnedAt: string) => {
+      // spawnedAt is the instant the client spawned the process; the reaper
+      // matches it against the start time the OS reports for that pid.
+      const details: PidDetails & { spawnedAt?: string } = { model: session.model, spawnedAt };
+      try {
+        this.persistence?.writePidInfo(sessionId, pid, details);
+      } catch (err) {
+        // Every spawn that never reaches pid.json is a codex process the orphan reaper
+        // cannot find on the next start, so each one is reported rather than the first.
+        console.error(
+          `[codex-mcp] Failed to persist pid.json — pid ${pid} will not be reaped after a ` +
+            `restart: session=${sessionId} error=${describeError(err)}`
+        );
+      }
+    });
+
     // Handle notifications
     client.onNotification((method, params) => {
       session.lastActiveAt = new Date().toISOString();
@@ -1545,17 +1678,26 @@ export class SessionManager {
         case Methods.TURN_COMPLETED: {
           if (session.status === "cancelled") break;
           const turnObj = p.turn as Record<string, unknown> | undefined;
-          const completedTurnId = (turnObj?.id as string | undefined) ?? session.activeTurnId ?? "";
+          const knownTurnId = normalizeOptionalString(turnObj?.id) ?? session.activeTurnId;
+          if (knownTurnId === undefined) {
+            // `turn/completed` carries `turn.id`; an empty one here says the notification
+            // did not, and it is never used to route anything — a response goes back by
+            // its JSON-RPC id and a poll by `requestId`.
+            console.error(
+              `[codex-mcp] turn/completed carries no turn id: session=${sessionId} — reporting lastResult.turnId as ""`
+            );
+          }
+          const completedTurnId = knownTurnId ?? "";
           const rawTurnOutput = normalizeOptionalString(turnObj?.output);
-          const finalText =
-            normalizeOptionalString(turnObj?.output) ?? session.lastAgentMessageText;
+          const finalText = rawTurnOutput ?? session.lastAgentMessageText;
+          const askedForSchema = this.schemaConstrainedTurns.delete(sessionId);
           session.status = "idle";
           session.activeTurnId = undefined;
           session.lastResult = {
             turnId: completedTurnId,
             text: finalText,
             output: rawTurnOutput,
-            structuredOutput: turnObj?.structuredOutput,
+            structuredOutput: askedForSchema ? parseStructuredOutput(finalText) : undefined,
             turn: p.turn,
             status: turnObj?.status as string | undefined,
             turnError: turnObj?.error,
@@ -1629,12 +1771,12 @@ export class SessionManager {
             const status = normalizeOptionalString(item?.status);
             const completedItem =
               method === Methods.ITEM_COMPLETED || method === Methods.RAW_RESPONSE_ITEM_COMPLETED;
-            if (
-              itemType === "agentMessage" &&
-              completedItem &&
-              status === "completed" &&
-              typeof item?.text === "string"
-            ) {
+            // AgentMessageThreadItem carries `id`, `text` and an optional `phase`
+            // and no status (codex-schema/v2/ItemCompletedNotification.json), so
+            // the notification method is what marks the message finished. `phase`
+            // is not required either: providers emit it inconsistently, and the
+            // last completed message of a turn is its answer.
+            if (itemType === "agentMessage" && completedItem && typeof item?.text === "string") {
               session.lastAgentMessageText = item.text;
             }
             // Keep user/agent message-like items as output; everything else is progress.
@@ -1716,7 +1858,7 @@ export class SessionManager {
     client.onServerRequest((id: RequestId, method: string, params: unknown) => {
       // Do not transition terminal sessions back to waiting_approval.
       if (session.status === "cancelled" || session.status === "error") {
-        respondToTerminalSessionRequest(client, id, method);
+        respondToTerminalSessionRequest(client, id, method, sessionId);
         return;
       }
 
@@ -1756,9 +1898,7 @@ export class SessionManager {
             requestId,
             kind: "command",
             params,
-            itemId: normalizeOptionalString(approvalParams.itemId) ?? "",
-            threadId: normalizeOptionalString(approvalParams.threadId) ?? "",
-            turnId: normalizeOptionalString(approvalParams.turnId) ?? "",
+            ...correlationIds(approvalParams, method, sessionId),
             reason,
             approvalId,
             commandActions,
@@ -1836,9 +1976,7 @@ export class SessionManager {
             requestId,
             kind: "fileChange",
             params,
-            itemId: p.itemId as string,
-            threadId: p.threadId as string,
-            turnId: p.turnId as string,
+            ...correlationIds(p, method, sessionId),
             reason,
             createdAt: new Date().toISOString(),
             resolved: false,
@@ -1897,9 +2035,7 @@ export class SessionManager {
             requestId,
             kind: "user_input",
             params,
-            itemId: p.itemId as string,
-            threadId: p.threadId as string,
-            turnId: p.turnId as string,
+            ...correlationIds(p, method, sessionId),
             createdAt: new Date().toISOString(),
             resolved: false,
             respond: (result) => client.respondToServer(id, result),
@@ -1950,28 +2086,36 @@ export class SessionManager {
 
         case Methods.DYNAMIC_TOOL_CALL:
           // Auto-reject: codex-mcp doesn't support dynamic tool calls
-          client.respondToServer(id, {
-            success: false,
-            contentItems: [{ type: "inputText", text: "Not supported by codex-mcp" }],
-          } as DynamicToolCallResponse);
+          respondOrReport(sessionId, method, () =>
+            client.respondToServer(id, {
+              success: false,
+              contentItems: [{ type: "inputText", text: "Not supported by codex-mcp" }],
+            } as DynamicToolCallResponse)
+          );
           break;
 
         case Methods.AUTH_TOKEN_REFRESH:
-          client.respondErrorToServer(
-            id,
-            AUTH_REFRESH_UNSUPPORTED_CODE,
-            AUTH_REFRESH_UNSUPPORTED_MESSAGE
+          respondOrReport(sessionId, method, () =>
+            client.respondErrorToServer(
+              id,
+              AUTH_REFRESH_UNSUPPORTED_CODE,
+              AUTH_REFRESH_UNSUPPORTED_MESSAGE
+            )
           );
           break;
 
         case Methods.LEGACY_PATCH_APPROVAL:
         case Methods.LEGACY_EXEC_APPROVAL:
-          client.respondToServer(id, { decision: "denied" } as LegacyApprovalResponse);
+          respondOrReport(sessionId, method, () =>
+            client.respondToServer(id, { decision: "denied" } as LegacyApprovalResponse)
+          );
           console.error(`[codex-mcp] Legacy approval request received: ${method}`);
           break;
 
         default:
-          client.respondErrorToServer(id, -32601, `Unhandled server request: ${method}`);
+          respondOrReport(sessionId, method, () =>
+            client.respondErrorToServer(id, -32601, `Unhandled server request: ${method}`)
+          );
           break;
       }
       // Wake any long-poll waiters after every server-initiated request (new pending approval)
@@ -2087,6 +2231,8 @@ export class SessionManager {
   ): {
     deleted: boolean;
     diskRemoved: boolean;
+    /** Why the session directory is still on disk, when removal was asked for and failed. */
+    diskError?: string;
   } {
     const session = this.sessions.get(sessionId);
     if (!session) return { deleted: false, diskRemoved: false };
@@ -2108,7 +2254,11 @@ export class SessionManager {
     this.sessionNotifiers.delete(sessionId);
     this.cancellationInFlight.delete(sessionId);
     this.eventPersistFailed.delete(sessionId);
+    this.schemaConstrainedTurns.delete(sessionId);
+    this.persistFailureReported.delete(`${PERSIST_OP_META}\0${sessionId}`);
+    this.persistFailureReported.delete(`${PERSIST_OP_RESULT}\0${sessionId}`);
     let diskRemoved = false;
+    let diskError: string | undefined;
     try {
       if (this.persistence) {
         if (removeDisk) {
@@ -2119,11 +2269,19 @@ export class SessionManager {
           this.persistence.destroySessionLog(sessionId);
         }
       }
-    } catch {
-      /* best-effort */
+    } catch (err) {
+      // A directory that could not be removed still holds the session's paths and code
+      // fragments, and `diskSessionsRemoved: 0` alone reads like disk removal was never
+      // asked for — so the caller is told which sessions are still there.
+      const detail = describeError(err);
+      if (removeDisk) diskError = detail;
+      console.error(
+        `[codex-mcp] Failed to ${removeDisk ? "remove the session directory" : "close the event log"}: ` +
+          `session=${sessionId} error=${detail}`
+      );
     }
 
-    return { deleted, diskRemoved };
+    return { deleted, diskRemoved, ...(diskError ? { diskError } : {}) };
   }
 }
 
@@ -2158,22 +2316,38 @@ const RESTORABLE_EVENT_TYPES = new Set<string>([
  *
  * Buffer ids continue the on-disk seq numbering, so a poll cursor and a log line
  * name the same event across a restart.
+ *
+ * A line carrying no timestamp is dropped, its seq still consumed: dating it with the
+ * current clock would put yesterday's event into the caller's chronology as one that
+ * just happened.
  */
 function restoreEventBuffer(
   buf: EventBuffer,
-  events: Array<{ seq: number; [key: string]: unknown }>
+  events: Array<{ seq: number; [key: string]: unknown }>,
+  sessionId: string
 ): void {
+  let undated = 0;
   for (const raw of events) {
     const type = raw.type;
+    const timestamp = raw.timestamp;
     if (typeof type !== "string" || !RESTORABLE_EVENT_TYPES.has(type)) continue;
-    buf.events.push({
-      id: raw.seq,
-      type: type as SessionEventType,
-      data: raw.data,
-      timestamp: typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
-      pinned: false,
-    });
+    if (typeof timestamp !== "string") {
+      undated++;
+    } else {
+      buf.events.push({
+        id: raw.seq,
+        type: type as SessionEventType,
+        data: raw.data,
+        timestamp,
+        pinned: false,
+      });
+    }
     if (raw.seq >= buf.nextId) buf.nextId = raw.seq + 1;
+  }
+  if (undated > 0) {
+    console.error(
+      `[codex-mcp] Dropped ${undated} restored event(s) that carry no timestamp: session=${sessionId}`
+    );
   }
   evictEvents(buf);
 }
@@ -2278,6 +2452,25 @@ function mergeTokens(base?: ProgressTokens, extra?: ProgressTokens): ProgressTok
   };
 }
 
+/**
+ * Structured output of a finished turn: its final assistant message read as JSON.
+ *
+ * `turn/start` takes an `outputSchema` that constrains the final assistant
+ * message (codex-schema/v2/TurnStartParams.json) and the protocol returns the
+ * constrained value in no field of its own — the message text is it. Text that
+ * is not a JSON object or array yields nothing.
+ */
+function parseStructuredOutput(text?: string): unknown {
+  if (typeof text !== "string") return undefined;
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return undefined;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 function extractPercent(value: unknown): number | undefined {
   if (!isRecord(value)) return undefined;
   const candidates = [value.percent, value.percentage, value.progress, value.fractionComplete];
@@ -2289,11 +2482,45 @@ function extractPercent(value: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * The record that carries the token counters.
+ *
+ * `thread/tokenUsage/updated` nests them under `tokenUsage.total` and
+ * `tokenUsage.last` (codex-schema/v2/ThreadTokenUsageUpdatedNotification.json);
+ * the exec `token_count` event nests them under `info.total_token_usage` and
+ * `info.last_token_usage` (codex-schema/EventMsg.json, TokenCountEventMsg).
+ * Cumulative counts win over the last turn's. Other payloads keep the counters
+ * in `usage` or in the record itself.
+ */
+function tokenCounterSource(value: Record<string, unknown>): Record<string, unknown> {
+  const tokenUsage = isRecord(value.tokenUsage) ? value.tokenUsage : undefined;
+  if (tokenUsage) {
+    const nested = pickRecord(tokenUsage, ["total", "last"]);
+    if (nested) return nested;
+  }
+  const info = isRecord(value.info) ? value.info : undefined;
+  if (info) {
+    const nested = pickRecord(info, ["total_token_usage", "last_token_usage"]);
+    if (nested) return nested;
+  }
+  return isRecord(value.usage) ? value.usage : value;
+}
+
+function pickRecord(
+  source: Record<string, unknown>,
+  keys: string[]
+): Record<string, unknown> | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (isRecord(value)) return value;
+  }
+  return undefined;
+}
+
 function extractTokens(value: unknown): ProgressTokens | undefined {
   if (!isRecord(value)) return undefined;
 
-  const usage = isRecord(value.usage) ? value.usage : undefined;
-  const source = usage ?? value;
+  const source = tokenCounterSource(value);
   const input = pickNumber(source, [
     "inputTokens",
     "input_tokens",
@@ -2393,37 +2620,96 @@ function createUnrefTimeout(handler: () => void, timeoutMs: number): ReturnType<
 function respondToTerminalSessionRequest(
   client: ICodexClient,
   id: RequestId,
-  method: string
+  method: string,
+  sessionId: string
 ): void {
-  switch (method) {
-    case Methods.COMMAND_APPROVAL:
-    case Methods.FILE_CHANGE_APPROVAL:
-      client.respondToServer(id, { decision: "cancel" });
-      break;
-    case Methods.USER_INPUT_REQUEST:
-      client.respondToServer(id, { answers: {} } as UserInputRequestResponse);
-      break;
-    case Methods.DYNAMIC_TOOL_CALL:
-      client.respondToServer(id, {
-        success: false,
-        contentItems: [{ type: "inputText", text: "Session is terminal" }],
-      } as DynamicToolCallResponse);
-      break;
-    case Methods.AUTH_TOKEN_REFRESH:
-      client.respondErrorToServer(id, AUTH_REFRESH_UNSUPPORTED_CODE, AUTH_REFRESH_TERMINAL_MESSAGE);
-      break;
-    case Methods.LEGACY_PATCH_APPROVAL:
-    case Methods.LEGACY_EXEC_APPROVAL:
-      client.respondToServer(id, { decision: "denied" } as LegacyApprovalResponse);
-      break;
-    default:
-      client.respondErrorToServer(id, -32601, `Unhandled server request: ${method}`);
-      break;
-  }
+  respondOrReport(sessionId, method, () => {
+    switch (method) {
+      case Methods.COMMAND_APPROVAL:
+      case Methods.FILE_CHANGE_APPROVAL:
+        client.respondToServer(id, { decision: "cancel" });
+        break;
+      case Methods.USER_INPUT_REQUEST:
+        client.respondToServer(id, { answers: {} } as UserInputRequestResponse);
+        break;
+      case Methods.DYNAMIC_TOOL_CALL:
+        client.respondToServer(id, {
+          success: false,
+          contentItems: [{ type: "inputText", text: "Session is terminal" }],
+        } as DynamicToolCallResponse);
+        break;
+      case Methods.AUTH_TOKEN_REFRESH:
+        client.respondErrorToServer(
+          id,
+          AUTH_REFRESH_UNSUPPORTED_CODE,
+          AUTH_REFRESH_TERMINAL_MESSAGE
+        );
+        break;
+      case Methods.LEGACY_PATCH_APPROVAL:
+      case Methods.LEGACY_EXEC_APPROVAL:
+        client.respondToServer(id, { decision: "denied" } as LegacyApprovalResponse);
+        break;
+      default:
+        client.respondErrorToServer(id, -32601, `Unhandled server request: ${method}`);
+        break;
+    }
+  });
 }
 
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Answer a server-initiated request, reporting a delivery that failed.
+ *
+ * The client throws when it cannot write the response. Letting that escape the request
+ * handler would skip the long-poll wake-up at the end of it, so a caller waiting on this
+ * session would sit until its own deadline instead of hearing about the turn.
+ */
+function respondOrReport(sessionId: string, method: string, send: () => void): void {
+  try {
+    send();
+  } catch (err) {
+    console.error(
+      `[codex-mcp] Failed to answer a server request: session=${sessionId} method=${method} ` +
+        `error=${describeError(err)}`
+    );
+  }
+}
+
+/**
+ * The correlation ids a server-initiated request carries.
+ *
+ * The protocol declares `itemId`, `threadId` and `turnId` on every approval and
+ * user-input request, so a missing one is a server that broke its own contract and says
+ * so on stderr. It is passed on as `""` because nothing routes by it: the decision goes
+ * back on the JSON-RPC id the request arrived with, and the caller names the request by
+ * its `requestId`.
+ */
+function correlationIds(
+  params: Record<string, unknown>,
+  method: string,
+  sessionId: string
+): { itemId: string; threadId: string; turnId: string } {
+  const itemId = normalizeOptionalString(params.itemId);
+  const threadId = normalizeOptionalString(params.threadId);
+  const turnId = normalizeOptionalString(params.turnId);
+  const missing: string[] = [];
+  if (itemId === undefined) missing.push("itemId");
+  if (threadId === undefined) missing.push("threadId");
+  if (turnId === undefined) missing.push("turnId");
+  if (missing.length > 0) {
+    console.error(
+      `[codex-mcp] ${method} carries no ${missing.join(", ")}: session=${sessionId} — ` +
+        `reported as an empty string`
+    );
+  }
+  return { itemId: itemId ?? "", threadId: threadId ?? "", turnId: turnId ?? "" };
 }
 
 function normalizeStringArrayOrNull(value: unknown): string[] | null {
