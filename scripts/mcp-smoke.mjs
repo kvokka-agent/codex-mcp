@@ -11,7 +11,7 @@ function usage(exitCode = 0) {
     "",
     "Defaults:",
     "  (no args) -> spawns: node dist/index.js",
-    "  --npx     -> spawns: npx -y @leo000001/codex-mcp",
+    "  --npx     -> spawns: npx -y @kvokka/codex-mcp",
     "  --        -> overrides command/args explicitly",
     "",
   ].join("\n");
@@ -77,7 +77,7 @@ async function main() {
   const cmdArgs = args.overrideCommand
     ? args.overrideArgs
     : args.useNpx
-      ? ["-y", "@leo000001/codex-mcp"]
+      ? ["-y", "@kvokka/codex-mcp"]
       : ["dist/index.js"];
 
   const transport = new StdioClientTransport({
@@ -101,7 +101,7 @@ async function main() {
   const tools = await client.listTools();
   const names = new Set(tools.tools.map((t) => t.name));
 
-  for (const required of ["codex", "codex_reply", "codex_session", "codex_check"]) {
+  for (const required of ["codex", "codex_reply", "codex_session", "codex_check", "codex_setup"]) {
     assert(names.has(required), `missing tool from tools/list: ${required}`);
   }
 
@@ -112,7 +112,12 @@ async function main() {
 
   const resources = await client.listResources();
   const uris = new Set(resources.resources.map((r) => r.uri));
-  for (const uri of ["codex-mcp:///server-info", "codex-mcp:///config", "codex-mcp:///gotchas"]) {
+  for (const uri of [
+    "codex-mcp:///server-info",
+    "codex-mcp:///config",
+    "codex-mcp:///gotchas",
+    "codex-mcp:///delegation-guide",
+  ]) {
     assert(uris.has(uri), `missing resource uri: ${uri}`);
   }
 
@@ -129,4 +134,3 @@ main().catch((err) => {
   console.error("FAILED:", err?.stack || String(err));
   process.exitCode = 1;
 });
-

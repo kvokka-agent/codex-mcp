@@ -1,7 +1,11 @@
 import { EventEmitter } from "events";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "stream";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Methods } from "../src/app-server/protocol.js";
+import { _resetForTesting } from "../src/utils/codex-executable.js";
 
 const spawnMock = vi.fn();
 
@@ -62,42 +66,111 @@ function createMockProcess() {
   return proc;
 }
 
+/**
+ * PATH-sensitive env names differ by platform, and getPathEntries() reads whichever is set,
+ * so all of them are pinned while a spawn is measured.
+ */
+const PINNED_ENV_KEYS = ["PATH", "Path", "path", "CODEX_MCP_PATH", "CODEX_MCP_COMMAND"] as const;
+
+let binDir: string;
+let fakeCodex: string;
+let envBackup: Record<string, string | undefined>;
+
+function pinEnv(overrides: Record<string, string | undefined>): void {
+  for (const key of PINNED_ENV_KEYS) delete process.env[key];
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  _resetForTesting();
+}
+
+async function spawnAppServer(): Promise<[string, string[], Record<string, unknown>]> {
+  const proc = createMockProcess();
+  spawnMock.mockReturnValue(proc);
+
+  const mod = await import("../src/app-server/client.js");
+  const client = new mod.AppServerClient();
+  const out = await client.start({ approvalPolicy: "never", sandbox: "read-only" });
+  expect(out.userAgent).toBe("mock");
+
+  expect(spawnMock).toHaveBeenCalledTimes(1);
+  return spawnMock.mock.calls[0] as [string, string[], Record<string, unknown>];
+}
+
 describe("AppServerClient spawn behavior", () => {
+  beforeAll(() => {
+    binDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-spawn-"));
+    // Auto-detection accepts the first PATH hit; on Windows a bare name only matches with a
+    // PATHEXT suffix, so the stub carries .exe there.
+    fakeCodex = path.join(binDir, process.platform === "win32" ? "codex.exe" : "codex");
+    writeFileSync(fakeCodex, "#!/bin/sh\nexit 0\n");
+    chmodSync(fakeCodex, 0o755);
+  });
+
+  afterAll(() => {
+    rmSync(binDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    envBackup = Object.fromEntries(PINNED_ENV_KEYS.map((key) => [key, process.env[key]]));
+  });
+
   afterEach(() => {
+    for (const key of PINNED_ENV_KEYS) {
+      const value = envBackup[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    _resetForTesting();
     spawnMock.mockReset();
   });
 
-  it("spawns codex app-server in a Windows-compatible way", async () => {
-    const proc = createMockProcess();
-    spawnMock.mockReturnValue(proc);
+  it("spawns the codex found on PATH with the app-server arguments", async () => {
+    pinEnv({ PATH: binDir });
 
-    const mod = await import("../src/app-server/client.js");
-    const client = new mod.AppServerClient();
-    const out = await client.start({ approvalPolicy: "never", sandbox: "read-only" });
-    expect(out.userAgent).toBe("mock");
+    const [cmd, args, spawnOpts] = await spawnAppServer();
 
-    expect(spawnMock).toHaveBeenCalledTimes(1);
-    const [cmd, args, spawnOpts] = spawnMock.mock.calls[0] as [
-      string,
-      string[],
-      { detached?: boolean; windowsHide?: boolean },
-    ];
+    expect(cmd).toBe(fakeCodex);
+    expect(args).toEqual([
+      "app-server",
+      "-c",
+      "approval_policy=never",
+      "-c",
+      "sandbox_mode=read-only",
+    ]);
 
     if (process.platform === "win32") {
-      expect(spawnOpts?.detached).toBe(false);
-      expect(spawnOpts?.windowsHide).toBe(true);
+      expect(spawnOpts.detached).toBe(false);
+      expect(spawnOpts.windowsHide).toBe(true);
+    } else {
+      expect(spawnOpts.detached).toBe(true);
+      expect(spawnOpts.windowsHide).toBe(false);
+    }
+    expect(spawnOpts.stdio).toEqual(["pipe", "pipe", "pipe"]);
+  });
 
-      const comspec = process.env.ComSpec || process.env.COMSPEC || "cmd.exe";
-      if (cmd === process.execPath) {
-        expect(args[1]).toBe("app-server");
-      } else {
-        expect(cmd).toBe(comspec);
-        expect(args.slice(0, 5)).toEqual(["/d", "/s", "/c", "codex", "app-server"]);
-      }
+  it("spawns the executable named by CODEX_MCP_PATH instead of searching PATH", async () => {
+    pinEnv({ PATH: binDir, CODEX_MCP_PATH: fakeCodex });
+
+    const [cmd] = await spawnAppServer();
+
+    expect(cmd).toBe(fakeCodex);
+  });
+
+  it("falls back to the bare command when PATH holds no codex", async () => {
+    pinEnv({ PATH: path.join(binDir, "empty") });
+
+    const [cmd, args] = await spawnAppServer();
+
+    if (process.platform === "win32") {
+      // Windows cannot spawn a bare name: resolution ends at the ComSpec fallback, which passes
+      // the command to cmd.exe as its own argument token.
+      expect(cmd.toLowerCase()).toMatch(/cmd\.exe$/);
+      expect(args.slice(0, 5)).toEqual(["/d", "/s", "/c", "codex", "app-server"]);
     } else {
       expect(cmd).toBe("codex");
       expect(args[0]).toBe("app-server");
-      expect(spawnOpts?.detached).toBe(true);
     }
   });
 

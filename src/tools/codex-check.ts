@@ -15,6 +15,7 @@ import {
   type PollOptions,
   type ResponseMode,
 } from "../types.js";
+import { interactionStateForStatus, recommendedNextActionForStatus } from "../utils/execution.js";
 
 export interface CodexCheckParams {
   action: CheckAction;
@@ -34,10 +35,16 @@ export interface CodexCheckParams {
   pollOptions?: PollOptions;
 }
 
+export type CodexCheckReturn =
+  | CheckResult
+  | { error: string; isError: true }
+  | Promise<CheckResult | { error: string; isError: true }>;
+
 export function executeCodexCheck(
   args: CodexCheckParams,
-  sessionManager: SessionManager
-): CheckResult | { error: string; isError: true } {
+  sessionManager: SessionManager,
+  requestSignal?: AbortSignal
+): CodexCheckReturn {
   const responseMode = args.responseMode ?? "minimal";
   const pollOptions = args.pollOptions;
 
@@ -63,10 +70,28 @@ export function executeCodexCheck(
         typeof args.maxEvents === "number"
           ? Math.max(POLL_MIN_MAX_EVENTS, Math.floor(args.maxEvents))
           : POLL_DEFAULT_MAX_EVENTS;
-      return sessionManager.pollEvents(args.sessionId, args.cursor, maxEvents, {
-        responseMode,
-        pollOptions,
-      });
+
+      // Long-poll: if no events are immediately available and waitMs is requested, wait.
+      const waitMs = pollOptions?.waitMs;
+      if (typeof waitMs === "number" && waitMs > 0) {
+        return pollWithWait(
+          sessionManager,
+          args.sessionId,
+          args.cursor,
+          maxEvents,
+          { responseMode, pollOptions },
+          Math.min(waitMs, 120_000),
+          requestSignal
+        ).then((result) => enrichCheckResult(sessionManager, result));
+      }
+
+      return enrichCheckResult(
+        sessionManager,
+        sessionManager.pollEvents(args.sessionId, args.cursor, maxEvents, {
+          responseMode,
+          pollOptions,
+        })
+      );
     }
 
     case "respond_permission": {
@@ -149,10 +174,13 @@ export function executeCodexCheck(
         typeof args.maxEvents === "number"
           ? Math.max(0, Math.floor(args.maxEvents))
           : RESPOND_DEFAULT_MAX_EVENTS;
-      return sessionManager.pollEventsMonotonic(args.sessionId, args.cursor, maxEvents, {
-        responseMode,
-        pollOptions,
-      });
+      return enrichCheckResult(
+        sessionManager,
+        sessionManager.pollEventsMonotonic(args.sessionId, args.cursor, maxEvents, {
+          responseMode,
+          pollOptions,
+        })
+      );
     }
 
     case "respond_user_input": {
@@ -188,10 +216,13 @@ export function executeCodexCheck(
         typeof args.maxEvents === "number"
           ? Math.max(0, Math.floor(args.maxEvents))
           : RESPOND_DEFAULT_MAX_EVENTS;
-      return sessionManager.pollEventsMonotonic(args.sessionId, args.cursor, maxEvents, {
-        responseMode,
-        pollOptions,
-      });
+      return enrichCheckResult(
+        sessionManager,
+        sessionManager.pollEventsMonotonic(args.sessionId, args.cursor, maxEvents, {
+          responseMode,
+          pollOptions,
+        })
+      );
     }
 
     default:
@@ -200,4 +231,74 @@ export function executeCodexCheck(
         isError: true,
       };
   }
+}
+
+function hasVisibleData(result: CheckResult): boolean {
+  return (
+    result.events.length > 0 ||
+    (result.actions !== undefined && result.actions.length > 0) ||
+    result.result !== undefined
+  );
+}
+
+async function pollWithWait(
+  sessionManager: SessionManager,
+  sessionId: string,
+  cursor: number | undefined,
+  maxEvents: number,
+  options: { responseMode?: ResponseMode; pollOptions?: PollOptions },
+  waitMs: number,
+  signal?: AbortSignal
+): Promise<CheckResult> {
+  const deadline = Date.now() + waitMs;
+  let currentCursor = cursor;
+
+  while (true) {
+    const result = sessionManager.pollEvents(sessionId, currentCursor, maxEvents, options);
+    if (hasVisibleData(result)) {
+      return result;
+    }
+    if (signal?.aborted) {
+      return result;
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      return result;
+    }
+
+    currentCursor = result.nextCursor;
+
+    // waitForChange registers its notifier synchronously, so no state change
+    // can land between the poll above and the registration: a notification
+    // either preceded the poll (and is in `result`) or wakes this waiter.
+    let waitRefused = false;
+    try {
+      await sessionManager.waitForChange(sessionId, remainingMs, signal);
+    } catch (err: unknown) {
+      // Timeout, abort and notification all resolve; the only rejection is a
+      // session whose waiter slots are full. Looping on that re-rejects with
+      // no delay and burns the rest of the wait window, so the long poll
+      // degrades to one immediate read and lets the caller retry later.
+      waitRefused = true;
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[codex-mcp] Long-poll wait refused for session '${sessionId}': ${message}`);
+    }
+
+    if (waitRefused || signal?.aborted) {
+      return sessionManager.pollEvents(sessionId, currentCursor, maxEvents, options);
+    }
+  }
+}
+
+function enrichCheckResult(sessionManager: SessionManager, result: CheckResult): CheckResult {
+  const actionTypes =
+    result.status === "waiting_approval"
+      ? sessionManager.getPendingActionTypes(result.sessionId)
+      : [];
+  return {
+    ...result,
+    interactionState: interactionStateForStatus(result.status),
+    recommendedNextAction: recommendedNextActionForStatus(result.status, actionTypes),
+  };
 }

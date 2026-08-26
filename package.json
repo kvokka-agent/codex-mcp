@@ -1,6 +1,6 @@
 {
-  "name": "@leo000001/codex-mcp",
-  "version": "2.1.0",
+  "name": "@kvokka/codex-mcp",
+  "version": "2.2.0",
   "description": "MCP server that wraps OpenAI Codex app-server — start coding agents, poll their progress, and manage permissions from any MCP client",
   "type": "module",
   "main": "dist/index.js",
@@ -32,10 +32,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "npm run build",
-    "check:stdio": "node scripts/check-stdio.mjs",
-    "check:stdio:strict": "node scripts/check-stdio.mjs --mode strict",
+    "check:stdio": "node scripts/check-stdio.mjs --timeout-ms 6000",
+    "check:stdio:strict": "node scripts/check-stdio.mjs --mode strict --timeout-ms 6000",
     "smoke:mcp": "node scripts/mcp-smoke.mjs",
     "lint": "eslint src/ tests/",
+    "lint:md": "npx --yes rumdl@0.2.60 check .",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
     "prepare": "husky"
@@ -52,15 +53,15 @@
     "json-rpc",
     "approval-workflow"
   ],
-  "author": "xihuai18",
+  "author": "kvokka",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xihuai18/codex-mcp.git"
+    "url": "git+https://github.com/kvokka/codex-mcp.git"
   },
-  "homepage": "https://github.com/xihuai18/codex-mcp#readme",
+  "homepage": "https://github.com/kvokka/codex-mcp#readme",
   "bugs": {
-    "url": "https://github.com/xihuai18/codex-mcp/issues"
+    "url": "https://github.com/kvokka/codex-mcp/issues"
   },
   "publishConfig": {
     "access": "public"
@@ -86,6 +87,7 @@
     "node": ">=18.0.0"
   },
   "lint-staged": {
-    "*.ts": "prettier --write"
+    "*.ts": "prettier --write",
+    "*.md": "npx --yes rumdl@0.2.60 check"
   }
 }

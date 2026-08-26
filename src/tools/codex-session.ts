@@ -8,6 +8,10 @@ export interface CodexSessionParams {
   action: SessionAction;
   sessionId?: string;
   includeSensitive?: boolean;
+  statuses?: Array<"idle" | "error" | "cancelled">;
+  olderThanMs?: number;
+  dryRun?: boolean;
+  includeDisk?: boolean;
 }
 
 export async function executeCodexSession(
@@ -55,6 +59,14 @@ export async function executeCodexSession(
         };
       }
       return await sessionManager.forkSession(args.sessionId);
+
+    case "clean":
+      return await sessionManager.cleanSessions({
+        statuses: args.statuses,
+        olderThanMs: args.olderThanMs,
+        dryRun: args.dryRun,
+        includeDisk: args.includeDisk,
+      });
 
     case "clean_background_terminals":
       if (!args.sessionId) {

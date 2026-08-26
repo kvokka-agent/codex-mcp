@@ -29,6 +29,7 @@ import {
 } from "./protocol.js";
 import { buildAppServerArgs, type AppServerSpawnOptions } from "./lifecycle.js";
 import { resolveCodexInvocation } from "./codex-bin.js";
+import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 import { ErrorCode } from "../types.js";
 import type { ICodexClient } from "./client-interface.js";
 
@@ -73,6 +74,15 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     return true;
   }
 
+  get childPid(): number | undefined {
+    return this.process?.pid ?? undefined;
+  }
+
+  /** app-server takes every per-turn override, so none is ever dropped. */
+  get unappliedTurnOverrides(): readonly string[] {
+    return [];
+  }
+
   /**
    * Spawn codex app-server and perform initialization handshake.
    */
@@ -81,7 +91,11 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     const env = { ...process.env };
     const stdio: ["pipe", "pipe", "pipe"] = ["pipe", "pipe", "pipe"];
 
-    const invocation = resolveCodexInvocation(args);
+    const exe = getDefaultCodexExecutable();
+    const invocation = resolveCodexInvocation(args, {
+      codexCommand: exe.command,
+      codexIsPath: exe.isPath,
+    });
     this.spawnedViaCmd = invocation.spawnedViaCmd;
     this.spawnedDetached = process.platform !== "win32";
 
@@ -121,9 +135,30 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
       this.emit("error", err);
     });
 
-    // Initialize handshake
+    // Report the process before the handshake: the spawn instant is what the
+    // orphan reaper matches a live pid against, and a handshake can take
+    // longer than the tolerance it allows.
+    if (proc.pid !== undefined) {
+      this.emit("spawn", proc.pid, new Date().toISOString());
+    }
+
+    // Initialize handshake.
+    //
+    // `experimentalApi` defaults to false (codex-schema/v1/InitializeParams.json →
+    // InitializeCapabilities), and off it suppresses two messages this codebase
+    // serves end to end: the `item/tool/requestUserInput` server request
+    // (codex-schema/ServerRequest.json) that drives the whole user-input tract,
+    // and the `item/plan/delta` notification
+    // (codex-schema/v2/PlanDeltaNotification.json).
+    //
+    // Every EXPERIMENTAL marker in the bundle sits on a whole method, a whole
+    // notification, a new `ThreadItem` union variant (PlanThreadItem) or an
+    // optional outgoing field, so the flag only adds messages — it rewrites no
+    // field this client already reads. The one experimental field on an outgoing
+    // message, `TurnStartParams.collaborationMode`, is never populated here.
     const result = await this.request<InitializeResult>(Methods.INITIALIZE, {
       clientInfo: { name: "codex-mcp", version: CLIENT_VERSION },
+      capabilities: { experimentalApi: true },
     } satisfies InitializeParams);
 
     return result;
@@ -145,26 +180,34 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
 
   /**
    * Send a JSON-RPC response to a server-initiated request.
+   *
+   * Throws when the write was refused, so a caller that resolved an approval
+   * learns the decision never reached codex instead of treating it as sent.
    */
   respondToServer(id: RequestId, result: unknown): void {
-    try {
-      this.send({ jsonrpc: "2.0", id, result } as JsonRpcResponse);
-    } catch (err) {
-      console.error(
-        `[app-server] Failed to send JSON-RPC response for server request id=${String(id)}: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
+    this.sendServerResponse(id, { jsonrpc: "2.0", id, result } as JsonRpcResponse, "response");
   }
 
   /**
    * Send a JSON-RPC error response to a server-initiated request.
+   *
+   * Throws on a refused write, like `respondToServer`.
    */
   respondErrorToServer(id: RequestId, code: number, message: string): void {
+    this.sendServerResponse(
+      id,
+      { jsonrpc: "2.0", id, error: { code, message } } as JsonRpcResponse,
+      "error response"
+    );
+  }
+
+  private sendServerResponse(id: RequestId, msg: JsonRpcResponse, kind: string): void {
     try {
-      this.send({ jsonrpc: "2.0", id, error: { code, message } } as JsonRpcResponse);
+      this.send(msg);
     } catch (err) {
-      console.error(
-        `[app-server] Failed to send JSON-RPC error response for server request id=${String(id)}: ${err instanceof Error ? err.message : String(err)}`
+      throw new Error(
+        `Failed to send JSON-RPC ${kind} for server request id=${String(id)}: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err }
       );
     }
   }
@@ -265,17 +308,9 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
       if (trimmed[0] !== "{" && trimmed[0] !== "[") {
         continue;
       }
+      let parsed: unknown;
       try {
-        const parsed = JSON.parse(trimmed) as unknown;
-        if (Array.isArray(parsed)) {
-          for (const item of parsed) {
-            if (item && typeof item === "object") {
-              this.handleMessage(item as JsonRpcMessage);
-            }
-          }
-        } else if (parsed && typeof parsed === "object") {
-          this.handleMessage(parsed as JsonRpcMessage);
-        }
+        parsed = JSON.parse(trimmed) as unknown;
       } catch {
         const error = new Error(
           `Error [${ErrorCode.PROTOCOL_PARSE_ERROR}]: app-server protocol error: failed to parse JSON line: ${trimmed.slice(0, 200)}`
@@ -290,6 +325,19 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
             `[app-server] Failed to terminate app-server after protocol parse error: ${terminateErr instanceof Error ? terminateErr.message : String(terminateErr)}`
           );
         }
+        continue;
+      }
+
+      // Dispatch outside the parse guard: a throwing handler is not a parse
+      // error and must not be reported or acted on as one.
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (item && typeof item === "object") {
+            this.handleMessage(item as JsonRpcMessage);
+          }
+        }
+      } else if (parsed && typeof parsed === "object") {
+        this.handleMessage(parsed as JsonRpcMessage);
       }
     }
   }
@@ -397,10 +445,16 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     if ("id" in msg && "method" in msg) {
       const req = msg as JsonRpcRequest;
       if (this.serverRequestHandler) {
-        this.serverRequestHandler(req.id, req.method, req.params);
+        this.runHandler(
+          () => this.serverRequestHandler!(req.id, req.method, req.params),
+          req.method
+        );
       } else {
         // No handler — respond with error to avoid hanging
-        this.respondErrorToServer(req.id, -32601, `Method not handled: ${req.method}`);
+        this.runHandler(
+          () => this.respondErrorToServer(req.id, -32601, `Method not handled: ${req.method}`),
+          req.method
+        );
       }
       return;
     }
@@ -409,9 +463,24 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     if ("method" in msg && !("id" in msg)) {
       const notif = msg as JsonRpcNotification;
       if (this.notificationHandler) {
-        this.notificationHandler(notif.method, notif.params);
+        this.runHandler(() => this.notificationHandler!(notif.method, notif.params), notif.method);
       }
       return;
+    }
+  }
+
+  /**
+   * Run a message handler, keeping its failure out of the stdout reader: an
+   * exception thrown here would otherwise abort the loop over the remaining
+   * lines of the same chunk.
+   */
+  private runHandler(fn: () => void, method: string): void {
+    try {
+      fn();
+    } catch (err) {
+      console.error(
+        `[app-server] Handler for ${method} threw: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
   }
 

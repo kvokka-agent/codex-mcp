@@ -1,10 +1,12 @@
 import { EventEmitter } from "events";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
+import { SessionPersistence } from "../src/session/persistence.js";
 import { DEFAULT_POLL_INTERVAL, WAITING_APPROVAL_POLL_INTERVAL } from "../src/types.js";
 import { executeCodexCheck } from "../src/tools/codex-check.js";
 
@@ -18,8 +20,14 @@ class MockAppServerClient extends EventEmitter {
   threadResumeResult: unknown = { thread: { id: "thread_forked" } };
 
   supportsTurnOverrides = true;
+  childPid: number | undefined = undefined;
+  /** Spawn instant reported with the "spawn" event, as the real clients report theirs. */
+  spawnedAt = "2024-05-05T10:00:00.000Z";
 
-  start = vi.fn(async () => ({ userAgent: "mock" }));
+  start = vi.fn(async () => {
+    if (this.childPid !== undefined) this.emit("spawn", this.childPid, this.spawnedAt);
+    return { userAgent: "mock" };
+  });
   threadStart = vi.fn(async () => this.threadStartResult);
   threadFork = vi.fn(async () => this.threadForkResult);
   threadResume = vi.fn(async () => this.threadResumeResult);
@@ -70,19 +78,21 @@ describe("SessionManager protocol compatibility + approvals", () => {
     expect(res.threadId).toBe("thread_v2");
   });
 
-  it("extracts threadId from legacy v1 thread/start response shape", async () => {
+  it("refuses a thread/start response that puts the id outside `thread`", async () => {
+    // Every response of the bundle carrying a thread id carries it as
+    // `thread.id` (codex-schema/v2/ThreadStartResponse.json). An id found
+    // anywhere else belongs to no known backend, and adopting it would start a
+    // session against a thread this server cannot address.
     client.threadStartResult = { threadId: "thread_v1" };
-    const res = await manager.createSession("hi", workspace, {}, "medium");
-    expect(res.threadId).toBe("thread_v1");
+    await expect(manager.createSession("hi", workspace, {}, "medium")).rejects.toThrow(
+      /missing thread id/
+    );
   });
 
-  it("extracts threadId from legacy v1 thread/fork response shape", async () => {
-    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+  it("refuses a thread/fork response that puts the id outside `thread`", async () => {
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
     client.threadForkResult = { threadId: "thread_fork_v1" };
-    const forked = await manager.forkSession(sessionId);
-    expect(forked.threadId).toBe("thread_fork_v1");
-    // original threadId still present
-    expect(threadId).toBeDefined();
+    await expect(manager.forkSession(sessionId)).rejects.toThrow(/missing thread id/);
   });
 
   it("cleans up forked session resources when the new app-server fails to start", async () => {
@@ -699,6 +709,37 @@ describe("SessionManager protocol compatibility + approvals", () => {
     expect((poll2 as { isError?: boolean }).isError).not.toBe(true);
     expect(client.respondToServer).toHaveBeenCalledWith(12, { answers });
     expect(manager.getSession(sessionId).pendingRequestCount).toBe(0);
+  });
+
+  it("keeps a secret answer out of the event log and sends it to codex unchanged", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+    // ToolRequestUserInputQuestion marks a question whose answer must not be
+    // written down (codex-schema/ToolRequestUserInputParams.json).
+    client.emitServerRequest(120, Methods.USER_INPUT_REQUEST, {
+      itemId: "item_ui_secret",
+      threadId,
+      turnId: "turn_1",
+      questions: [
+        { id: "token", header: "Auth", question: "API key?", isSecret: true },
+        { id: "env", header: "Env", question: "Which environment?" },
+      ],
+    });
+
+    const requestId = manager.pollEvents(sessionId).actions![0].requestId;
+    const answers = { token: { answers: ["sk-live-123"] }, env: { answers: ["staging"] } };
+    manager.resolveUserInput(sessionId, requestId, answers);
+
+    expect(client.respondToServer).toHaveBeenCalledWith(120, { answers });
+    const logged = manager
+      .pollEvents(sessionId, 0, 200)
+      .events.find(
+        (event) =>
+          event.type === "approval_result" &&
+          (event.data as { kind?: string }).kind === "user_input"
+      )!.data as { answers: Record<string, { answers: string[] }> };
+    expect(logged.answers.token.answers).toEqual(["<secret>"]);
+    expect(logged.answers.env.answers).toEqual(["staging"]);
+    expect(JSON.stringify(logged)).not.toContain("sk-live-123");
   });
 
   it("returns INTERNAL and keeps user_input pending when forwarding response fails", async () => {
@@ -1833,11 +1874,13 @@ describe("SessionManager protocol compatibility + approvals", () => {
   it("emits reconnect progress for retryable app-server errors", async () => {
     const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
 
+    // ErrorNotification carries [error, threadId, turnId, willRetry]
+    // (codex-schema/v2/ErrorNotification.json); the text lives in error.message.
     client.emitNotification(Methods.ERROR, {
-      message: "temporary disconnect",
+      threadId: "thread_mock",
+      turnId: "turn_mock",
+      error: { message: "temporary disconnect" },
       willRetry: true,
-      retryCount: 1,
-      maxRetries: 5,
     });
 
     const poll = manager.pollEvents(sessionId, 0, 200);
@@ -1857,7 +1900,9 @@ describe("SessionManager protocol compatibility + approvals", () => {
     const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
 
     client.emitNotification(Methods.ERROR, {
-      message: "fatal error",
+      threadId: "thread_mock",
+      turnId: "turn_mock",
+      error: { message: "fatal error" },
       willRetry: false,
     });
 
@@ -2116,5 +2161,612 @@ describe("SessionManager protocol compatibility + approvals", () => {
         sandboxPolicy: { type: "dangerFullAccess" },
       })
     );
+  });
+
+  // ── Thread status / lifecycle / warning notifications ──────────────
+
+  /** Events a poll returned for one notification method, newest last. */
+  function eventsFor(
+    poll: ReturnType<SessionManager["pollEvents"]>,
+    method: string
+  ): Array<{ type: string; data: Record<string, unknown> }> {
+    return poll.events
+      .map((e) => ({ type: e.type as string, data: e.data as Record<string, unknown> }))
+      .filter((e) => e.data?.method === method);
+  }
+
+  it("keeps a thread status change and its active flags in the event stream", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.THREAD_STATUS_CHANGED, {
+      threadId,
+      status: { type: "active", activeFlags: ["waitingOnApproval"] },
+    });
+
+    const poll = manager.pollEvents(sessionId, 0, 50);
+    const [event] = eventsFor(poll, Methods.THREAD_STATUS_CHANGED);
+    expect(event.type).toBe("progress");
+    expect(event.data).toMatchObject({
+      threadId,
+      status: { type: "active", activeFlags: ["waitingOnApproval"] },
+      statusType: "active",
+      activeFlags: ["waitingOnApproval"],
+    });
+  });
+
+  it("keeps the session running when a waiting status outruns the approval request", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.THREAD_STATUS_CHANGED, {
+      threadId,
+      status: { type: "active", activeFlags: ["waitingOnApproval"] },
+    });
+
+    // No request has arrived, so there is nothing a caller could answer yet.
+    const early = manager.pollEvents(sessionId, 0, 50);
+    expect(early.status).toBe("running");
+    expect(early.actions).toBeUndefined();
+
+    client.emitServerRequest(701, Methods.COMMAND_APPROVAL, {
+      itemId: "item_race_early",
+      threadId,
+      turnId: "turn_race",
+      command: "rm -rf /tmp/x",
+      cwd: workspace,
+    });
+
+    const withRequest = manager.pollEvents(sessionId, 0, 50);
+    expect(withRequest.status).toBe("waiting_approval");
+    expect(withRequest.actions).toHaveLength(1);
+  });
+
+  it("does not re-park a session on a waiting status that trails the answered request", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitServerRequest(702, Methods.COMMAND_APPROVAL, {
+      itemId: "item_race_late",
+      threadId,
+      turnId: "turn_race",
+      command: "echo hi",
+      cwd: workspace,
+    });
+    const pending = manager.pollEvents(sessionId, 0, 50);
+    expect(pending.status).toBe("waiting_approval");
+    manager.resolveApproval(sessionId, pending.actions![0].requestId, "accept");
+    expect(manager.pollEvents(sessionId, 0, 50).status).toBe("running");
+
+    // The status change codex sent while the request was open lands afterwards.
+    client.emitNotification(Methods.THREAD_STATUS_CHANGED, {
+      threadId,
+      status: { type: "active", activeFlags: ["waitingOnApproval"] },
+    });
+
+    const late = manager.pollEvents(sessionId, 0, 50);
+    expect(late.status).toBe("running");
+    expect(late.actions).toBeUndefined();
+  });
+
+  it("holds waiting_approval while a request is open and takes idle once it is answered", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitServerRequest(703, Methods.COMMAND_APPROVAL, {
+      itemId: "item_idle_race",
+      threadId,
+      turnId: "turn_idle",
+      command: "echo hi",
+      cwd: workspace,
+    });
+    const pending = manager.pollEvents(sessionId, 0, 50);
+
+    client.emitNotification(Methods.THREAD_STATUS_CHANGED, { threadId, status: { type: "idle" } });
+    expect(manager.pollEvents(sessionId, 0, 50).status).toBe("waiting_approval");
+
+    manager.resolveApproval(sessionId, pending.actions![0].requestId, "accept");
+    client.emitNotification(Methods.THREAD_STATUS_CHANGED, { threadId, status: { type: "idle" } });
+    expect(manager.pollEvents(sessionId, 0, 50).status).toBe("idle");
+  });
+
+  it("leaves the session untouched for a notLoaded thread status", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.THREAD_STATUS_CHANGED, {
+      threadId,
+      status: { type: "notLoaded" },
+    });
+
+    const poll = manager.pollEvents(sessionId, 0, 50);
+    expect(poll.status).toBe("running");
+    expect(eventsFor(poll, Methods.THREAD_STATUS_CHANGED)[0].data.statusType).toBe("notLoaded");
+  });
+
+  it("fails the session on a systemError thread status and reports it as an error event", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.THREAD_STATUS_CHANGED, {
+      threadId,
+      status: { type: "systemError" },
+    });
+
+    const poll = manager.pollEvents(sessionId, 0, 50);
+    expect(poll.status).toBe("error");
+    const [event] = eventsFor(poll, Methods.THREAD_STATUS_CHANGED);
+    expect(event.type).toBe("error");
+    expect(event.data).toMatchObject({ threadId, statusType: "systemError" });
+
+    // A terminal session stays terminal, whatever codex reports next.
+    client.emitNotification(Methods.THREAD_STATUS_CHANGED, { threadId, status: { type: "idle" } });
+    expect(manager.pollEvents(sessionId, 0, 50).status).toBe("error");
+  });
+
+  it("keeps a cancelled session cancelled when a thread status arrives late", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+    await manager.cancelSession(sessionId, "stop");
+
+    client.emitNotification(Methods.THREAD_STATUS_CHANGED, {
+      threadId,
+      status: { type: "active", activeFlags: ["waitingOnUserInput"] },
+    });
+
+    expect(manager.pollEvents(sessionId, 0, 50).status).toBe("cancelled");
+  });
+
+  it("surfaces thread closure and context compaction as session events", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.THREAD_COMPACTED, { threadId, turnId: "turn_compact" });
+    client.emitNotification(Methods.THREAD_CLOSED, { threadId });
+
+    const poll = manager.pollEvents(sessionId, 0, 50);
+    expect(eventsFor(poll, Methods.THREAD_COMPACTED)[0]).toEqual({
+      type: "progress",
+      data: { method: Methods.THREAD_COMPACTED, threadId, turnId: "turn_compact" },
+    });
+    expect(eventsFor(poll, Methods.THREAD_CLOSED)[0]).toEqual({
+      type: "progress",
+      data: { method: Methods.THREAD_CLOSED, threadId },
+    });
+    // Neither one is a failure of the session.
+    expect(poll.status).toBe("running");
+  });
+
+  it("surfaces deprecation and config warnings with the details codex sent", async () => {
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.DEPRECATION_NOTICE, {
+      summary: "`--profile` is deprecated",
+      details: "use `--config profile=name`",
+    });
+    client.emitNotification(Methods.CONFIG_WARNING, {
+      summary: "unknown key `sandbox_mode`",
+      details: null,
+      path: "/home/someone/.codex/config.toml",
+      range: { start: { line: 3, column: 1 }, end: { line: 3, column: 12 } },
+    });
+
+    const poll = manager.pollEvents(sessionId, 0, 50);
+    expect(eventsFor(poll, Methods.DEPRECATION_NOTICE)[0]).toEqual({
+      type: "progress",
+      data: {
+        method: Methods.DEPRECATION_NOTICE,
+        summary: "`--profile` is deprecated",
+        details: "use `--config profile=name`",
+      },
+    });
+    expect(eventsFor(poll, Methods.CONFIG_WARNING)[0]).toEqual({
+      type: "progress",
+      data: {
+        method: Methods.CONFIG_WARNING,
+        summary: "unknown key `sandbox_mode`",
+        details: null,
+        path: "/home/someone/.codex/config.toml",
+        range: { start: { line: 3, column: 1 }, end: { line: 3, column: 12 } },
+      },
+    });
+    expect(poll.status).toBe("running");
+  });
+
+  it("keeps a warning in the buffer while the deltas around it are evicted", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.CONFIG_WARNING, { summary: "unknown key `sandbox_mode`" });
+    // Each delta carries its own itemId so nothing coalesces into one event.
+    for (let i = 0; i < 1100; i++) {
+      client.emitNotification(Methods.AGENT_MESSAGE_DELTA, {
+        threadId,
+        itemId: `item_${i}`,
+        delta: "x",
+      });
+    }
+
+    const poll = manager.pollEvents(sessionId, 0, 5000);
+    expect(poll.events.length).toBeLessThan(1101);
+    expect(eventsFor(poll, Methods.CONFIG_WARNING)).toHaveLength(1);
+  });
+});
+
+describe("SessionManager missing protocol ids", () => {
+  let manager: SessionManager;
+  let client: MockAppServerClient;
+  let errors: ReturnType<typeof vi.spyOn>;
+  const workspace = path.resolve(os.tmpdir(), "codex-mcp-tests");
+
+  beforeEach(() => {
+    errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    client = new MockAppServerClient();
+    manager = new SessionManager({
+      disableCleanup: true,
+      createClient: () => client as unknown as AppServerClient,
+    });
+  });
+
+  afterEach(() => {
+    manager.destroy();
+    vi.restoreAllMocks();
+  });
+
+  function logged(fragment: string): boolean {
+    return errors.mock.calls.some((call) => String(call[0]).includes(fragment));
+  }
+
+  it("reports an approval request that carries none of its correlation ids", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitServerRequest(1, Methods.COMMAND_APPROVAL, { command: "ls" });
+
+    expect(logged("carries no itemId, threadId, turnId")).toBe(true);
+    const action = manager.pollEvents(started.sessionId, 0, 50).actions![0]!;
+    expect(action.itemId).toBe("");
+  });
+
+  it("reports a file change approval that carries no itemId", async () => {
+    await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitServerRequest(2, Methods.FILE_CHANGE_APPROVAL, {
+      threadId: "thread_mock",
+      turnId: "turn_1",
+    });
+
+    expect(logged("carries no itemId")).toBe(true);
+  });
+
+  it("reports a user input request that carries no itemId", async () => {
+    await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitServerRequest(3, Methods.USER_INPUT_REQUEST, {
+      threadId: "thread_mock",
+      turnId: "turn_1",
+      questions: [{ id: "q1", question: "which?" }],
+    });
+
+    expect(logged("carries no itemId")).toBe(true);
+  });
+
+  it("stays silent when every correlation id is there", async () => {
+    await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitServerRequest(4, Methods.COMMAND_APPROVAL, {
+      itemId: "item_1",
+      threadId: "thread_mock",
+      turnId: "turn_1",
+      command: "ls",
+    });
+
+    expect(logged("carries no")).toBe(false);
+  });
+
+  it("reports a turn that completed without a turn id", async () => {
+    client.turnStartResult = {};
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { status: "completed", output: "done" },
+    });
+
+    expect(logged("turn/completed carries no turn id")).toBe(true);
+    expect(manager.getLastResult(started.sessionId)?.turnId).toBe("");
+  });
+
+  it("falls back to the active turn id without reporting anything", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.emitNotification(Methods.TURN_STARTED, { turn: { id: "turn_live" } });
+
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId: started.threadId,
+      turn: { status: "completed", output: "done" },
+    });
+
+    expect(logged("turn/completed carries no turn id")).toBe(false);
+    expect(manager.getLastResult(started.sessionId)?.turnId).toBe("turn_live");
+  });
+});
+
+describe("SessionManager disk persistence", () => {
+  const workspace = path.resolve(os.tmpdir(), "codex-mcp-tests");
+  let root: string;
+  let persistence: SessionPersistence;
+  let manager: SessionManager;
+  let client: MockAppServerClient;
+
+  /** The manager only records a PID when the client exposes one. */
+  class PidClient extends MockAppServerClient {
+    childPid: number | undefined = 424242;
+  }
+
+  function eventsFile(sessionId: string): string {
+    return path.join(root, "sessions", sessionId, "events.jsonl");
+  }
+
+  function readEventLines(sessionId: string): Array<Record<string, unknown>> {
+    return readFileSync(eventsFile(sessionId), "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+
+  beforeEach(() => {
+    root = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-manager-persistence-"));
+    persistence = new SessionPersistence(root);
+    client = new PidClient();
+    manager = new SessionManager({
+      disableCleanup: true,
+      persistence,
+      createClient: () => client as unknown as AppServerClient,
+    });
+  });
+
+  afterEach(() => {
+    manager.destroy();
+    persistence.destroy();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("writes every buffered event into events.jsonl", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+    client.emitNotification(Methods.AGENT_MESSAGE_DELTA, {
+      threadId,
+      itemId: "item_1",
+      delta: "hello",
+    });
+    persistence.flushAll();
+
+    const buffered = manager.pollEvents(sessionId, 0).events;
+    const onDisk = readEventLines(sessionId);
+    expect(onDisk).toHaveLength(buffered.length);
+    // The buffered event and its log line carry one timestamp, not two clock reads.
+    expect(onDisk[0]).toEqual({
+      seq: buffered[0]!.id,
+      type: buffered[0]!.type,
+      data: buffered[0]!.data,
+      timestamp: buffered[0]!.timestamp,
+    });
+  });
+
+  it("flushes a critical event at once and holds a normal one until the flush", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.AGENT_MESSAGE_DELTA, {
+      threadId,
+      itemId: "item_1",
+      delta: "hello",
+    });
+    // "output" is batched, so nothing has reached the file yet.
+    expect(existsSync(eventsFile(sessionId))).toBe(false);
+
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId,
+      turnId: "turn_done",
+      turn: { status: "completed" },
+    });
+
+    // The critical "result" event flushes the batch it sits behind.
+    const onDisk = readEventLines(sessionId);
+    expect(onDisk.map((e) => e.type)).toEqual(["output", "result"]);
+    expect(onDisk.map((e) => e.seq)).toEqual([0, 1]);
+  });
+
+  it("logs thread lifecycle and warning notifications with the buffer's numbering", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    client.emitNotification(Methods.CONFIG_WARNING, { summary: "unknown key `sandbox_mode`" });
+    client.emitNotification(Methods.DEPRECATION_NOTICE, { summary: "`--profile` is deprecated" });
+    client.emitNotification(Methods.THREAD_COMPACTED, { threadId, turnId: "turn_compact" });
+    client.emitNotification(Methods.THREAD_CLOSED, { threadId });
+    // A systemError status is critical, so it flushes the batch sitting behind it.
+    client.emitNotification(Methods.THREAD_STATUS_CHANGED, {
+      threadId,
+      status: { type: "systemError" },
+    });
+
+    const buffered = manager.pollEvents(sessionId, 0, 50).events;
+    const onDisk = readEventLines(sessionId);
+    expect(onDisk.map((e) => e.type)).toEqual([
+      "progress",
+      "progress",
+      "progress",
+      "progress",
+      "error",
+    ]);
+    expect(onDisk.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4]);
+    expect(onDisk.map((e) => ({ seq: e.seq, type: e.type, data: e.data }))).toEqual(
+      buffered.map((e) => ({ seq: e.id, type: e.type, data: e.data }))
+    );
+    expect(onDisk.map((e) => e.timestamp)).toEqual(buffered.map((e) => e.timestamp));
+  });
+
+  it("restores a session's events after a restart and continues the seq numbering", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+    client.emitNotification(Methods.AGENT_MESSAGE_DELTA, {
+      threadId,
+      itemId: "item_1",
+      delta: "hello",
+    });
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId,
+      turnId: "turn_done",
+      turn: { status: "completed" },
+    });
+    const beforeRestart = manager.pollEvents(sessionId, 0).events;
+    manager.destroy();
+    persistence.destroy();
+
+    // Second run: a fresh adapter and manager over the same state dir.
+    persistence = new SessionPersistence(root);
+    manager = new SessionManager({
+      disableCleanup: true,
+      persistence,
+      createClient: () => client as unknown as AppServerClient,
+    });
+    const recovered = persistence.recoverSessions();
+    manager.ingestRecovered(recovered);
+
+    const afterRestart = manager.pollEvents(sessionId, 0).events;
+    // Timestamp included: a restored event carries the instant the client already
+    // polled, not the one events.jsonl read a tick later.
+    expect(afterRestart).toEqual(beforeRestart);
+
+    // New events continue the numbering instead of overwriting seq 0.
+    const seqsBefore = readEventLines(sessionId).map((e) => e.seq);
+    await manager.cancelSession(sessionId, "restarted");
+    const seqsAfter = readEventLines(sessionId).map((e) => e.seq);
+    expect(seqsAfter).toEqual([...seqsBefore, 2, 3]);
+    expect(manager.pollEvents(sessionId, 2).events.map((e) => e.id)).toEqual([2, 3]);
+  });
+
+  it("stores the pid and the model under their own keys in pid.json", async () => {
+    const { sessionId } = await manager.createSession(
+      "hi",
+      workspace,
+      { model: "gpt-5-codex" },
+      "medium"
+    );
+
+    const pidInfo = JSON.parse(
+      readFileSync(path.join(root, "sessions", sessionId, "pid.json"), "utf-8")
+    );
+    // The orphan reaper matches on pid + spawnedAt; the model only labels the process.
+    expect(pidInfo.pid).toBe(client.childPid);
+    expect(Number.isNaN(Date.parse(pidInfo.spawnedAt))).toBe(false);
+    expect(pidInfo.model).toBe("gpt-5-codex");
+    expect(pidInfo.command).toBeUndefined();
+
+    const recoveredPid = persistence.recoverSessions()[0]!.pidInfo!;
+    expect(recoveredPid.pid).toBe(client.childPid);
+  });
+
+  it("records a process the client spawns after start, as exec does per turn", async () => {
+    // ExecClient has no process until its first turn, so the pid reaches disk
+    // when the client reports the spawn, not when start() returns.
+    const execLike = new MockAppServerClient();
+    const execManager = new SessionManager({
+      disableCleanup: true,
+      persistence,
+      createClient: () => execLike as unknown as AppServerClient,
+    });
+    try {
+      const { sessionId } = await execManager.createSession("hi", workspace, {}, "medium");
+      expect(existsSync(path.join(root, "sessions", sessionId, "pid.json"))).toBe(false);
+
+      execLike.emit("spawn", 777, "2024-05-05T11:22:33.000Z");
+
+      const pidInfo = JSON.parse(
+        readFileSync(path.join(root, "sessions", sessionId, "pid.json"), "utf-8")
+      );
+      expect(pidInfo.pid).toBe(777);
+    } finally {
+      execManager.destroy();
+    }
+  });
+
+  it("dates the pid record by the spawn, not by the end of the handshake", async () => {
+    const { sessionId } = await manager.createSession(
+      "hi",
+      workspace,
+      { model: "gpt-5-codex" },
+      "medium"
+    );
+
+    const record = JSON.parse(
+      readFileSync(path.join(root, "sessions", sessionId, "pid.json"), "utf-8")
+    ) as { pid: number; spawnedAt: string; model?: string };
+
+    expect(record.pid).toBe(client.childPid);
+    expect(record.model).toBe("gpt-5-codex");
+    // The reaper matches this against the OS start time within five seconds, so it carries
+    // the spawn instant the client reported rather than the clock at write time.
+    expect(record.spawnedAt).toBe(client.spawnedAt);
+  });
+
+  it("leaves nothing on disk when the session fails to start", async () => {
+    client.threadStart.mockRejectedValueOnce(new Error("thread/start refused"));
+
+    await expect(manager.createSession("hi", workspace, {}, "medium")).rejects.toThrow(
+      "thread/start refused"
+    );
+
+    expect(readdirSync(path.join(root, "sessions"))).toEqual([]);
+    expect(persistence.recoverSessions()).toEqual([]);
+  });
+
+  it("keeps the cancellation result readable after a restart", async () => {
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+    await manager.cancelSession(sessionId, "user stopped it");
+    persistence.flushAll();
+
+    const restarted = new SessionManager({ disableCleanup: true, persistence });
+    try {
+      restarted.ingestRecovered(persistence.recoverSessions());
+      const result = restarted.getLastResult(sessionId);
+      expect(result?.status).toBe("cancelled");
+      expect(result?.error).toBe("user stopped it");
+    } finally {
+      restarted.destroy();
+    }
+  });
+
+  it("keeps the session alive and reports once when the event log cannot be written", async () => {
+    const errors: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+
+    try {
+      const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+      // A plain file where the session directory belongs makes every write fail.
+      const dir = path.join(root, "sessions", sessionId);
+      rmSync(dir, { recursive: true, force: true });
+      writeFileSync(dir, "not a directory");
+
+      client.emitNotification(Methods.AGENT_MESSAGE_DELTA, {
+        threadId,
+        itemId: "item_1",
+        delta: "one",
+      });
+      client.emitNotification(Methods.AGENT_MESSAGE_DELTA, {
+        threadId,
+        itemId: "item_2",
+        delta: "two",
+      });
+
+      expect(manager.pollEvents(sessionId, 0).events).toHaveLength(2);
+      expect(errors.filter((line) => line.includes("Failed to persist events"))).toHaveLength(1);
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it("redacts absolute paths inside an error notification's error object", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+    client.emitNotification(Methods.ERROR, {
+      threadId,
+      error: { message: "cannot read /home/someone/secret/file.ts", type: "io" },
+    });
+
+    const errorEvent = manager.pollEvents(sessionId, 0).events.find((e) => e.type === "error") as {
+      data: { error: { message: string } };
+    };
+    expect(errorEvent.data.error.message).toBe("cannot read <path>");
+    expect(errorEvent.data.error).toMatchObject({ type: "io" });
   });
 });

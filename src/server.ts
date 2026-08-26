@@ -8,6 +8,7 @@ import { executeCodex } from "./tools/codex.js";
 import { executeCodexReply } from "./tools/codex-reply.js";
 import { executeCodexSession } from "./tools/codex-session.js";
 import { executeCodexCheck } from "./tools/codex-check.js";
+import { executeCodexSetup } from "./tools/codex-setup.js";
 import { registerResources } from "./resources/register-resources.js";
 import {
   APPROVAL_POLICIES,
@@ -27,12 +28,17 @@ import {
   ErrorCode,
 } from "./types.js";
 import { redactPaths } from "./utils/redact.js";
+import { classifyTurnCompatibilityError, compatibilityErrorMessage } from "./utils/turn-compat.js";
 
 declare const __PKG_VERSION__: string;
 const SERVER_VERSION = typeof __PKG_VERSION__ !== "undefined" ? __PKG_VERSION__ : "0.0.0-dev";
 
 function formatErrorMessage(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
+  const compatibilityKind = classifyTurnCompatibilityError(err);
+  if (compatibilityKind) {
+    return compatibilityErrorMessage(compatibilityKind);
+  }
   const m = /^Error \[([A-Z_]+)\]:\s*(.*)$/.exec(message);
   if (m) {
     const [, code, rest] = m;
@@ -52,10 +58,15 @@ function toStructuredContent(value: unknown): Record<string, unknown> {
   return { value };
 }
 
+export interface ServerContext {
+  server: McpServer;
+  sessionManager: SessionManager;
+}
+
 export function createServer(
   serverCwd: string,
   options?: SessionManagerOptions & { clientMode?: string }
-): McpServer {
+): ServerContext {
   const sessionManager = new SessionManager(options);
 
   const server = new McpServer({
@@ -63,11 +74,14 @@ export function createServer(
     version: SERVER_VERSION,
   });
 
-  // Read-only MCP resources (helpful docs / metadata)
+  // Read-only MCP resources (helpful docs / metadata).
+  // The manager builds an AppServerClient when no factory is injected, so the mode is known
+  // without a probe; an injected factory can build anything, and only its caller knows what.
   registerResources(server, {
     version: SERVER_VERSION,
     sessionManager,
-    clientMode: options?.clientMode,
+    clientMode: options?.clientMode ?? (options?.createClient ? "unknown" : "app-server"),
+    diskPersistence: options?.persistence !== undefined,
   });
 
   const publicSessionInfoSchema = z.object({
@@ -88,10 +102,73 @@ export function createServer(
     isError: z.boolean().optional(),
   };
 
+  const executionInfoSchema = z.object({
+    requested: z.enum(["background", "foreground"]),
+    effective: z.enum(["background", "foreground"]),
+    waitForResultMs: z.number().int().positive().optional(),
+    fallbackReason: z
+      .enum(["wait_for_result_timeout", "interactive_poll_required", "wait_refused"])
+      .optional(),
+  });
+
+  const interactionStateSchema = z.enum(["working", "waiting_input", "finished"]);
+  const nextActionSchema = z.enum(["poll", "respond_permission", "respond_user_input", "none"]);
+  const progressSchema = z.object({
+    phase: z.enum([
+      "starting",
+      "running",
+      "reasoning",
+      "acting",
+      "waiting_approval",
+      "finished",
+      "error",
+      "cancelled",
+    ]),
+    lastEventAt: z.string(),
+    activeTurnId: z.string().optional(),
+    pendingActionCount: z.number().int(),
+    lastMethod: z.string().optional(),
+    tokens: z
+      .object({
+        input: z.number().optional(),
+        output: z.number().optional(),
+        total: z.number().optional(),
+      })
+      .optional(),
+  });
+
+  const setupResultShape = {
+    ready: z.boolean(),
+    cwd: z.string(),
+    executable: z.object({
+      ok: z.boolean(),
+      source: z.string(),
+      command: z.string().optional(),
+      isPath: z.boolean().optional(),
+      detail: z.string(),
+    }),
+    auth: z.object({
+      ok: z.boolean(),
+      state: z.enum(["authenticated", "unauthenticated", "unknown"]),
+      detail: z.string(),
+    }),
+    runtime: z.object({
+      sameMachineRequired: z.boolean(),
+      clientMode: z.enum(["app-server", "exec"]).optional(),
+      stateDir: z.string(),
+    }),
+    projectContext: z.object({
+      hasUserConfig: z.boolean(),
+      hasProjectConfig: z.boolean(),
+    }),
+    warnings: z.array(z.string()),
+    nextSteps: z.array(z.string()),
+  };
+
   const sessionStartOutputShape = {
     sessionId: z.string().optional(),
     threadId: z.string().optional(),
-    status: z.enum(["running", "idle"]).optional(),
+    status: z.enum(["running", "waiting_approval", "idle", "error", "cancelled"]).optional(),
     pollInterval: z
       .number()
       .int()
@@ -99,6 +176,19 @@ export function createServer(
       .describe(
         "Recommended minimum delay before next poll (ms): running >=120000, waiting_approval ~=1000."
       ),
+    result: z
+      .unknown()
+      .optional()
+      .describe("Final result when waitForResult is set and session completed."),
+    completedAt: z
+      .string()
+      .optional()
+      .describe("ISO timestamp when the session completed (only when waitForResult succeeded)."),
+    compatWarnings: z.array(z.string()).optional(),
+    progress: progressSchema.optional(),
+    execution: executionInfoSchema.optional(),
+    interactionState: interactionStateSchema.optional(),
+    recommendedNextAction: nextActionSchema.optional(),
     ...errorOutputShape,
   };
 
@@ -113,12 +203,30 @@ export function createServer(
         .optional()
         .describe("Default: true. Include actions[] in response."),
       includeResult: z.boolean().optional().describe("Default: true. Include result in response."),
+      skipDeltas: z
+        .boolean()
+        .optional()
+        .describe(
+          "Default: false. Drop delta-heavy streaming events while still advancing the cursor."
+        ),
+      finalOnly: z
+        .boolean()
+        .optional()
+        .describe("Default: false. Omit events and focus on actions + terminal result."),
       maxBytes: z
         .number()
         .int()
         .positive()
         .optional()
         .describe("Default: unlimited. Best-effort response payload cap in bytes."),
+      waitMs: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe(
+          "Long-poll: block up to this many ms for new events (max 120000). Omit or 0 for immediate return."
+        ),
     })
     .optional()
     .describe("Optional poll shaping controls.");
@@ -299,7 +407,7 @@ export function createServer(
     {
       title: "Start Codex Session",
       description:
-        "Start session asynchronously and return `{ sessionId, threadId, status, pollInterval }`. Use `pollInterval` as a minimum hint: `running` >=120000ms (increase for long tasks), `waiting_approval` ~=1000ms.",
+        "Start a Codex session asynchronously and return `{ sessionId, threadId, status, pollInterval }`. Poll with `codex_check(action='poll')` until terminal status, and treat `pollInterval` as a minimum hint: `running` >=120000ms, `waiting_approval` ~=1000ms. See `codex-mcp:///quickstart` for the main loop, `codex-mcp:///config` for parameter guidance, and `codex-mcp:///delegation-guide` for approval/sandbox presets.",
       inputSchema: {
         prompt: z.string().describe("Task or question"),
         approvalPolicy: z
@@ -344,6 +452,15 @@ export function createServer(
               .default(DEFAULT_APPROVAL_TIMEOUT_MS)
               .optional()
               .describe(`Auto-decline timeout in ms (default: ${DEFAULT_APPROVAL_TIMEOUT_MS})`),
+            waitForResult: z
+              .number()
+              .int()
+              .positive()
+              .max(300000)
+              .optional()
+              .describe(
+                "Block up to this many ms for session completion (max 300000). Falls back to sessionId for polling if not done in time. Only use with approvalPolicy on-failure/never."
+              ),
           })
           .optional()
           .describe("Advanced settings."),
@@ -357,9 +474,9 @@ export function createServer(
         openWorldHint: true,
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
-        const result = await executeCodex(args, sessionManager, serverCwd);
+        const result = await executeCodex(args, sessionManager, serverCwd, extra.signal);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
           structuredContent: toStructuredContent(result),
@@ -398,6 +515,15 @@ export function createServer(
           .record(z.string(), z.unknown())
           .optional()
           .describe("Structured output schema override (top-level in codex_reply)."),
+        waitForResult: z
+          .number()
+          .int()
+          .positive()
+          .max(300000)
+          .optional()
+          .describe(
+            "Wait up to this many ms for the reply turn to complete and return the result directly. Max 300000 (5 min). If the turn does not finish in time or enters interactive approval/user-input flow, returns session metadata for polling."
+          ),
       },
       outputSchema: sessionStartOutputShape,
       annotations: {
@@ -408,9 +534,9 @@ export function createServer(
         openWorldHint: true,
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
-        const result = await executeCodexReply(args, sessionManager);
+        const result = await executeCodexReply(args, sessionManager, extra.signal);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
           structuredContent: toStructuredContent(result),
@@ -427,19 +553,51 @@ export function createServer(
     }
   );
 
-  // ── Tool 3: codex_session — Manage sessions ──────────────────────
+  server.registerTool(
+    "codex_setup",
+    {
+      title: "Codex Setup",
+      description:
+        "Run local readiness checks for codex-mcp: executable resolution, login status, detected backend mode, and project config. Use this before starting a session when setup is uncertain.",
+      inputSchema: {
+        cwd: z
+          .string()
+          .optional()
+          .describe("Optional cwd to inspect for project-local Codex config. Default: server cwd."),
+      },
+      outputSchema: setupResultShape,
+      annotations: {
+        title: "Codex Setup",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) => {
+      const result = await executeCodexSetup(args, serverCwd);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        structuredContent: toStructuredContent(result),
+        isError: false,
+      };
+    }
+  );
+
+  // ── Tool 4: codex_session — Manage sessions ──────────────────────
 
   server.registerTool(
     "codex_session",
     {
       title: "Manage Sessions",
-      description: `Session actions: list, get, cancel, interrupt, fork, clean_background_terminals.
+      description: `Session actions: list, get, cancel, interrupt, fork, clean, clean_background_terminals.
 
 - list: sessions in memory.
 - get: details. includeSensitive defaults to false; true adds threadId/cwd/profile/config.
 - cancel: terminal.
 - interrupt: stop current turn.
 - fork: clone current thread into a new session; source remains unchanged.
+- clean: batch-remove idle/error/cancelled sessions, optionally from disk too.
 - clean_background_terminals: ask app-server to clean stale background terminals for this thread.`,
       inputSchema: {
         action: z.enum(SESSION_ACTIONS),
@@ -452,6 +610,21 @@ export function createServer(
           .default(false)
           .optional()
           .describe("Include cwd/config/threadId/profile in get (default: false)"),
+        statuses: z
+          .array(z.enum(["idle", "error", "cancelled"]))
+          .optional()
+          .describe("For clean only. Default: idle/error/cancelled."),
+        olderThanMs: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe("For clean only. Remove sessions idle for at least this many ms."),
+        dryRun: z.boolean().optional().describe("For clean only. Preview matched sessions."),
+        includeDisk: z
+          .boolean()
+          .optional()
+          .describe("For clean only. Default: true. Also remove persisted session state."),
       },
       outputSchema: {
         sessions: z.array(publicSessionInfoSchema).optional(),
@@ -476,6 +649,11 @@ export function createServer(
           .describe(
             "Recommended minimum delay before next poll (ms): running >=120000, waiting_approval ~=1000."
           ),
+        matchedSessionIds: z.array(z.string()).optional(),
+        removedSessionIds: z.array(z.string()).optional(),
+        removedCount: z.number().int().optional(),
+        diskSessionsRemoved: z.number().int().optional(),
+        dryRun: z.boolean().optional(),
         success: z.boolean().optional(),
         message: z.string().optional(),
         ...errorOutputShape,
@@ -511,29 +689,17 @@ export function createServer(
     }
   );
 
-  // ── Tool 4: codex_check — Poll events + respond to requests ──────
+  // ── Tool 5: codex_check — Poll events + respond to requests ──────
 
   server.registerTool(
     "codex_check",
     {
       title: "Poll & Respond",
-      description: `Poll session for events or respond to approval/input requests.
-
-POLLING FREQUENCY: Do NOT poll every turn. Codex tasks take minutes, not seconds.
-- Treat pollInterval as a minimum hint, not a fixed schedule.
-- "running": sleep at least 2 minutes between polls; increase for complex tasks. Do NOT high-frequency poll — it wastes tokens and provides no benefit.
-- "waiting_approval": poll about every 1000ms and respond quickly to actions[].
-- When status is "idle"/"error"/"cancelled": stop polling, the session is done.
-- Adapt interval based on task complexity and whether the previous poll returned new events.
+      description: `Poll session for events or respond to approval/input requests. Use pollInterval as a minimum hint; stop polling on terminal status (idle/error/cancelled). WARNING: running sessions usually poll at >=120000ms, but approvalTimeoutMs defaults to ${DEFAULT_APPROVAL_TIMEOUT_MS}ms, so approvals can expire between polls unless you raise the timeout or use non-interactive policies. See codex-mcp:///quickstart and codex-mcp:///gotchas.
 
 poll: events since cursor. Default maxEvents=${POLL_DEFAULT_MAX_EVENTS}.
-
 respond_permission: approval decision. Default maxEvents=${RESPOND_DEFAULT_MAX_EVENTS} (compact ACK).
-
-respond_user_input: user-input answers. Default maxEvents=${RESPOND_DEFAULT_MAX_EVENTS} (compact ACK).
-
-events[].type is coarse-grained; details are in events[].data.method.
-cursor omitted => use session last cursor. cursorResetTo => reset and continue.`,
+respond_user_input: user-input answers. Default maxEvents=${RESPOND_DEFAULT_MAX_EVENTS} (compact ACK).`,
       inputSchema: codexCheckInputSchema,
       outputSchema: {
         sessionId: z.string().optional(),
@@ -545,6 +711,9 @@ cursor omitted => use session last cursor. cursorResetTo => reset and continue.`
           .describe(
             "Recommended minimum delay before next poll (ms): running >=120000, waiting_approval ~=1000."
           ),
+        progress: progressSchema.optional(),
+        interactionState: interactionStateSchema.optional(),
+        recommendedNextAction: nextActionSchema.optional(),
         events: z
           .array(
             z.object({
@@ -583,6 +752,7 @@ cursor omitted => use session last cursor. cursorResetTo => reset and continue.`
         result: z
           .object({
             turnId: z.string(),
+            text: z.string().optional(),
             output: z.string().optional(),
             structuredOutput: z.unknown().optional(),
             turn: z.unknown().optional(),
@@ -605,9 +775,9 @@ cursor omitted => use session last cursor. cursorResetTo => reset and continue.`
         openWorldHint: false,
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
-        const result = executeCodexCheck(args, sessionManager);
+        const result = await executeCodexCheck(args, sessionManager, extra.signal);
         const isError =
           typeof (result as { isError?: boolean }).isError === "boolean"
             ? (result as { isError: boolean }).isError
@@ -635,5 +805,5 @@ cursor omitted => use session last cursor. cursorResetTo => reset and continue.`
     await originalClose();
   };
 
-  return server;
+  return { server, sessionManager };
 }
