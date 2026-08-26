@@ -293,7 +293,10 @@ describe("session ownership", () => {
       owner: { pid: 424243, startedAt: "2024-01-01T00:00:00.000Z" },
       proven: false,
     });
-  });
+    // 30s: the identity check asks the OS for the start time of a pid nothing
+    // holds, and on Windows that is a CIM query and then a wmic one, each with a
+    // five-second budget of its own.
+  }, 30_000);
 
   it("reads an owner whose liveness no source establishes as held", () => {
     killFails(424244, "EINVAL");
