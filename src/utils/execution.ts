@@ -87,12 +87,14 @@ export async function waitForCodexSessionForegroundResult(
 
   while (Date.now() < deadline) {
     // A session evicted mid-wait makes getSession throw SESSION_NOT_FOUND, and that reaches the
-    // caller: a status invented here would only make getLastResult throw the same error one line
-    // down, and would tell the caller its turn ended when the session simply went away.
+    // caller: a status invented here would only make consumeTurnResult throw the same error one
+    // line down, and would tell the caller its turn ended when the session simply went away.
     const status = sessionManager.getSession(sessionId).status;
 
     if (TERMINAL_STATUSES.has(status)) {
-      const finalResult = sessionManager.getLastResult(sessionId);
+      // Consumed, not read: this call hands the answer to the caller, so a later
+      // codex_check reports the status alone rather than sending it a second time.
+      const finalResult = sessionManager.consumeTurnResult(sessionId);
       return {
         status,
         result: finalResult,

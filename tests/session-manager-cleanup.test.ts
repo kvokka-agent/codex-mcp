@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { existsSync, mkdtempSync, rmSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -48,27 +48,46 @@ class MockClient extends EventEmitter {
 const workspace = path.resolve(os.tmpdir(), "codex-mcp-tests");
 const NEVER_TIMEOUT_MS = 10 * 60 * 60 * 1000;
 
-function ttlWarnings(manager: SessionManager, sessionId: string): Array<Record<string, unknown>> {
-  const poll = manager.pollEvents(sessionId, 0, 5000);
-  return poll.events
-    .map((event) => event.data as Record<string, unknown>)
+/** The TTL warnings the manager wrote to a session's event log. */
+function ttlWarnings(
+  persistence: SessionPersistence,
+  stateDir: string,
+  sessionId: string
+): Array<Record<string, unknown>> {
+  persistence.flushAll();
+  const file = path.join(stateDir, "sessions", sessionId, "events.jsonl");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf-8")
+    .trim()
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => (JSON.parse(line) as { data: Record<string, unknown> }).data)
     .filter((data) => data?.method === "codex-mcp/ttl_warning");
 }
 
 describe("SessionManager background cleanup", () => {
   let client: MockClient;
   let manager: SessionManager;
+  let persistence: SessionPersistence;
+  let stateDir: string;
+
+  const warningsOf = (sessionId: string) => ttlWarnings(persistence, stateDir, sessionId);
 
   beforeEach(() => {
     vi.useFakeTimers();
     client = new MockClient();
+    stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-cleanup-"));
+    persistence = new SessionPersistence(stateDir);
     manager = new SessionManager({
+      persistence,
       createClient: () => client as unknown as AppServerClient,
     });
   });
 
   afterEach(() => {
     manager.destroy();
+    persistence.destroy();
+    rmSync(stateDir, { recursive: true, force: true });
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -97,7 +116,7 @@ describe("SessionManager background cleanup", () => {
     });
 
     await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_CLEANUP_MS - 60_000);
-    const firstPass = ttlWarnings(manager, started.sessionId);
+    const firstPass = warningsOf(started.sessionId);
     expect(firstPass).toHaveLength(1);
     expect(firstPass[0].ttlRemainingMs).toBe(60_000);
     expect(firstPass[0].sessionId).toBe(started.sessionId);
@@ -105,7 +124,7 @@ describe("SessionManager background cleanup", () => {
 
     // The next cleanup pass sits inside the same warning window and must stay quiet.
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(ttlWarnings(manager, started.sessionId)).toHaveLength(1);
+    expect(warningsOf(started.sessionId)).toHaveLength(1);
     expect(manager.getSession(started.sessionId).status).toBe("idle");
   });
 
@@ -114,7 +133,7 @@ describe("SessionManager background cleanup", () => {
     expect(manager.getSession(started.sessionId).status).toBe("running");
 
     await vi.advanceTimersByTimeAsync(DEFAULT_RUNNING_CLEANUP_MS - 60_000);
-    const warnings = ttlWarnings(manager, started.sessionId);
+    const warnings = warningsOf(started.sessionId);
     expect(warnings).toHaveLength(1);
     expect(warnings[0].ttlRemainingMs).toBe(60_000);
 

@@ -229,7 +229,8 @@ describe("resources", () => {
     expect(features, "compat report has no features").toBeDefined();
     expect(features.respondPermission).toBe(true);
     expect(features.respondApprovalAlias).toBe(false);
-    expect(features.responseModeMinimal).toBe(true);
+    expect(features.statusOnlyCheck).toBe(true);
+    expect(features.checkLongPoll).toBe(true);
     expect(features.compatWarnings).toBe(true);
     expect(features.diskPersistence).toBe(true);
     expect(features.diskResume).toBe(false);
@@ -288,8 +289,8 @@ describe("resources", () => {
     expect(config).toContain("Override persistence");
 
     const gotchas = readText(resource(registered, RESOURCE_URIS.gotchas));
-    expect(gotchas).toContain("monotonic");
-    expect(gotchas).toContain("codex-mcp/reconnect");
+    expect(gotchas).toContain("waitMs");
+    expect(gotchas).toContain("rollout log");
     expect(gotchas).toContain("untrusted");
     expect(gotchas).toContain("Idle sessions are auto-cleaned");
 

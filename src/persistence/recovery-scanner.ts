@@ -2,7 +2,7 @@
  * Recovery scanner — scans STATE_DIR/sessions/ on startup to recover persisted sessions.
  *
  * - Reads meta.json for session metadata
- * - Detects torn tails in events.jsonl (incomplete last line)
+ * - Reads events.jsonl for the sequence number to continue from, and detects torn tails
  * - Reads result.json if present
  * - Returns recovered sessions for the SessionManager to ingest
  */
@@ -38,8 +38,6 @@ export interface RecoveredPidInfo {
 export interface RecoveredSession {
   sessionId: string;
   meta: RecoveredSessionMeta;
-  /** Parsed events from events.jsonl (valid lines only, torn tail discarded) */
-  events: Array<{ seq: number; [key: string]: unknown }>;
   /** Corrupt lines skipped in the middle of events.jsonl — a torn tail is not counted */
   corruptEventLines?: number;
   /**
@@ -47,7 +45,7 @@ export interface RecoveredSession {
    * itself says rather than what the session wrote.
    */
   metaDamaged?: true;
-  /** Highest sequence number found in events */
+  /** Highest sequence number written to events.jsonl, or -1 for an empty log */
   lastSeq: number;
   /** Result from result.json if present */
   result: unknown | null;
@@ -57,40 +55,42 @@ export interface RecoveredSession {
   sessionDir: string;
 }
 
-interface ParsedEventsJsonl {
-  events: Array<{ seq: number; [key: string]: unknown }>;
+interface EventLogScan {
+  /** Highest seq of a readable line, or -1 when the log holds none. */
+  lastSeq: number;
   /** Unparsable lines before the last one; the torn tail is excluded */
   corruptLines: number;
 }
 
 /**
- * Parse events.jsonl into events sorted by seq.
+ * Read events.jsonl for the sequence number the next run continues from.
+ *
+ * The events themselves are not carried back: nothing in a recovered session is
+ * built from them, and the turn they describe is in the Codex rollout log.
  *
  * A cut power tears the last line only, so an unparsable final line is dropped without
- * a word. An unparsable line anywhere before it is lost data: the line is skipped, the
- * valid lines after it are kept, and the number skipped goes to the caller.
+ * a word. An unparsable line anywhere before it is lost data: the line is skipped and
+ * the number skipped goes to the caller.
  */
-function parseEventsJsonl(filePath: string): ParsedEventsJsonl {
-  if (!existsSync(filePath)) return { events: [], corruptLines: 0 };
+function scanEventsJsonl(filePath: string): EventLogScan {
+  if (!existsSync(filePath)) return { lastSeq: -1, corruptLines: 0 };
   const raw = readFileSync(filePath, "utf-8");
   const lines = raw.split("\n");
-  const events: Array<{ seq: number; [key: string]: unknown }> = [];
+  let lastSeq = -1;
   let corruptLines = 0;
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i]!.trim();
     if (!trimmed) continue;
     try {
       const parsed = JSON.parse(trimmed);
-      if (typeof parsed.seq === "number") {
-        events.push(parsed);
-      }
+      if (typeof parsed.seq === "number" && parsed.seq > lastSeq) lastSeq = parsed.seq;
     } catch {
       // The last element of the split holds text written after the final newline:
       // an unparsable one is the torn tail of an interrupted write.
       if (i < lines.length - 1) corruptLines++;
     }
   }
-  return { events: events.sort((a, b) => a.seq - b.seq), corruptLines };
+  return { lastSeq, corruptLines };
 }
 
 /** What one JSON file of a session directory turned out to be. */
@@ -155,9 +155,8 @@ function metaFromDirectory(sessionId: string, mtimeMs: number): RecoveredSession
  * as freshly created, and the sessions it holds would be written over.
  *
  * @param sessionsDir - Path to STATE_DIR/sessions/
- * @param maxEvents - Max events to load per session (default: 500, from tail)
  */
-export function scanRecoverableSessions(sessionsDir: string, maxEvents = 500): RecoveredSession[] {
+export function scanRecoverableSessions(sessionsDir: string): RecoveredSession[] {
   // throwIfNoEntry: false — a state directory the previous run never created holds no
   // sessions. existsSync cannot stand here: it answers false for a directory it may not
   // stat, which is the very case that must not read as "no sessions".
@@ -194,18 +193,12 @@ export function scanRecoverableSessions(sessionsDir: string, maxEvents = 500): R
 
     const meta = stored ?? metaFromDirectory(entry, stat.mtimeMs);
 
-    const parsed = parseEventsJsonl(join(sessionDir, "events.jsonl"));
-    if (parsed.corruptLines > 0) {
+    const eventLog = scanEventsJsonl(join(sessionDir, "events.jsonl"));
+    if (eventLog.corruptLines > 0) {
       console.error(
-        `[recovery] Session ${meta.sessionId}: skipped ${parsed.corruptLines} corrupt line(s) in events.jsonl`
+        `[recovery] Session ${meta.sessionId}: skipped ${eventLog.corruptLines} corrupt line(s) in events.jsonl`
       );
     }
-    let events = parsed.events;
-    // Keep only the tail
-    if (events.length > maxEvents) {
-      events = events.slice(-maxEvents);
-    }
-    const lastSeq = events.length > 0 ? events[events.length - 1]!.seq : -1;
 
     const result = readJsonSafe<unknown>(join(sessionDir, "result.json"));
     const pidInfo = readJsonSafe<RecoveredPidInfo>(join(sessionDir, "pid.json"));
@@ -213,10 +206,9 @@ export function scanRecoverableSessions(sessionsDir: string, maxEvents = 500): R
     results.push({
       sessionId: meta.sessionId,
       meta,
-      events,
-      corruptEventLines: parsed.corruptLines,
+      corruptEventLines: eventLog.corruptLines,
       ...(stored ? {} : { metaDamaged: true as const }),
-      lastSeq,
+      lastSeq: eventLog.lastSeq,
       result,
       pidInfo,
       sessionDir,

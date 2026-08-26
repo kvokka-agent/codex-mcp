@@ -1,5 +1,5 @@
 /**
- * SessionManager — manages Codex session lifecycle, event buffering, and approval flow.
+ * SessionManager — manages Codex session lifecycle, status and approval flow.
  */
 import { randomUUID } from "crypto";
 import { isAbsolute } from "path";
@@ -9,6 +9,7 @@ import type { AppServerSpawnOptions } from "../app-server/lifecycle.js";
 import type { PidDetails } from "./persistence.js";
 import { resolveAndValidateCwd } from "../utils/cwd.js";
 import { redactPaths } from "../utils/redact.js";
+import { interactionStateForStatus, recommendedNextActionForStatus } from "../utils/execution.js";
 import { resolveAndValidateFilePath } from "../utils/files.js";
 import {
   buildEffortFallbackWarning,
@@ -33,31 +34,28 @@ import {
   type EffortLevel,
   type Personality,
   type SessionInfo,
+  type SessionSignal,
   type SessionStatus,
   type SandboxMode,
   type SummaryMode,
   type PublicSessionInfo,
   type SensitiveSessionInfo,
   type SessionEventType,
-  type EventBuffer,
   type PendingRequest,
   type ProgressInfo,
   type ProgressPhase,
   type ProgressTokens,
   type SessionStartResult,
   type CheckResult,
+  type PendingAction,
   type TurnResult,
-  type ResponseMode,
-  type PollOptions,
   type NetworkPolicyAmendment,
   ErrorCode,
   COMMAND_DECISIONS,
   FILE_CHANGE_DECISIONS,
   DEFAULT_POLL_INTERVAL,
   WAITING_APPROVAL_POLL_INTERVAL,
-  DEFAULT_MAX_EVENTS,
-  DEFAULT_EVENT_BUFFER_SIZE,
-  DEFAULT_EVENT_BUFFER_HARD_SIZE,
+  MAX_LONG_POLL_WAIT_MS,
   DEFAULT_APPROVAL_TIMEOUT_MS,
   DEFAULT_IDLE_CLEANUP_MS,
   DEFAULT_RUNNING_CLEANUP_MS,
@@ -65,22 +63,6 @@ import {
   CLEANUP_INTERVAL_MS,
 } from "../types.js";
 
-const COALESCED_PROGRESS_DELTA_METHODS = new Set<string>([
-  Methods.COMMAND_OUTPUT_DELTA,
-  Methods.FILE_CHANGE_OUTPUT_DELTA,
-  Methods.REASONING_TEXT_DELTA,
-  Methods.REASONING_SUMMARY_DELTA,
-]);
-const SKIPPABLE_DELTA_METHODS = new Set<string>([
-  Methods.AGENT_MESSAGE_DELTA,
-  Methods.COMMAND_OUTPUT_DELTA,
-  Methods.FILE_CHANGE_OUTPUT_DELTA,
-  Methods.REASONING_TEXT_DELTA,
-  Methods.REASONING_SUMMARY_DELTA,
-  Methods.PLAN_DELTA,
-]);
-// Guard against unbounded in-memory string growth when app-server emits hot delta streams.
-const MAX_COALESCED_DELTA_CHARS = 16_384;
 const AUTH_REFRESH_UNSUPPORTED_CODE = -32000;
 const AUTH_REFRESH_UNSUPPORTED_MESSAGE =
   "account/chatgptAuthTokens/refresh unsupported: codex-mcp does not manage external ChatGPT auth tokens";
@@ -91,7 +73,7 @@ const AUTH_REFRESH_TERMINAL_MESSAGE =
 // On Windows, PowerShell profile output (oh-my-posh, PSReadLine, etc.) leaks
 // into every command execution, wasting tokens in MCP client contexts.
 // These patterns are stripped from COMMAND_OUTPUT_DELTA events before they
-// enter the event buffer.  Disable with CODEX_MCP_DISABLE_NOISE_FILTER=1.
+// reach the event log.  Disable with CODEX_MCP_DISABLE_NOISE_FILTER=1.
 const NOISE_FILTER_ENABLED = process.env.CODEX_MCP_DISABLE_NOISE_FILTER !== "1";
 const WINDOWS_TERMINAL_INTEGRATION_PREFIX = `${String.fromCharCode(0x1b)}]633;`;
 
@@ -137,13 +119,7 @@ export interface SessionManagerOptions {
   persistence?: import("./persistence.js").SessionPersistence;
 }
 
-export interface PollQueryOptions {
-  responseMode?: ResponseMode;
-  pollOptions?: PollOptions;
-}
-
 const MAX_WAITERS_PER_SESSION = 4;
-const MAX_WAIT_MS = 120_000;
 const EFFORT_FALLBACK_LEVEL: EffortLevel = "low";
 const CLEANABLE_SESSION_STATUSES: SessionStatus[] = ["idle", "error", "cancelled"];
 const REASONING_PROGRESS_METHODS = new Set<string>([
@@ -183,8 +159,10 @@ export class SessionManager {
   private persistFailureReported = new Set<string>();
   /** Sessions whose running turn was started with an `outputSchema`. */
   private schemaConstrainedTurns = new Set<string>();
-  /** Long-poll notifiers: set of resolve callbacks waiting for any change in a session. */
+  /** Long-poll notifiers: set of resolve callbacks waiting for a change in a session. */
   private sessionNotifiers = new Map<string, Set<() => void>>();
+  /** The signal each session last woke its waiters on — see `notifyWaiters`. */
+  private lastNotifiedSignal = new Map<string, string>();
 
   constructor(options: SessionManagerOptions = {}) {
     this.createClient = options.createClient ?? (() => new AppServerClient());
@@ -242,7 +220,6 @@ export class SessionManager {
         sessionId: rec.meta.sessionId,
         threadId: normalizeOptionalString(rec.meta.threadId),
         status: resolvedStatus,
-        lastEventCursor: 0,
         createdAt,
         lastActiveAt,
         cancelledAt: normalizeOptionalString(rec.meta.cancelledAt),
@@ -256,7 +233,6 @@ export class SessionManager {
         model: normalizeOptionalString(rec.meta.model),
         approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
         sandbox: rec.meta.sandbox as SandboxMode | undefined,
-        eventBuffer: createEventBuffer(),
         pendingRequests: new Map(),
         lastResult: rec.result as TurnResult | undefined,
         lastAgentMessageText:
@@ -270,8 +246,7 @@ export class SessionManager {
           tokens: extractTokens((rec.result as TurnResult | undefined)?.turn),
         },
       };
-      restoreEventBuffer(session.eventBuffer, rec.events, rec.sessionId);
-      this.sessions.set(rec.sessionId, session);
+      this.registerSession(session);
       // Resume event log sequence numbering
       if (rec.lastSeq >= 0) {
         this.persistence?.setEventLogNextSeq(rec.sessionId, rec.lastSeq + 1);
@@ -285,16 +260,16 @@ export class SessionManager {
   }
 
   /**
-   * Mirror this session's buffered events into its events.jsonl.
+   * Mirror this session's events into its events.jsonl.
    *
    * Persistence is best-effort: a write that fails is reported once per session and
-   * leaves the session running on its in-memory buffer.
+   * leaves the session running, with its status and its result held in memory.
    */
   private attachEventSink(session: SessionInfo): void {
     const persistence = this.persistence;
     if (!persistence) return;
     const sessionId = session.sessionId;
-    setEventSink(session.eventBuffer, (type, data, timestamp) => {
+    setEventSink(session, (type, data, timestamp) => {
       try {
         persistence.appendEvent(sessionId, type, data, timestamp);
       } catch (err) {
@@ -425,7 +400,6 @@ export class SessionManager {
     const session: SessionInfo = {
       sessionId,
       status: "running",
-      lastEventCursor: 0,
       createdAt: now,
       lastActiveAt: now,
       approvalTimeoutMs,
@@ -435,13 +409,12 @@ export class SessionManager {
       approvalPolicy: spawnOpts.approvalPolicy,
       sandbox: spawnOpts.sandbox,
       config: spawnOpts.config,
-      eventBuffer: createEventBuffer(),
       pendingRequests: new Map(),
       lastAgentMessageText: undefined,
       progressState: { lastEventAt: now },
     };
 
-    this.sessions.set(sessionId, session);
+    this.registerSession(session);
     this.clients.set(sessionId, client);
     this.attachEventSink(session);
 
@@ -510,7 +483,7 @@ export class SessionManager {
       };
     } catch (err) {
       session.status = "error";
-      pushEvent(session.eventBuffer, "error", {
+      recordEvent(session, "error", {
         message: redactPaths(err instanceof Error ? err.message : String(err)),
       });
       await client.destroy();
@@ -561,8 +534,10 @@ export class SessionManager {
 
     const client = this.getClientOrThrow(sessionId);
 
-    // Clear stale result/error events so the new turn starts clean
-    clearTerminalEvents(session.eventBuffer);
+    // The finished turn's answer belongs to that turn: a check of the new one
+    // reports the new result or none.
+    session.lastResult = undefined;
+    session.resultDelivered = false;
     session.lastAgentMessageText = undefined;
 
     session.status = "running";
@@ -662,7 +637,7 @@ export class SessionManager {
       }
     } catch (err) {
       session.status = "error";
-      pushEvent(session.eventBuffer, "error", {
+      recordEvent(session, "error", {
         message: redactPaths(
           `Failed to start turn: ${err instanceof Error ? err.message : String(err)}`
         ),
@@ -804,15 +779,14 @@ export class SessionManager {
       session.pendingRequests.delete(reqId);
     }
 
-    pushEvent(
-      session.eventBuffer,
-      "progress",
-      { message: "Session cancelled", cancelledReason: session.cancelledReason },
-      true
-    );
+    recordEvent(session, "progress", {
+      message: "Session cancelled",
+      cancelledReason: session.cancelledReason,
+    });
 
     const cancelledTurnId = session.activeTurnId ?? "";
     session.activeTurnId = undefined;
+    session.resultDelivered = false;
     session.lastResult = {
       turnId: cancelledTurnId,
       status: "cancelled",
@@ -820,12 +794,11 @@ export class SessionManager {
       completedAt: new Date().toISOString(),
     };
     this.persistResult(session);
-    pushEvent(
-      session.eventBuffer,
-      "result",
-      { status: "cancelled", reason: session.cancelledReason, turnId: cancelledTurnId },
-      true
-    );
+    recordEvent(session, "result", {
+      status: "cancelled",
+      reason: session.cancelledReason,
+      turnId: cancelledTurnId,
+    });
     // Wake long-poll waiters so they see the cancellation immediately
     this.notifyWaiters(sessionId);
 
@@ -885,16 +858,11 @@ export class SessionManager {
 
     await client.threadBackgroundTerminalsClean({ threadId: session.threadId });
     session.lastActiveAt = new Date().toISOString();
-    pushEvent(
-      session.eventBuffer,
-      "progress",
-      {
-        method: Methods.THREAD_BACKGROUND_TERMINALS_CLEAN,
-        threadId: session.threadId,
-        status: "requested",
-      },
-      true
-    );
+    recordEvent(session, "progress", {
+      method: Methods.THREAD_BACKGROUND_TERMINALS_CLEAN,
+      threadId: session.threadId,
+      status: "requested",
+    });
   }
 
   async cleanSessions(options?: {
@@ -1000,7 +968,6 @@ export class SessionManager {
     const newSession: SessionInfo = {
       sessionId: newSessionId,
       status: "idle",
-      lastEventCursor: 0,
       createdAt: now,
       lastActiveAt: now,
       approvalTimeoutMs: session.approvalTimeoutMs,
@@ -1010,11 +977,10 @@ export class SessionManager {
       approvalPolicy: session.approvalPolicy,
       sandbox: session.sandbox,
       config: session.config,
-      eventBuffer: createEventBuffer(),
       pendingRequests: new Map(),
     };
 
-    this.sessions.set(newSessionId, newSession);
+    this.registerSession(newSession);
     this.clients.set(newSessionId, newClient);
     this.attachEventSink(newSession);
     this.persistSessionIfChanged(newSession);
@@ -1066,8 +1032,8 @@ export class SessionManager {
   // ── Long-poll support ────────────────────────────────────────────
 
   /**
-   * Wait until a new event is pushed, a new pending request arrives, a status
-   * change occurs, or `timeoutMs` elapses (whichever comes first).
+   * Wait until the session state a caller acts on changes, or `timeoutMs`
+   * elapses (whichever comes first). `notifyWaiters` decides what counts.
    *
    * Rejects with an error when more than MAX_WAITERS_PER_SESSION concurrent
    * waiters are already queued for the same session.
@@ -1093,7 +1059,7 @@ export class SessionManager {
         return;
       }
 
-      const clampedMs = Math.min(Math.max(0, timeoutMs), MAX_WAIT_MS);
+      const clampedMs = Math.min(Math.max(0, timeoutMs), MAX_LONG_POLL_WAIT_MS);
 
       const done = (): void => {
         notifiers!.delete(notifyFn);
@@ -1114,8 +1080,30 @@ export class SessionManager {
     });
   }
 
-  /** Resolve all waiters for a session immediately (called on any state change). */
+  /**
+   * Take a session into the store with the signal it starts on, so the first
+   * change of it is what wakes a waiter rather than the first notification.
+   */
+  private registerSession(session: SessionInfo): void {
+    this.sessions.set(session.sessionId, session);
+    this.lastNotifiedSignal.set(session.sessionId, signalOf(session));
+  }
+
+  /**
+   * Wake the long-poll waiters of a session, but only for what they can act on:
+   * the status, the set of open actions, and the result of a finished turn.
+   *
+   * A measured run of ten parallel sessions delivered 20.2% agent-message deltas
+   * and 25.7% token-counter updates; waking on those turned a 120s long poll into
+   * a 4.8s median round trip and put the whole transcript through the caller's
+   * context. Those move `signalOf` not at all, so a waiter sleeps through them.
+   */
   private notifyWaiters(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    const signal = session ? signalOf(session) : `gone:${sessionId}`;
+    if (this.lastNotifiedSignal.get(sessionId) === signal) return;
+    this.lastNotifiedSignal.set(sessionId, signal);
+
     const notifiers = this.sessionNotifiers.get(sessionId);
     if (!notifiers || notifiers.size === 0) return;
     // Snapshot to avoid mutation issues during iteration
@@ -1124,216 +1112,80 @@ export class SessionManager {
     }
   }
 
-  // ── Event Polling ────────────────────────────────────────────────
+  // ── Status ───────────────────────────────────────────────────────
 
-  pollEvents(
-    sessionId: string,
-    cursor?: number,
-    maxEvents = DEFAULT_MAX_EVENTS,
-    options: PollQueryOptions = {}
-  ): CheckResult {
+  /**
+   * Where the session stands and what it waits for.
+   *
+   * The turn's own events are not part of it: Codex writes the whole transcript
+   * to its rollout log under `~/.codex/sessions/`, and repeating it here would
+   * put the run through the caller's context a second time.
+   */
+  pollStatus(sessionId: string): CheckResult {
     const session = this.getSessionOrThrow(sessionId);
-    const buf = session.eventBuffer;
-    const responseMode = options.responseMode ?? "full";
-    const pollOptions = options.pollOptions;
-    const finalOnly = pollOptions?.finalOnly ?? false;
-    const skipDeltas = pollOptions?.skipDeltas ?? false;
-    const includeEvents = finalOnly ? false : (pollOptions?.includeEvents ?? true);
-    const includeActions = pollOptions?.includeActions ?? true;
-    const includeResult = finalOnly ? true : (pollOptions?.includeResult ?? true);
-    const maxBytes = pollOptions?.maxBytes;
-    const effectiveCursor = cursor ?? session.lastEventCursor;
 
-    const unseenEvents = buf.events.filter((e) => e.id >= effectiveCursor);
-
-    // Find events with id >= cursor
-    let events = includeEvents ? unseenEvents : [];
-    let cursorResetTo: number | undefined;
-
-    // Check if cursor is stale (events were evicted)
-    if (buf.events.length > 0) {
-      const earliest = buf.events[0].id;
-      if (earliest > effectiveCursor) {
-        cursorResetTo = earliest;
-        if (includeEvents) {
-          events = buf.events;
-        }
-      }
-    }
-    const cursorFloor = cursorResetTo ?? effectiveCursor;
-
-    let highestConsumedEventId: number | undefined;
-    if (includeEvents) {
-      if (skipDeltas) {
-        const filtered: typeof events = [];
-        for (const event of events) {
-          highestConsumedEventId = event.id;
-          if (isSkippableDeltaEvent(event)) continue;
-          filtered.push(event);
-          if (filtered.length >= maxEvents) break;
-        }
-        events = filtered;
-      } else if (events.length > maxEvents) {
-        events = events.slice(0, maxEvents);
-        highestConsumedEventId = events.length > 0 ? events[events.length - 1]?.id : undefined;
-      } else if (events.length > 0) {
-        highestConsumedEventId = events[events.length - 1]?.id;
-      }
-    } else if (finalOnly && unseenEvents.length > 0) {
-      highestConsumedEventId = unseenEvents[unseenEvents.length - 1]?.id;
+    const actions: PendingAction[] = [];
+    for (const req of session.pendingRequests.values()) {
+      if (req.resolved) continue;
+      actions.push({
+        type: req.kind === "user_input" ? "user_input" : "approval",
+        requestId: req.requestId,
+        kind: req.kind,
+        params: req.params,
+        itemId: req.itemId,
+        reason: req.reason,
+        approvalId: req.approvalId,
+        commandActions: req.commandActions,
+        proposedExecpolicyAmendment: req.proposedExecpolicyAmendment,
+        availableDecisions: req.availableDecisions,
+        proposedNetworkPolicyAmendments: req.proposedNetworkPolicyAmendments,
+        additionalPermissions: req.additionalPermissions,
+        networkApprovalContext: req.networkApprovalContext,
+        createdAt: req.createdAt,
+      });
     }
 
-    let nextCursor = clampCursorToLatest(
-      typeof highestConsumedEventId === "number" ? highestConsumedEventId + 1 : cursorFloor,
-      buf.nextId
-    );
-
-    // Collect pending actions
-    const actions: CheckResult["actions"] = [];
-    if (includeActions) {
-      for (const [, req] of session.pendingRequests) {
-        if (!req.resolved) {
-          actions.push({
-            type: req.kind === "user_input" ? "user_input" : "approval",
-            requestId: req.requestId,
-            kind: req.kind,
-            params: req.params,
-            itemId: req.itemId,
-            reason: req.reason,
-            approvalId: req.approvalId,
-            commandActions: req.commandActions,
-            proposedExecpolicyAmendment: req.proposedExecpolicyAmendment,
-            availableDecisions: req.availableDecisions,
-            proposedNetworkPolicyAmendments: req.proposedNetworkPolicyAmendments,
-            additionalPermissions: req.additionalPermissions,
-            networkApprovalContext: req.networkApprovalContext,
-            createdAt: req.createdAt,
-          });
-        }
-      }
-    }
-
-    const result: CheckResult = {
+    return {
       sessionId,
       status: session.status,
       pollInterval: pollIntervalForStatus(session.status),
       progress: buildProgressInfo(session),
-      events: events.map((event) => serializeEventForMode(event, responseMode)),
-      nextCursor,
-      cursorResetTo,
-      actions: actions.length > 0 ? actions : undefined,
-      result:
-        includeResult &&
-        (session.status === "idle" || session.status === "error" || session.status === "cancelled")
-          ? session.lastResult
-          : undefined,
+      interactionState: interactionStateForStatus(session.status),
+      recommendedNextAction: recommendedNextActionForStatus(
+        session.status,
+        Array.from(new Set(actions.map((action) => action.type)))
+      ),
+      actions,
+      result: this.consumeTurnResult(sessionId),
     };
-
-    if (typeof maxBytes === "number") {
-      const normalizedMaxBytes = Math.max(1, Math.floor(maxBytes));
-      const hasAnyPayload =
-        result.events.length > 0 ||
-        typeof result.actions !== "undefined" ||
-        typeof result.result !== "undefined";
-      if (hasAnyPayload && payloadByteSize(result) > normalizedMaxBytes) {
-        const truncatedFields: string[] = [];
-
-        if (result.events.length > 0) {
-          while (result.events.length > 0 && payloadByteSize(result) > normalizedMaxBytes) {
-            result.events.pop();
-          }
-          nextCursor = clampCursorToLatest(
-            result.events.length > 0
-              ? result.events[result.events.length - 1]!.id + 1
-              : cursorFloor,
-            buf.nextId
-          );
-          result.nextCursor = nextCursor;
-          truncatedFields.push("events");
-        }
-
-        if (typeof result.result !== "undefined" && payloadByteSize(result) > normalizedMaxBytes) {
-          result.result = undefined;
-          truncatedFields.push("result");
-        }
-
-        if (
-          typeof result.progress !== "undefined" &&
-          payloadByteSize(result) > normalizedMaxBytes
-        ) {
-          result.progress = undefined;
-          truncatedFields.push("progress");
-        }
-
-        if (typeof result.actions !== "undefined" && payloadByteSize(result) > normalizedMaxBytes) {
-          if (session.status === "waiting_approval") {
-            result.actions = compactActionsForBudget(result.actions);
-            while (result.actions.length > 1 && payloadByteSize(result) > normalizedMaxBytes) {
-              result.actions.pop();
-            }
-            if (payloadByteSize(result) > normalizedMaxBytes) {
-              result.actions = compactActionsToMinimum(result.actions);
-            }
-            truncatedFields.push("actions");
-          }
-
-          if (
-            typeof result.actions !== "undefined" &&
-            payloadByteSize(result) > normalizedMaxBytes
-          ) {
-            result.actions = undefined;
-            truncatedFields.push("actions");
-          }
-        }
-
-        if (truncatedFields.length > 0) {
-          result.truncated = true;
-          result.truncatedFields = Array.from(new Set(truncatedFields));
-          addCompatWarningWithinBudget(
-            result,
-            `Response truncated to respect pollOptions.maxBytes=${normalizedMaxBytes}.`,
-            maxBytes
-          );
-        }
-      }
-    }
-
-    if (includeEvents || finalOnly) {
-      session.lastEventCursor = persistMonotonicCursor(
-        session.lastEventCursor,
-        result.nextCursor,
-        buf.nextId
-      );
-    }
-
-    return result;
   }
 
   /**
-   * Monotonic polling helper for respond_* flows.
-   * Uses max(providedCursor, session.lastEventCursor) to avoid replaying
-   * already-consumed history when clients send stale/default cursors.
+   * The finished turn's answer, handed over once.
+   *
+   * The caller that reads it has it; a later check of the same finished session
+   * reports the status alone rather than sending the answer through the context
+   * again.
    */
-  pollEventsMonotonic(
-    sessionId: string,
-    cursor?: number,
-    maxEvents = DEFAULT_MAX_EVENTS,
-    options: PollQueryOptions = {}
-  ): CheckResult {
+  consumeTurnResult(sessionId: string): TurnResult | undefined {
     const session = this.getSessionOrThrow(sessionId);
-    const sessionCursor = session.lastEventCursor;
-    const staleCursor = typeof cursor === "number" && cursor < sessionCursor;
-    const effectiveCursor =
-      typeof cursor === "number" ? Math.max(cursor, sessionCursor) : undefined;
-    const result = this.pollEvents(sessionId, effectiveCursor, maxEvents, options);
-    if (staleCursor) {
-      addCompatWarningWithinBudget(
-        result,
-        `Provided cursor ${cursor} is stale; used session cursor ${sessionCursor}.`,
-        options.pollOptions?.maxBytes
-      );
-    }
-    return result;
+    if (!TERMINAL_SESSION_STATUSES.has(session.status)) return undefined;
+    if (!session.lastResult || session.resultDelivered) return undefined;
+    session.resultDelivered = true;
+    return session.lastResult;
+  }
+
+  /**
+   * What a long-poll caller waits on: the status, the open actions and the
+   * result of the turn.
+   */
+  getSessionSignal(sessionId: string): SessionSignal {
+    const session = this.getSessionOrThrow(sessionId);
+    return {
+      key: signalOf(session),
+      awaitsCaller:
+        countPendingRequests(session) > 0 || TERMINAL_SESSION_STATUSES.has(session.status),
+    };
   }
 
   // ── Approval Response ────────────────────────────────────────────
@@ -1464,18 +1316,13 @@ export class SessionManager {
     if (req.timeoutHandle) clearTimeout(req.timeoutHandle);
 
     // Push approval_result event
-    pushEvent(
-      session.eventBuffer,
-      "approval_result",
-      {
-        requestId,
-        kind: req.kind,
-        approvalId: req.approvalId,
-        decision,
-        denyMessage: extra?.denyMessage,
-      },
-      true
-    );
+    recordEvent(session, "approval_result", {
+      requestId,
+      kind: req.kind,
+      approvalId: req.approvalId,
+      decision,
+      denyMessage: extra?.denyMessage,
+    });
 
     // Remove resolved request to prevent unbounded growth
     session.pendingRequests.delete(requestId);
@@ -1524,17 +1371,12 @@ export class SessionManager {
 
     if (req.timeoutHandle) clearTimeout(req.timeoutHandle);
 
-    pushEvent(
-      session.eventBuffer,
-      "approval_result",
-      {
-        requestId,
-        kind: "user_input",
-        approvalId: req.approvalId,
-        answers: loggableAnswers(req.params, answers),
-      },
-      true
-    );
+    recordEvent(session, "approval_result", {
+      requestId,
+      kind: "user_input",
+      approvalId: req.approvalId,
+      answers: loggableAnswers(req.params, answers),
+    });
 
     session.pendingRequests.delete(requestId);
 
@@ -1569,6 +1411,7 @@ export class SessionManager {
       this.clients.delete(id);
     }
     this.sessions.clear();
+    this.lastNotifiedSignal.clear();
     this.eventPersistFailed.clear();
     try {
       this.persistence?.flushAll();
@@ -1645,7 +1488,7 @@ export class SessionManager {
           // (codex-schema/v2/ThreadStartedNotification.json → Thread.status →
           // ThreadStatus), the same shape `thread/status/changed` carries.
           const threadStatus = isRecord(thread?.status) ? thread.status : undefined;
-          pushEvent(session.eventBuffer, "progress", {
+          recordEvent(session, "progress", {
             method,
             ...p,
             threadId: notifiedThreadId,
@@ -1662,7 +1505,7 @@ export class SessionManager {
         case Methods.FUZZY_FILE_SEARCH_SESSION_COMPLETED:
         case Methods.WINDOWS_WORLD_WRITABLE_WARNING:
         case Methods.ACCOUNT_LOGIN_COMPLETED:
-          pushEvent(session.eventBuffer, "progress", { method, ...p });
+          recordEvent(session, "progress", { method, ...p });
           break;
 
         case Methods.TURN_STARTED:
@@ -1671,7 +1514,7 @@ export class SessionManager {
             const turnObj = p.turn as Record<string, unknown> | undefined;
             const status = normalizeOptionalString(turnObj?.status);
             session.activeTurnId = normalizeOptionalString(turnObj?.id);
-            pushEvent(session.eventBuffer, "progress", {
+            recordEvent(session, "progress", {
               method,
               ...p,
               turnId: session.activeTurnId,
@@ -1703,6 +1546,7 @@ export class SessionManager {
           const askedForSchema = this.schemaConstrainedTurns.delete(sessionId);
           session.status = "idle";
           session.activeTurnId = undefined;
+          session.resultDelivered = false;
           session.lastResult = {
             turnId: completedTurnId,
             text: finalText,
@@ -1718,17 +1562,12 @@ export class SessionManager {
           // tokens through `thread/tokenUsage/updated` only, so this merge adds
           // nothing there.
           mergeProgressTokens(session, extractTokens(turnObj?.usage));
-          pushEvent(
-            session.eventBuffer,
-            "result",
-            {
-              method,
-              ...p,
-              turnId: completedTurnId,
-              status: normalizeOptionalString(turnObj?.status),
-            },
-            true
-          );
+          recordEvent(session, "result", {
+            method,
+            ...p,
+            turnId: completedTurnId,
+            status: normalizeOptionalString(turnObj?.status),
+          });
           // Persist idle status + result to disk
           this.persistSessionIfChanged(session);
           this.persistResult(session);
@@ -1753,19 +1592,14 @@ export class SessionManager {
               data.error = { ...data.error, message: redactPaths(data.error.message) };
             }
             if (willRetry) {
-              pushEvent(
-                session.eventBuffer,
-                "progress",
-                {
-                  ...data,
-                  method: "codex-mcp/reconnect",
-                  sourceMethod: method,
-                  phase: "retrying",
-                },
-                true
-              );
+              recordEvent(session, "progress", {
+                ...data,
+                method: "codex-mcp/reconnect",
+                sourceMethod: method,
+                phase: "retrying",
+              });
             } else {
-              pushEvent(session.eventBuffer, "error", data, true);
+              recordEvent(session, "error", data);
               // Persist error status to disk
               this.persistSessionIfChanged(session);
             }
@@ -1774,7 +1608,7 @@ export class SessionManager {
         }
 
         case Methods.AGENT_MESSAGE_DELTA:
-          pushEvent(session.eventBuffer, "output", { method, delta: p.delta, itemId: p.itemId });
+          recordEvent(session, "output", { method, delta: p.delta, itemId: p.itemId });
           break;
 
         case Methods.ITEM_STARTED:
@@ -1806,7 +1640,7 @@ export class SessionManager {
             // stays progress like the `item/plan/delta` that builds it.
             const eventType: SessionEventType =
               itemType === "agentMessage" || itemType === "userMessage" ? "output" : "progress";
-            pushEvent(session.eventBuffer, eventType, {
+            recordEvent(session, eventType, {
               method,
               ...p,
               item: p.item,
@@ -1820,9 +1654,9 @@ export class SessionManager {
           if (typeof p.delta === "string") {
             const cleaned = stripShellNoise(p.delta);
             if (cleaned.length === 0) break; // entire delta was noise, skip event
-            pushEvent(session.eventBuffer, "progress", { method, ...p, delta: cleaned });
+            recordEvent(session, "progress", { method, ...p, delta: cleaned });
           } else {
-            pushEvent(session.eventBuffer, "progress", { method, ...p });
+            recordEvent(session, "progress", { method, ...p });
           }
           break;
         }
@@ -1836,7 +1670,7 @@ export class SessionManager {
         case Methods.TURN_DIFF_UPDATED:
         case Methods.TURN_PLAN_UPDATED:
         case Methods.MODEL_REROUTED:
-          pushEvent(session.eventBuffer, "progress", { method, ...p });
+          recordEvent(session, "progress", { method, ...p });
           break;
 
         case Methods.THREAD_STATUS_CHANGED: {
@@ -1849,12 +1683,12 @@ export class SessionManager {
           const statusChanged = nextStatus !== undefined && nextStatus !== session.status;
           if (statusChanged) session.status = nextStatus;
           const failed = session.status === "error" && statusChanged;
-          pushEvent(
-            session.eventBuffer,
-            failed ? "error" : "progress",
-            { method, ...p, statusType, activeFlags },
-            failed
-          );
+          recordEvent(session, failed ? "error" : "progress", {
+            method,
+            ...p,
+            statusType,
+            activeFlags,
+          });
           if (statusChanged) this.persistSessionIfChanged(session);
           break;
         }
@@ -1863,11 +1697,9 @@ export class SessionManager {
         case Methods.THREAD_COMPACTED:
         case Methods.DEPRECATION_NOTICE:
         case Methods.CONFIG_WARNING:
-          // Pinned: a closed thread, a folded history and a codex CLI warning
-          // outlive the deltas around them in a full buffer. None of them is a
-          // failure, so they stay out of the "error" type and leave the session
-          // status alone.
-          pushEvent(session.eventBuffer, "progress", { method, ...p }, true);
+          // None of them is a failure, so they stay out of the "error" type and
+          // leave the session status alone.
+          recordEvent(session, "progress", { method, ...p });
           break;
 
         default:
@@ -1948,18 +1780,13 @@ export class SessionManager {
                   `[codex-mcp] Failed to auto-decline command approval timeout: session=${sessionId} request=${requestId} error=${err instanceof Error ? err.message : String(err)}`
                 );
               }
-              pushEvent(
-                session.eventBuffer,
-                "approval_result",
-                {
-                  requestId,
-                  kind: "command",
-                  approvalId,
-                  decision: "decline",
-                  timeout: true,
-                },
-                true
-              );
+              recordEvent(session, "approval_result", {
+                requestId,
+                kind: "command",
+                approvalId,
+                decision: "decline",
+                timeout: true,
+              });
               session.pendingRequests.delete(requestId);
               if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
                 session.status = "running";
@@ -1970,26 +1797,21 @@ export class SessionManager {
 
           session.pendingRequests.set(requestId, pending);
           session.status = "waiting_approval";
-          pushEvent(
-            session.eventBuffer,
-            "approval_request",
-            {
-              requestId,
-              kind: "command",
-              itemId: approvalParams.itemId,
-              approvalId,
-              command: approvalParams.command,
-              cwd: approvalParams.cwd,
-              reason,
-              commandActions,
-              proposedExecpolicyAmendment,
-              availableDecisions,
-              proposedNetworkPolicyAmendments,
-              additionalPermissions,
-              networkApprovalContext,
-            },
-            true
-          );
+          recordEvent(session, "approval_request", {
+            requestId,
+            kind: "command",
+            itemId: approvalParams.itemId,
+            approvalId,
+            command: approvalParams.command,
+            cwd: approvalParams.cwd,
+            reason,
+            commandActions,
+            proposedExecpolicyAmendment,
+            availableDecisions,
+            proposedNetworkPolicyAmendments,
+            additionalPermissions,
+            networkApprovalContext,
+          });
           break;
         }
 
@@ -2018,17 +1840,12 @@ export class SessionManager {
                   `[codex-mcp] Failed to auto-decline file-change approval timeout: session=${sessionId} request=${requestId} error=${err instanceof Error ? err.message : String(err)}`
                 );
               }
-              pushEvent(
-                session.eventBuffer,
-                "approval_result",
-                {
-                  requestId,
-                  kind: "fileChange",
-                  decision: "decline",
-                  timeout: true,
-                },
-                true
-              );
+              recordEvent(session, "approval_result", {
+                requestId,
+                kind: "fileChange",
+                decision: "decline",
+                timeout: true,
+              });
               session.pendingRequests.delete(requestId);
               if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
                 session.status = "running";
@@ -2039,17 +1856,12 @@ export class SessionManager {
 
           session.pendingRequests.set(requestId, pending);
           session.status = "waiting_approval";
-          pushEvent(
-            session.eventBuffer,
-            "approval_request",
-            {
-              requestId,
-              kind: "fileChange",
-              itemId: p.itemId,
-              reason,
-            },
-            true
-          );
+          recordEvent(session, "approval_request", {
+            requestId,
+            kind: "fileChange",
+            itemId: p.itemId,
+            reason,
+          });
           break;
         }
 
@@ -2075,16 +1887,11 @@ export class SessionManager {
                   `[codex-mcp] Failed to auto-answer user-input timeout: session=${sessionId} request=${requestId} error=${err instanceof Error ? err.message : String(err)}`
                 );
               }
-              pushEvent(
-                session.eventBuffer,
-                "approval_result",
-                {
-                  requestId,
-                  kind: "user_input",
-                  timeout: true,
-                },
-                true
-              );
+              recordEvent(session, "approval_result", {
+                requestId,
+                kind: "user_input",
+                timeout: true,
+              });
               session.pendingRequests.delete(requestId);
               if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
                 session.status = "running";
@@ -2095,16 +1902,11 @@ export class SessionManager {
 
           session.pendingRequests.set(requestId, pending);
           session.status = "waiting_approval";
-          pushEvent(
-            session.eventBuffer,
-            "approval_request",
-            {
-              requestId,
-              kind: "user_input",
-              questions: p.questions,
-            },
-            true
-          );
+          recordEvent(session, "approval_request", {
+            requestId,
+            kind: "user_input",
+            questions: p.questions,
+          });
           break;
         }
 
@@ -2153,14 +1955,9 @@ export class SessionManager {
         session.status = "error";
         const message = `app-server exited unexpectedly (code: ${code})`;
         setTerminalErrorResult(session, message);
-        pushEvent(
-          session.eventBuffer,
-          "error",
-          {
-            message,
-          },
-          true
-        );
+        recordEvent(session, "error", {
+          message,
+        });
         this.persistSessionIfChanged(session);
         this.persistResult(session);
         this.notifyWaiters(sessionId);
@@ -2174,14 +1971,9 @@ export class SessionManager {
         session.status = "error";
         const message = redactPaths(`app-server error: ${err.message}`);
         setTerminalErrorResult(session, message);
-        pushEvent(
-          session.eventBuffer,
-          "error",
-          {
-            message,
-          },
-          true
-        );
+        recordEvent(session, "error", {
+          message,
+        });
         this.persistSessionIfChanged(session);
         this.persistResult(session);
         this.notifyWaiters(sessionId);
@@ -2228,7 +2020,7 @@ export class SessionManager {
           const timeUntilExpiry = ttlMs - age;
           if (timeUntilExpiry <= TTL_WARNING_THRESHOLD_MS && timeUntilExpiry > 0) {
             this.ttlWarningEmitted.add(id);
-            pushEvent(session.eventBuffer, "progress", {
+            recordEvent(session, "progress", {
               method: "codex-mcp/ttl_warning",
               type: "ttl_warning",
               ttlRemainingMs: timeUntilExpiry,
@@ -2262,7 +2054,6 @@ export class SessionManager {
     if (!session) return { deleted: false, diskRemoved: false };
 
     clearSessionPendingRequests(session);
-    this.notifyWaiters(sessionId);
     this.clients
       .get(sessionId)
       ?.destroy()
@@ -2273,9 +2064,13 @@ export class SessionManager {
       });
     this.clients.delete(sessionId);
     const deleted = this.sessions.delete(sessionId);
+    // After the removal: a waiter is woken by the session being gone, which is a
+    // change it acts on, and its next read reports the session as not found.
+    this.notifyWaiters(sessionId);
     this.lastPersistedStatus.delete(sessionId);
     this.ttlWarningEmitted.delete(sessionId);
     this.sessionNotifiers.delete(sessionId);
+    this.lastNotifiedSignal.delete(sessionId);
     this.cancellationInFlight.delete(sessionId);
     this.eventPersistFailed.delete(sessionId);
     this.schemaConstrainedTurns.delete(sessionId);
@@ -2317,72 +2112,12 @@ function pollIntervalForStatus(status: SessionStatus): number | undefined {
   return undefined; // terminal states don't need polling
 }
 
-function createEventBuffer(): EventBuffer {
-  return {
-    events: [],
-    maxSize: DEFAULT_EVENT_BUFFER_SIZE,
-    hardMaxSize: DEFAULT_EVENT_BUFFER_HARD_SIZE,
-    nextId: 0,
-  };
-}
-
-const RESTORABLE_EVENT_TYPES = new Set<string>([
-  "output",
-  "progress",
-  "approval_request",
-  "approval_result",
-  "result",
-  "error",
-]);
-
-/**
- * Refill a fresh buffer with the events a previous run wrote to events.jsonl.
- *
- * Buffer ids continue the on-disk seq numbering, so a poll cursor and a log line
- * name the same event across a restart.
- *
- * A line carrying no timestamp is dropped, its seq still consumed: dating it with the
- * current clock would put yesterday's event into the caller's chronology as one that
- * just happened.
- */
-function restoreEventBuffer(
-  buf: EventBuffer,
-  events: Array<{ seq: number; [key: string]: unknown }>,
-  sessionId: string
-): void {
-  let undated = 0;
-  for (const raw of events) {
-    const type = raw.type;
-    const timestamp = raw.timestamp;
-    if (typeof type !== "string" || !RESTORABLE_EVENT_TYPES.has(type)) continue;
-    if (typeof timestamp !== "string") {
-      undated++;
-    } else {
-      buf.events.push({
-        id: raw.seq,
-        type: type as SessionEventType,
-        data: raw.data,
-        timestamp,
-        pinned: false,
-      });
-    }
-    if (raw.seq >= buf.nextId) buf.nextId = raw.seq + 1;
-  }
-  if (undated > 0) {
-    console.error(
-      `[codex-mcp] Dropped ${undated} restored event(s) that carry no timestamp: session=${sessionId}`
-    );
-  }
-  evictEvents(buf);
-}
-
 function buildProgressInfo(session: SessionInfo): ProgressInfo {
   return {
     phase: deriveProgressPhase(session),
     lastEventAt: session.progressState?.lastEventAt ?? session.lastActiveAt,
     activeTurnId: session.activeTurnId,
     pendingActionCount: countPendingRequests(session),
-    lastMethod: session.progressState?.lastMethod,
     // Every counter the wire carries is merged into progressState as it arrives —
     // by `thread/tokenUsage/updated`, by the exec turn's `usage`, and by the
     // restore path. Re-reading the finished turn here would let those older
@@ -2568,17 +2303,6 @@ function pickNumber(source: Record<string, unknown>, keys: string[]): number | u
   return undefined;
 }
 
-function isSkippableDeltaEvent(event: { data: unknown }): boolean {
-  if (!isRecord(event.data)) return false;
-  const method = event.data.method;
-  return typeof method === "string" && SKIPPABLE_DELTA_METHODS.has(method);
-}
-
-/** Clear stale result/error events when transitioning idle/error → running */
-function clearTerminalEvents(buf: EventBuffer): void {
-  buf.events = buf.events.filter((e) => e.type !== "result" && e.type !== "error");
-}
-
 function clearSessionPendingRequests(session: SessionInfo): void {
   const entries = Array.from(session.pendingRequests.entries());
   session.pendingRequests.clear();
@@ -2602,23 +2326,19 @@ function setTerminalErrorResult(session: SessionInfo, message: string): void {
   const completedAt = new Date().toISOString();
   const failedTurnId = session.activeTurnId ?? "";
   session.activeTurnId = undefined;
+  session.resultDelivered = false;
   session.lastResult = {
     turnId: failedTurnId,
     status: "error",
     error: message,
     completedAt,
   };
-  pushEvent(
-    session.eventBuffer,
-    "result",
-    {
-      status: "error",
-      turnId: failedTurnId,
-      error: message,
-      completedAt,
-    },
-    true
-  );
+  recordEvent(session, "result", {
+    status: "error",
+    turnId: failedTurnId,
+    error: message,
+    completedAt,
+  });
 }
 
 function createUnrefTimeout(handler: () => void, timeoutMs: number): ReturnType<typeof setTimeout> {
@@ -2704,7 +2424,7 @@ function respondOrReport(sessionId: string, method: string, send: () => void): v
  * its `requestId`.
  */
 /**
- * The answers to keep in the event buffer and in events.jsonl.
+ * The answers to keep in events.jsonl.
  *
  * A question marked `isSecret` is answered with something that must not be
  * written down — a token, a password (codex-schema/ToolRequestUserInputParams.json
@@ -2780,362 +2500,39 @@ function sendPendingRequestResponseOrThrow(
   }
 }
 
-function compactActionsForBudget(
-  actions: NonNullable<CheckResult["actions"]>
-): NonNullable<CheckResult["actions"]> {
-  return actions.map((action) => ({
-    type: action.type,
-    requestId: action.requestId,
-    kind: action.kind,
-    params: compactActionParamsForBudget(action),
-    itemId: action.itemId,
-    createdAt: action.createdAt,
-    commandActions: action.commandActions,
-    proposedExecpolicyAmendment: action.proposedExecpolicyAmendment,
-    availableDecisions: action.availableDecisions,
-    additionalPermissions: action.additionalPermissions,
-    networkApprovalContext: action.networkApprovalContext,
-    proposedNetworkPolicyAmendments: action.proposedNetworkPolicyAmendments,
-  }));
-}
-
-function compactActionParamsForBudget(
-  action: NonNullable<CheckResult["actions"]>[number]
-): unknown {
-  if (action.kind !== "user_input" || !isRecord(action.params)) {
-    return undefined;
-  }
-
-  const rawQuestions = action.params.questions;
-  if (!Array.isArray(rawQuestions)) {
-    return undefined;
-  }
-
-  const compactQuestions: Array<{ id: string }> = [];
-  for (const entry of rawQuestions) {
-    if (!isRecord(entry)) continue;
-    const id = typeof entry.id === "string" ? entry.id : undefined;
-    if (id) {
-      compactQuestions.push({ id });
-    }
-  }
-
-  return compactQuestions.length > 0 ? { questions: compactQuestions } : undefined;
-}
-
-function compactActionsToMinimum(
-  actions: NonNullable<CheckResult["actions"]>
-): NonNullable<CheckResult["actions"]> {
-  if (actions.length === 0) return actions;
-  const first = actions[0]!;
-  return [
-    {
-      type: first.type,
-      requestId: first.requestId,
-      kind: first.kind,
-      params: undefined,
-      itemId: first.itemId,
-      createdAt: first.createdAt,
-      commandActions: first.commandActions,
-      proposedExecpolicyAmendment: first.proposedExecpolicyAmendment,
-      availableDecisions: first.availableDecisions,
-      additionalPermissions: first.additionalPermissions,
-      networkApprovalContext: first.networkApprovalContext,
-      proposedNetworkPolicyAmendments: first.proposedNetworkPolicyAmendments,
-    },
-  ];
-}
-
-function clampCursorToLatest(cursor: number, latestCursor: number): number {
-  return Math.max(0, Math.min(cursor, latestCursor));
-}
-
-function persistMonotonicCursor(
-  previousCursor: number,
-  nextCursor: number,
-  latestCursor: number
-): number {
-  const boundedCursor = clampCursorToLatest(nextCursor, latestCursor);
-  return Math.max(previousCursor, boundedCursor);
-}
-
 type EventSink = (type: SessionEventType, data: unknown, timestamp: string) => void;
 
-/** Disk mirror per session event buffer; a dropped session takes its sink with it. */
-const eventSinks = new WeakMap<EventBuffer, EventSink>();
+/** Disk mirror per session; a dropped session takes its sink with it. */
+const eventSinks = new WeakMap<SessionInfo, EventSink>();
 
-function setEventSink(buf: EventBuffer, sink: EventSink): void {
-  eventSinks.set(buf, sink);
+function setEventSink(session: SessionInfo, sink: EventSink): void {
+  eventSinks.set(session, sink);
 }
 
-function pushEvent(buf: EventBuffer, type: SessionEventType, data: unknown, pinned = false): void {
-  // One clock read per event: the buffered copy a poll returns and the events.jsonl
-  // line carry the same instant, so a restart hands the client back the timestamp
-  // it already saw.
-  const timestamp = new Date().toISOString();
-
-  // Every delta goes to the log as its own line, coalesced ones included: an
-  // append-only file cannot rewrite the line the delta merges into.
-  eventSinks.get(buf)?.(type, data, timestamp);
-
-  if (tryCoalesceProgressDelta(buf, type, data, pinned)) return;
-
-  buf.events.push({
-    id: buf.nextId++,
-    type,
-    data,
-    timestamp,
-    pinned,
-  });
-  evictEvents(buf);
+/**
+ * Write one event of the turn to the session's events.jsonl.
+ *
+ * The log is read by whoever opens the state directory, never by `codex_check`:
+ * the caller is told the state of the session, and Codex's own rollout log under
+ * `~/.codex/sessions/` holds the transcript.
+ */
+function recordEvent(session: SessionInfo, type: SessionEventType, data: unknown): void {
+  eventSinks.get(session)?.(type, data, new Date().toISOString());
 }
 
-function serializeEventForMode(
-  event: { id: number; type: SessionEventType; data: unknown; timestamp: string },
-  mode: ResponseMode
-): { id: number; type: SessionEventType; data: unknown; timestamp: string } {
-  if (mode === "full") {
-    return { id: event.id, type: event.type, data: event.data, timestamp: event.timestamp };
-  }
-  const minimal = mode === "minimal";
-  return {
-    id: event.id,
-    type: event.type,
-    data: compactEventData(event.data, minimal),
-    timestamp: event.timestamp,
-  };
-}
+const TERMINAL_SESSION_STATUSES = new Set<SessionStatus>(["idle", "error", "cancelled"]);
 
-function compactEventData(data: unknown, minimal: boolean): unknown {
-  if (!isRecord(data)) return data;
-
-  const compact: Record<string, unknown> = {};
-  if (typeof data.method === "string") {
-    compact.method = data.method;
-  }
-
-  // Top-level keys the payloads this server buffers actually carry: `phase` comes
-  // from the synthetic `codex-mcp/reconnect` event, `decision`/`timeout` from the
-  // approval events this manager writes, and the rest from the notification
-  // params of codex-schema/ServerNotification.json.
-  const preferredKeys = minimal
-    ? [
-        "delta",
-        "message",
-        "error",
-        "status",
-        "phase",
-        "itemId",
-        "turnId",
-        "requestId",
-        "kind",
-        "decision",
-        "timeout",
-        "willRetry",
-      ]
-    : [
-        "delta",
-        "message",
-        "error",
-        "status",
-        "phase",
-        "itemId",
-        "turnId",
-        "requestId",
-        "kind",
-        "decision",
-        "timeout",
-        "willRetry",
-        "reason",
-        "command",
-        "cwd",
-        "sourceMethod",
-      ];
-
-  for (const key of preferredKeys) {
-    if (key in data) {
-      compact[key] = data[key];
-    }
-  }
-
-  if (typeof compact.delta === "string") {
-    const limit = minimal ? 256 : 2048;
-    if (compact.delta.length > limit) {
-      compact.delta = compact.delta.slice(0, limit);
-      compact.deltaTruncated = true;
-    }
-  }
-
-  if (Object.keys(compact).length === 0) {
-    return minimal ? { summary: "omitted for minimal response mode" } : { ...data };
-  }
-
-  return compact;
-}
-
-function payloadByteSize(value: unknown): number {
-  return Buffer.byteLength(JSON.stringify(value), "utf8");
-}
-
-function addCompatWarning(result: CheckResult, warning: string): void {
-  if (!result.compatWarnings) {
-    result.compatWarnings = [];
-  }
-  result.compatWarnings.push(warning);
-}
-
-function addCompatWarningWithinBudget(
-  result: CheckResult,
-  warning: string,
-  maxBytes?: number
-): void {
-  const previousWarnings = result.compatWarnings ? [...result.compatWarnings] : undefined;
-  addCompatWarning(result, warning);
-
-  if (typeof maxBytes !== "number") {
-    return;
-  }
-
-  const normalizedMaxBytes = Math.max(1, Math.floor(maxBytes));
-  if (payloadByteSize(result) <= normalizedMaxBytes) {
-    return;
-  }
-
-  if (!previousWarnings || previousWarnings.length === 0) {
-    result.compatWarnings = undefined;
-    return;
-  }
-  result.compatWarnings = previousWarnings;
-}
-
-function tryCoalesceProgressDelta(
-  buf: EventBuffer,
-  type: SessionEventType,
-  data: unknown,
-  pinned: boolean
-): boolean {
-  if (type !== "progress" || pinned || buf.events.length === 0) return false;
-  if (!isRecord(data)) return false;
-
-  const method = data.method;
-  const delta = data.delta;
-  const itemId = data.itemId;
-  const turnId = data.turnId;
-  const itemKey = typeof itemId === "string" ? itemId : "";
-  const turnKey = typeof turnId === "string" ? turnId : "";
-  if (
-    typeof method !== "string" ||
-    !COALESCED_PROGRESS_DELTA_METHODS.has(method) ||
-    typeof delta !== "string"
-  ) {
-    return false;
-  }
-  // Keep coalescing scoped to a stable stream key (itemId or turnId).
-  if (itemKey.length === 0 && turnKey.length === 0) return false;
-
-  const last = buf.events[buf.events.length - 1];
-  if (last.type !== "progress" || last.pinned || !isRecord(last.data)) return false;
-
-  const lastMethod = last.data.method;
-  const lastItemId = last.data.itemId;
-  const lastTurnId = last.data.turnId;
-  const lastDelta = last.data.delta;
-  const lastItemKey = typeof lastItemId === "string" ? lastItemId : "";
-  const lastTurnKey = typeof lastTurnId === "string" ? lastTurnId : "";
-  if (
-    lastMethod !== method ||
-    lastItemKey !== itemKey ||
-    lastTurnKey !== turnKey ||
-    typeof lastDelta !== "string"
-  ) {
-    return false;
-  }
-
-  if (lastDelta.length + delta.length > MAX_COALESCED_DELTA_CHARS) return false;
-
-  last.data = {
-    ...last.data,
-    delta: `${lastDelta}${delta}`,
-  };
-  last.timestamp = new Date().toISOString();
-  return true;
-}
-
-function evictEvents(buf: EventBuffer): void {
-  // Soft limit: evict in a single pass to avoid O(n²) repeated findIndex+splice.
-  if (buf.events.length > buf.maxSize) {
-    const overflow = buf.events.length - buf.maxSize;
-    const unpinnedIdx: number[] = [];
-    const approvalResultIdx: number[] = [];
-    for (let i = 0; i < buf.events.length; i++) {
-      const event = buf.events[i];
-      if (!event.pinned) unpinnedIdx.push(i);
-      else if (event.type === "approval_result") approvalResultIdx.push(i);
-    }
-
-    const drop = new Set<number>();
-    for (const idx of unpinnedIdx) {
-      if (drop.size >= overflow) break;
-      drop.add(idx);
-    }
-    for (const idx of approvalResultIdx) {
-      if (drop.size >= overflow) break;
-      drop.add(idx);
-    }
-
-    if (drop.size > 0) {
-      buf.events = buf.events.filter((_, idx) => !drop.has(idx));
-    }
-  }
-
-  if (buf.events.length <= buf.hardMaxSize) return;
-
-  // Hard limit: select evictions in one pass to avoid O(n^2) repeated scans.
-  const overflow = buf.events.length - buf.hardMaxSize;
-  const approvalResultIdx: number[] = [];
-  const nonPinnedIdx: number[] = [];
-  const pinnedNonCriticalIdx: number[] = [];
-  const criticalPinnedIdx: number[] = [];
-
-  for (let i = 0; i < buf.events.length; i++) {
-    const event = buf.events[i];
-    if (event.type === "approval_result") {
-      approvalResultIdx.push(i);
-    } else if (!event.pinned) {
-      nonPinnedIdx.push(i);
-    } else if (!isHardPinnedCriticalType(event.type)) {
-      pinnedNonCriticalIdx.push(i);
-    } else {
-      criticalPinnedIdx.push(i);
-    }
-  }
-
-  const drop = new Set<number>();
-  const take = (indices: number[]) => {
-    for (const idx of indices) {
-      if (drop.size >= overflow) break;
-      drop.add(idx);
-    }
-  };
-
-  take(approvalResultIdx);
-  take(nonPinnedIdx);
-  take(pinnedNonCriticalIdx);
-  const beforeCritical = drop.size;
-  take(criticalPinnedIdx);
-
-  if (drop.size > beforeCritical) {
-    console.error(
-      "[codex-mcp] Event buffer hard limit exceeded with only critical pinned events; evicting oldest event."
-    );
-  }
-
-  if (drop.size === 0) return;
-  buf.events = buf.events.filter((_, idx) => !drop.has(idx));
-}
-
-function isHardPinnedCriticalType(type: SessionEventType): boolean {
-  return type === "approval_request" || type === "result" || type === "error";
+/**
+ * The session state a long-poll caller acts on, as one string: status, open
+ * actions and the finished turn's result.
+ */
+function signalOf(session: SessionInfo): string {
+  const openRequests = Array.from(session.pendingRequests.values())
+    .filter((req) => !req.resolved)
+    .map((req) => req.requestId)
+    .sort()
+    .join(",");
+  return `${session.status}|${openRequests}|${session.lastResult?.completedAt ?? ""}`;
 }
 
 function toPublicInfo(session: SessionInfo): PublicSessionInfo {

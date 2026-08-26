@@ -144,8 +144,8 @@ export class SessionPersistence {
   /**
    * Append an event to the session's event log.
    *
-   * The caller owns the clock: `timestamp` is the one the in-memory buffer handed
-   * the poller, so a restore returns the timestamp the client already saw.
+   * The caller owns the clock: `timestamp` is the instant the manager handled the
+   * event, so the log dates it by when it happened rather than when it was flushed.
    */
   appendEvent(sessionId: string, type: SessionEventType, data: unknown, timestamp: string): void {
     let log = this.eventLogs.get(sessionId);
@@ -180,8 +180,8 @@ export class SessionPersistence {
   // ── Read / Recovery ─────────────────────────────────────────────
 
   /** Scan and recover sessions from disk. */
-  recoverSessions(maxEvents?: number): RecoveredSession[] {
-    return scanRecoverableSessions(this.sessionsDir, maxEvents);
+  recoverSessions(): RecoveredSession[] {
+    return scanRecoverableSessions(this.sessionsDir);
   }
 
   /** Apply retention policy. Returns number of sessions pruned. */

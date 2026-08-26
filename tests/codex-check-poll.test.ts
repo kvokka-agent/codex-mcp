@@ -1,5 +1,5 @@
 /**
- * executeCodexCheck: long-polling, response shaping and the approval /
+ * executeCodexCheck: the status payload, long-polling, and the approval /
  * user-input decision branches.
  *
  * The session manager is real; only the app-server client is a stand-in, so
@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
-import { executeCodexCheck, type CodexCheckParams } from "../src/tools/codex-check.js";
+import { executeCodexCheck } from "../src/tools/codex-check.js";
 import type { CheckResult } from "../src/types.js";
 
 class MockClient extends EventEmitter {
@@ -109,11 +109,15 @@ describe("executeCodexCheck", () => {
   }
 
   function pendingRequestId(): string {
-    const actions = expectCheck(
-      executeCodexCheck({ action: "poll", sessionId, cursor: 0, maxEvents: 50 }, manager)
-    ).actions;
-    expect(actions, "no pending actions").toBeDefined();
-    return actions![0].requestId;
+    const actions = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager)).actions;
+    expect(actions.length, "no pending actions").toBeGreaterThan(0);
+    return actions[0]!.requestId;
+  }
+
+  function completeTurn(text = "done"): void {
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      turn: { id: "turn_mock", output: text, status: "completed" },
+    });
   }
 
   describe("poll", () => {
@@ -122,30 +126,6 @@ describe("executeCodexCheck", () => {
         executeCodexCheck({ action: "poll", sessionId, requestId: "req_1" }, manager)
       );
       expect(res.error).toContain("only valid for respond_* actions");
-    });
-
-    it("raises maxEvents to the poll minimum instead of returning nothing", () => {
-      emitOutput("A");
-      emitOutput("B");
-
-      const res = expectCheck(
-        executeCodexCheck({ action: "poll", sessionId, cursor: 0, maxEvents: 0 }, manager)
-      );
-
-      expect(res.events).toHaveLength(1);
-      expect(res.nextCursor).toBe(1);
-    });
-
-    it("floors a fractional maxEvents", () => {
-      emitOutput("A");
-      emitOutput("B");
-      emitOutput("C");
-
-      const res = expectCheck(
-        executeCodexCheck({ action: "poll", sessionId, cursor: 0, maxEvents: 2.9 }, manager)
-      );
-
-      expect(res.events).toHaveLength(2);
     });
 
     it("lets an unknown session throw so the tool layer formats it", () => {
@@ -187,261 +167,253 @@ describe("executeCodexCheck", () => {
     });
   });
 
-  describe("response shaping", () => {
-    beforeEach(() => {
-      client.emitNotification(Methods.COMMAND_OUTPUT_DELTA, {
+  describe("the status payload", () => {
+    it("carries no event and no delta, whatever the turn produced", async () => {
+      // Everything a turn can put on the wire: deltas, items, reasoning, token
+      // counters, an approval, an error, and the end of the turn.
+      requestApproval();
+      for (let i = 0; i < 5; i++) emitOutput(`chunk-${i}`);
+      client.emitNotification(Methods.REASONING_TEXT_DELTA, {
         threadId: "thread_mock",
         turnId: "turn_mock",
-        itemId: "item_cmd",
-        delta: "hello",
-        reason: "because",
-        cwd: "/work",
-        aggregatedOutput: "hello world",
+        delta: "thinking about it",
       });
-    });
+      client.emitNotification(Methods.ITEM_COMPLETED, {
+        threadId: "thread_mock",
+        turnId: "turn_mock",
+        item: { id: "item_1", type: "commandExecution", command: "ls" },
+      });
+      client.emitNotification(Methods.THREAD_TOKEN_USAGE_UPDATED, {
+        threadId: "thread_mock",
+        turnId: "turn_mock",
+        tokenUsage: { total: { inputTokens: 7, outputTokens: 3, totalTokens: 10 } },
+      });
 
-    function pollWith(mode: CodexCheckParams["responseMode"]): Record<string, unknown> {
-      const res = expectCheck(
+      const waiting = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
+      const answered = expectCheck(
         executeCodexCheck(
-          { action: "poll", sessionId, cursor: 0, maxEvents: 5, responseMode: mode },
+          {
+            action: "respond_permission",
+            sessionId,
+            requestId: waiting.actions[0]!.requestId,
+            decision: "accept",
+          },
           manager
         )
       );
-      expect(res.events).toHaveLength(1);
-      return res.events[0].data as Record<string, unknown>;
-    }
-
-    it("keeps only the hot fields in minimal mode", () => {
-      const data = pollWith("minimal");
-
-      expect(data.method).toBe(Methods.COMMAND_OUTPUT_DELTA);
-      expect(data.delta).toBe("hello");
-      expect(data).not.toHaveProperty("reason");
-      expect(data).not.toHaveProperty("cwd");
-      expect(data).not.toHaveProperty("aggregatedOutput");
-    });
-
-    it("adds the context fields in delta_compact mode", () => {
-      const data = pollWith("delta_compact");
-
-      expect(data.delta).toBe("hello");
-      expect(data.reason).toBe("because");
-      expect(data.cwd).toBe("/work");
-      expect(data).not.toHaveProperty("aggregatedOutput");
-    });
-
-    it("passes the whole event through in full mode", () => {
-      const data = pollWith("full");
-
-      expect(data.aggregatedOutput).toBe("hello world");
-      expect(data.itemId).toBe("item_cmd");
-    });
-
-    it("defaults to minimal when responseMode is omitted", () => {
-      const res = expectCheck(
-        executeCodexCheck({ action: "poll", sessionId, cursor: 0, maxEvents: 5 }, manager)
+      completeTurn("the final answer");
+      const finished = expectCheck(
+        await executeCodexCheck({ action: "poll", sessionId, waitMs: 0 }, manager)
       );
-      expect(res.events[0].data).not.toHaveProperty("aggregatedOutput");
-    });
-  });
 
-  describe("pollOptions", () => {
-    beforeEach(() => {
+      for (const res of [waiting, answered, finished]) {
+        expect(Object.keys(res).sort()).toEqual([
+          "actions",
+          "interactionState",
+          "pollInterval",
+          "progress",
+          "recommendedNextAction",
+          "result",
+          "sessionId",
+          "status",
+        ]);
+        const serialized = JSON.stringify(res);
+        expect(serialized).not.toContain("chunk-");
+        expect(serialized).not.toContain("thinking about it");
+        expect(serialized).not.toContain("delta");
+      }
+
+      expect(waiting.actions).toHaveLength(1);
+      expect(finished.result?.text).toBe("the final answer");
+      // The counters are carried as counts, which is all of that traffic the
+      // caller ever sees.
+      expect(finished.progress.tokens).toEqual({ input: 7, output: 3, total: 10 });
+    });
+
+    it("reports the phase, the pending count and the active turn", () => {
       requestApproval();
-      emitOutput("A");
+
+      const res = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
+
+      expect(res.progress.phase).toBe("waiting_approval");
+      expect(res.progress.pendingActionCount).toBe(1);
+      expect(res.progress.activeTurnId).toBe("turn_mock");
+      expect(Number.isNaN(Date.parse(res.progress.lastEventAt))).toBe(false);
+      expect(res.progress).not.toHaveProperty("lastMethod");
     });
 
-    it("drops events but keeps actions when includeEvents is false", () => {
-      const res = expectCheck(
-        executeCodexCheck(
-          {
-            action: "poll",
-            sessionId,
-            cursor: 0,
-            maxEvents: 50,
-            pollOptions: { includeEvents: false },
-          },
-          manager
-        )
-      );
+    it("hands the finished turn's answer over exactly once", () => {
+      completeTurn("the answer");
 
-      expect(res.events).toEqual([]);
-      expect(res.actions).toHaveLength(1);
+      const first = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
+      const second = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
+      const third = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
+
+      expect(first.result?.text).toBe("the answer");
+      expect(second.result).toBeUndefined();
+      expect(third.result).toBeUndefined();
+      // The status stays readable after the answer was handed over.
+      for (const res of [first, second, third]) {
+        expect(res.status).toBe("idle");
+        expect(res.recommendedNextAction).toBe("none");
+      }
     });
 
-    it("drops actions when includeActions is false", () => {
-      const res = expectCheck(
-        executeCodexCheck(
-          {
-            action: "poll",
-            sessionId,
-            cursor: 0,
-            maxEvents: 50,
-            pollOptions: { includeActions: false },
-          },
-          manager
-        )
-      );
-
-      expect(res.actions).toBeUndefined();
-      expect(res.events.length).toBeGreaterThan(0);
-    });
-
-    it("advances the cursor past skipped delta events", () => {
-      const withDeltas = expectCheck(
-        executeCodexCheck({ action: "poll", sessionId, cursor: 0, maxEvents: 50 }, manager)
-      );
-      const deltaEvents = withDeltas.events.filter(
-        (e) => (e.data as { method?: string }).method === Methods.AGENT_MESSAGE_DELTA
-      );
-      expect(deltaEvents.length).toBeGreaterThan(0);
-
-      const skipped = expectCheck(
-        executeCodexCheck(
-          {
-            action: "poll",
-            sessionId,
-            cursor: 0,
-            maxEvents: 50,
-            pollOptions: { skipDeltas: true },
-          },
-          manager
-        )
-      );
-
+    it("carries the answer of the next turn after a reply", async () => {
+      completeTurn("first answer");
       expect(
-        skipped.events.some(
-          (e) => (e.data as { method?: string }).method === Methods.AGENT_MESSAGE_DELTA
-        )
-      ).toBe(false);
-      expect(skipped.nextCursor).toBe(withDeltas.nextCursor);
+        expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager)).result?.text
+      ).toBe("first answer");
+
+      await manager.replyToSession(sessionId, "and now?");
+      const running = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
+      expect(running.status).toBe("running");
+      expect(running.result).toBeUndefined();
+
+      completeTurn("second answer");
+      expect(
+        expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager)).result?.text
+      ).toBe("second answer");
     });
 
-    it("omits events and keeps the terminal result when finalOnly is set", () => {
-      client.emitNotification(Methods.TURN_COMPLETED, {
-        turn: { id: "turn_mock", output: "done", status: "completed" },
-      });
+    it("carries an approval through to the app-server and back to running", () => {
+      requestApproval(7);
 
-      const res = expectCheck(
-        executeCodexCheck(
-          { action: "poll", sessionId, cursor: 0, maxEvents: 50, pollOptions: { finalOnly: true } },
-          manager
-        )
-      );
+      const waiting = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
+      expect(waiting.status).toBe("waiting_approval");
+      expect(waiting.recommendedNextAction).toBe("respond_permission");
+      const action = waiting.actions[0]!;
+      expect(action.kind).toBe("command");
+      expect(action.reason).toBe("needs the network");
+      expect(action.approvalId).toBe("appr_1");
+      expect(action.availableDecisions).toEqual([
+        "accept",
+        "decline",
+        "applyNetworkPolicyAmendment",
+      ]);
 
-      expect(res.events).toEqual([]);
-      expect(res.result?.text).toBe("done");
-      expect(res.status).toBe("idle");
-      expect(res.interactionState).toBe("finished");
-      expect(res.recommendedNextAction).toBe("none");
-    });
-
-    it("omits the result when includeResult is false", () => {
-      client.emitNotification(Methods.TURN_COMPLETED, {
-        turn: { id: "turn_mock", output: "done", status: "completed" },
-      });
-
-      const res = expectCheck(
+      const answered = expectCheck(
         executeCodexCheck(
           {
-            action: "poll",
+            action: "respond_permission",
             sessionId,
-            cursor: 0,
-            maxEvents: 50,
-            pollOptions: { includeResult: false },
+            requestId: action.requestId,
+            decision: "applyNetworkPolicyAmendment",
+            network_policy_amendment: { action: "allow", host: "example.com" },
           },
           manager
         )
       );
 
-      expect(res.result).toBeUndefined();
-    });
-
-    it("truncates the payload to respect maxBytes", () => {
-      for (let i = 0; i < 20; i++) emitOutput(`chunk-${i}-${"x".repeat(200)}`);
-
-      const res = expectCheck(
-        executeCodexCheck(
-          {
-            action: "poll",
-            sessionId,
-            cursor: 0,
-            maxEvents: 50,
-            pollOptions: { maxBytes: 600 },
+      expect(client.respondToServer).toHaveBeenCalledWith(7, {
+        decision: {
+          applyNetworkPolicyAmendment: {
+            network_policy_amendment: { action: "allow", host: "example.com" },
           },
-          manager
-        )
-      );
-
-      expect(res.truncated).toBe(true);
-      expect(res.truncatedFields).toContain("events");
-      expect(JSON.stringify(res).length).toBeLessThan(4000);
+        },
+      });
+      expect(answered.status).toBe("running");
+      expect(answered.actions).toEqual([]);
+      expect(answered.progress.pendingActionCount).toBe(0);
     });
   });
 
   describe("long-poll", () => {
-    it("returns at once when events are already buffered", async () => {
-      emitOutput("A");
-      const started = Date.now();
-
-      const res = expectCheck(
-        await executeCodexCheck(
-          { action: "poll", sessionId, cursor: 0, pollOptions: { waitMs: 5000 } },
-          manager
-        )
-      );
-
-      expect(res.events).toHaveLength(1);
-      expect(Date.now() - started).toBeLessThan(1000);
-    });
-
-    it("returns at once when an action is pending", async () => {
+    it("answers at once when an action is already pending", async () => {
       requestApproval();
       const started = Date.now();
 
       const res = expectCheck(
-        await executeCodexCheck(
-          {
-            action: "poll",
-            sessionId,
-            cursor: 0,
-            pollOptions: { waitMs: 5000, includeEvents: false },
-          },
-          manager
-        )
+        await executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager)
       );
 
       expect(res.actions).toHaveLength(1);
       expect(Date.now() - started).toBeLessThan(1000);
     });
 
-    it("wakes up as soon as an event arrives", async () => {
-      const started = Date.now();
-      const pending = executeCodexCheck(
-        { action: "poll", sessionId, cursor: 0, pollOptions: { waitMs: 5000 } },
-        manager
-      );
-      setTimeout(() => emitOutput("late"), 20);
-
-      const res = expectCheck(await pending);
-
-      expect(res.events).toHaveLength(1);
-      expect((res.events[0].data as { delta?: string }).delta).toBe("late");
-      expect(Date.now() - started).toBeLessThan(4000);
-    });
-
-    it("returns an empty poll when the wait window expires", async () => {
+    it("answers at once when the turn is already over", async () => {
+      completeTurn();
       const started = Date.now();
 
       const res = expectCheck(
-        await executeCodexCheck(
-          { action: "poll", sessionId, cursor: 0, pollOptions: { waitMs: 30 } },
-          manager
-        )
+        await executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager)
       );
 
-      expect(res.events).toEqual([]);
+      expect(res.status).toBe("idle");
+      expect(res.result?.text).toBe("done");
+      expect(Date.now() - started).toBeLessThan(1000);
+    });
+
+    it("sleeps through a stream of deltas and token-counter updates", async () => {
+      const started = Date.now();
+      const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 120 }, manager);
+
+      for (let i = 0; i < 50; i++) {
+        emitOutput(`chunk-${i}`);
+        client.emitNotification(Methods.THREAD_TOKEN_USAGE_UPDATED, {
+          threadId: "thread_mock",
+          turnId: "turn_mock",
+          tokenUsage: { total: { inputTokens: i, outputTokens: i, totalTokens: 2 * i } },
+        });
+      }
+
+      const res = expectCheck(await pending);
+
+      // The wait ran its full window: none of that traffic is a change to act on.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(100);
       expect(res.status).toBe("running");
+      expect(res.actions).toEqual([]);
+      // The counters the run produced still reach the caller, as a count.
+      expect(res.progress.tokens?.total).toBe(98);
+    });
+
+    it("wakes on a new action", async () => {
+      const started = Date.now();
+      const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager);
+      setTimeout(() => requestApproval(), 20);
+
+      const res = expectCheck(await pending);
+
+      expect(res.actions).toHaveLength(1);
+      expect(res.status).toBe("waiting_approval");
+      expect(res.recommendedNextAction).toBe("respond_permission");
+      expect(Date.now() - started).toBeLessThan(4000);
+    });
+
+    it("wakes when the turn ends and carries its answer", async () => {
+      const started = Date.now();
+      const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager);
+      setTimeout(() => completeTurn("the answer"), 20);
+
+      const res = expectCheck(await pending);
+
+      expect(res.status).toBe("idle");
+      expect(res.result?.text).toBe("the answer");
+      expect(res.interactionState).toBe("finished");
+      expect(Date.now() - started).toBeLessThan(4000);
+    });
+
+    it("wakes on a status change with nothing to answer", async () => {
+      const started = Date.now();
+      const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager);
+      setTimeout(() => void manager.cancelSession(sessionId, "stopped by test"), 20);
+
+      const res = expectCheck(await pending);
+
+      expect(res.status).toBe("cancelled");
+      expect(Date.now() - started).toBeLessThan(4000);
+    });
+
+    it("reports the state it found when the wait window expires", async () => {
+      const started = Date.now();
+
+      const res = expectCheck(
+        await executeCodexCheck({ action: "poll", sessionId, waitMs: 30 }, manager)
+      );
+
+      expect(res.status).toBe("running");
+      expect(res.actions).toEqual([]);
+      expect(res.result).toBeUndefined();
       expect(Date.now() - started).toBeGreaterThanOrEqual(20);
     });
 
@@ -452,13 +424,13 @@ describe("executeCodexCheck", () => {
 
       const res = expectCheck(
         await executeCodexCheck(
-          { action: "poll", sessionId, cursor: 0, pollOptions: { waitMs: 5000 } },
+          { action: "poll", sessionId, waitMs: 5000 },
           manager,
           controller.signal
         )
       );
 
-      expect(res.events).toEqual([]);
+      expect(res.status).toBe("running");
       expect(Date.now() - started).toBeLessThan(1000);
     });
 
@@ -466,7 +438,7 @@ describe("executeCodexCheck", () => {
       const controller = new AbortController();
       const started = Date.now();
       const pending = executeCodexCheck(
-        { action: "poll", sessionId, cursor: 0, pollOptions: { waitMs: 5000 } },
+        { action: "poll", sessionId, waitMs: 5000 },
         manager,
         controller.signal
       );
@@ -482,32 +454,24 @@ describe("executeCodexCheck", () => {
       const observed: number[] = [];
       vi.spyOn(manager, "waitForChange").mockImplementation(async (_id, timeoutMs) => {
         observed.push(timeoutMs);
-        // Produce data so the poll loop terminates on the next iteration.
-        emitOutput("A");
+        // End the turn so the loop stops on the next read.
+        completeTurn();
       });
 
       const res = expectCheck(
-        await executeCodexCheck(
-          { action: "poll", sessionId, cursor: 0, pollOptions: { waitMs: 5_000_000 } },
-          manager
-        )
+        await executeCodexCheck({ action: "poll", sessionId, waitMs: 5_000_000 }, manager)
       );
 
-      expect(res.events).toHaveLength(1);
+      expect(res.status).toBe("idle");
       expect(observed).toHaveLength(1);
       expect(observed[0]).toBeLessThanOrEqual(120_000);
       expect(observed[0]).toBeGreaterThan(115_000);
     });
 
-    it("polls without waiting when waitMs is zero", async () => {
+    it("answers without waiting when waitMs is zero", () => {
       const waitSpy = vi.spyOn(manager, "waitForChange");
 
-      const res = expectCheck(
-        executeCodexCheck(
-          { action: "poll", sessionId, cursor: 0, pollOptions: { waitMs: 0 } },
-          manager
-        )
-      );
+      const res = expectCheck(executeCodexCheck({ action: "poll", sessionId, waitMs: 0 }, manager));
 
       expect(res.sessionId).toBe(sessionId);
       expect(waitSpy).not.toHaveBeenCalled();
@@ -520,20 +484,14 @@ describe("executeCodexCheck", () => {
       const held = [0, 1, 2, 3].map(() =>
         manager.waitForChange(sessionId, 60_000, blockers.signal)
       );
-      const pollSpy = vi.spyOn(manager, "pollEvents");
       const started = Date.now();
 
       const res = expectCheck(
-        await executeCodexCheck(
-          { action: "poll", sessionId, cursor: 0, pollOptions: { waitMs: 200 } },
-          manager
-        )
+        await executeCodexCheck({ action: "poll", sessionId, waitMs: 200 }, manager)
       );
 
       expect(res.sessionId).toBe(sessionId);
-      expect(res.events).toEqual([]);
-      // One poll before the refused wait and one after it — no retry loop.
-      expect(pollSpy).toHaveBeenCalledTimes(2);
+      expect(res.status).toBe("running");
       expect(Date.now() - started).toBeLessThan(100);
       expect(logged).toHaveBeenCalledTimes(1);
       expect(String(logged.mock.calls[0]![0])).toContain("Long-poll wait refused");
@@ -542,22 +500,18 @@ describe("executeCodexCheck", () => {
       await Promise.all(held);
     });
 
-    it("wakes on a notification delivered between the poll and the waiter registration", async () => {
+    it("wakes on a change delivered between the read and the waiter registration", async () => {
       const started = Date.now();
-      const pending = executeCodexCheck(
-        { action: "poll", sessionId, cursor: 0, pollOptions: { waitMs: 120_000 } },
-        manager
-      );
-      // The long poll has run its synchronous part: pollEvents read an empty
-      // buffer and the waiter is registered. This is the exact window the
-      // single-threaded loop leaves between those two steps, so a notification
-      // delivered here must still end the wait.
-      emitOutput("boundary");
+      const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 120_000 }, manager);
+      // The long poll has run its synchronous part: it read the session state and
+      // registered its waiter. This is the exact window the single-threaded loop
+      // leaves between those two steps, so a change delivered here must still end
+      // the wait.
+      requestApproval();
 
       const res = expectCheck(await pending);
 
-      expect(res.events).toHaveLength(1);
-      expect((res.events[0].data as { delta?: string }).delta).toBe("boundary");
+      expect(res.actions).toHaveLength(1);
       expect(Date.now() - started).toBeLessThan(1000);
     });
   });
@@ -717,7 +671,7 @@ describe("executeCodexCheck", () => {
       );
     });
 
-    it("sends the decision to the app-server and answers with a compact ACK", () => {
+    it("sends the decision to the app-server and answers with the session status", () => {
       const requestId = pendingRequestId();
 
       const res = expectCheck(
@@ -728,57 +682,11 @@ describe("executeCodexCheck", () => {
       );
 
       expect(client.respondToServer).toHaveBeenCalledWith(1, { decision: "accept" });
-      expect(res.events).toEqual([]);
+      expect(res.actions).toEqual([]);
       expect(res.status).toBe("running");
       expect(res.interactionState).toBe("working");
-    });
-
-    it("returns events when maxEvents is raised", () => {
-      const requestId = pendingRequestId();
-
-      const res = expectCheck(
-        executeCodexCheck(
-          {
-            action: "respond_permission",
-            sessionId,
-            requestId,
-            decision: "decline",
-            denyMessage: "not now",
-            cursor: 0,
-            maxEvents: 50,
-          },
-          manager
-        )
-      );
-
-      const decisions = res.events
-        .map((e) => e.data as { decision?: string })
-        .filter((d) => d.decision === "decline");
-      expect(decisions.length).toBeGreaterThan(0);
-    });
-
-    it("warns when the caller sends a cursor behind the session cursor", () => {
-      emitOutput("A");
-      emitOutput("B");
-      // Consume the buffered events so the session cursor moves forward.
-      executeCodexCheck({ action: "poll", sessionId, maxEvents: 50 }, manager);
-      const requestId = pendingRequestId();
-
-      const res = expectCheck(
-        executeCodexCheck(
-          {
-            action: "respond_permission",
-            sessionId,
-            requestId,
-            decision: "accept",
-            cursor: 0,
-            maxEvents: 50,
-          },
-          manager
-        )
-      );
-
-      expect(res.compatWarnings?.join(" ")).toContain("is stale");
+      expect(res.recommendedNextAction).toBe("poll");
+      expect(res).not.toHaveProperty("events");
     });
   });
 
@@ -859,8 +767,9 @@ describe("executeCodexCheck", () => {
       expect(client.respondToServer).toHaveBeenCalledWith(9, {
         answers: { q1: { answers: ["main"] } },
       });
-      expect(res.events).toEqual([]);
+      expect(res.actions).toEqual([]);
       expect(res.status).toBe("running");
+      expect(res).not.toHaveProperty("events");
     });
   });
 

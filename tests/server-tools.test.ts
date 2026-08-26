@@ -380,7 +380,9 @@ describe("server tool registration", () => {
       expect(structured.status).toBe("running");
       expect(structured.interactionState).toBe("working");
       expect(structured.recommendedNextAction).toBe("poll");
-      expect(typeof structured.nextCursor).toBe("number");
+      expect(structured.actions).toEqual([]);
+      expect(structured).not.toHaveProperty("events");
+      expect(structured).not.toHaveProperty("nextCursor");
     });
 
     it("marks an unknown session as an error result", async () => {
@@ -390,15 +392,42 @@ describe("server tool registration", () => {
       expect(res.content[0].text).toBe("Error [SESSION_NOT_FOUND]: Session 'sess_none' not found");
     });
 
-    it("rejects maxEvents below the poll minimum", async () => {
-      const res = await callTool("codex_check", {
-        action: "poll",
-        sessionId: "sess_x",
-        maxEvents: 0,
-      });
+    it("names what replaced every input it no longer takes", async () => {
+      const cases: Array<[string, unknown, string]> = [
+        ["maxEvents", 10, "codex_check reports status, actions"],
+        ["cursor", 0, "there is no event stream to page through"],
+        ["nextCursor", 3, "there is no event stream to page through"],
+        ["responseMode", "full", "the same status payload"],
+        ["pollOptions", { waitMs: 1000 }, "pass waitMs at the top level"],
+        ["pollOptions", { includeEvents: false }, "pass waitMs at the top level"],
+      ];
 
-      expect(res.isError).toBe(true);
-      expect(res.content[0].text).toContain("maxEvents >= 1");
+      for (const [field, value, expected] of cases) {
+        const res = await callTool("codex_check", {
+          action: "poll",
+          sessionId: "sess_x",
+          [field]: value,
+        });
+        expect(res.isError, `poll accepted ${field}`).toBe(true);
+        expect(res.content[0].text, field).toContain(expected);
+      }
+    });
+
+    it("takes waitMs on a poll and refuses it on a respond", async () => {
+      const sessionId = await startSession();
+
+      const polled = await callTool("codex_check", { action: "poll", sessionId, waitMs: 5 });
+      expect(polled.isError).toBe(false);
+
+      const responded = await callTool("codex_check", {
+        action: "respond_permission",
+        sessionId,
+        requestId: "req_1",
+        decision: "accept",
+        waitMs: 5,
+      });
+      expect(responded.isError).toBe(true);
+      expect(responded.content[0].text).toContain("waitMs is only allowed for action='poll'");
     });
 
     it("rejects respond-only fields on a poll", async () => {
@@ -520,22 +549,14 @@ describe("server tool registration", () => {
       }
     });
 
-    it("rejects a negative cursor and a non-positive maxBytes", async () => {
-      const cursor = await callTool("codex_check", {
+    it("rejects a negative waitMs", async () => {
+      const res = await callTool("codex_check", {
         action: "poll",
         sessionId: "sess_x",
-        cursor: -1,
+        waitMs: -1,
       });
-      expect(cursor.isError).toBe(true);
-      expect(cursor.content[0].text).toContain("cursor");
-
-      const maxBytes = await callTool("codex_check", {
-        action: "poll",
-        sessionId: "sess_x",
-        pollOptions: { maxBytes: 0 },
-      });
-      expect(maxBytes.isError).toBe(true);
-      expect(maxBytes.content[0].text).toContain("maxBytes");
+      expect(res.isError).toBe(true);
+      expect(res.content[0].text).toContain("waitMs");
     });
   });
 

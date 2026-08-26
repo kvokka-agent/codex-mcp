@@ -366,7 +366,7 @@ describe("scanRecoverableSessions", () => {
     expect(scanRecoverableSessions(join(root, "absent"))).toEqual([]);
   });
 
-  it("recovers metadata, events, result and pid info", () => {
+  it("recovers metadata, the log's last seq, result and pid info", () => {
     const dir = writeSession("sess_a", {
       meta: {
         schemaVersion: SCHEMA_VERSION,
@@ -386,10 +386,9 @@ describe("scanRecoverableSessions", () => {
     expect(recovered!.sessionId).toBe("sess_a");
     expect(recovered!.sessionDir).toBe(dir);
     expect(recovered!.meta.threadId).toBe("thread_a");
-    expect(recovered!.events).toEqual([
-      { seq: 0, type: "a" },
-      { seq: 1, type: "b" },
-    ]);
+    // The events themselves stay on disk: nothing of a recovered session is built
+    // from them, so only the seq to continue from comes back.
+    expect(recovered).not.toHaveProperty("events");
     expect(recovered!.lastSeq).toBe(1);
     expect(recovered!.result).toEqual({ ok: true });
     expect(recovered!.pidInfo).toEqual({ pid: 77, spawnedAt: "2024-01-01T00:00:00.000Z" });
@@ -403,13 +402,12 @@ describe("scanRecoverableSessions", () => {
     });
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
-    expect(recovered!.events.map((e) => e.seq)).toEqual([0, 1]);
     expect(recovered!.lastSeq).toBe(1);
     expect(recovered!.corruptEventLines).toBe(0);
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
-  it("keeps the events after a corrupt line in the middle and reports it", () => {
+  it("reads past a corrupt line in the middle and reports it", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     writeSession("sess_corrupt", {
       meta: { sessionId: "sess_corrupt", status: "running" },
@@ -417,7 +415,6 @@ describe("scanRecoverableSessions", () => {
     });
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
-    expect(recovered!.events.map((e) => e.seq)).toEqual([0, 2, 3]);
     expect(recovered!.lastSeq).toBe(3);
     expect(recovered!.corruptEventLines).toBe(1);
     expect(errorSpy).toHaveBeenCalledWith(
@@ -433,7 +430,7 @@ describe("scanRecoverableSessions", () => {
     });
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
-    expect(recovered!.events.map((e) => e.seq)).toEqual([0, 1]);
+    expect(recovered!.lastSeq).toBe(1);
     expect(recovered!.corruptEventLines).toBe(1);
   });
 
@@ -444,20 +441,7 @@ describe("scanRecoverableSessions", () => {
     });
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
-    expect(recovered!.events).toEqual([]);
     expect(recovered!.lastSeq).toBe(-1);
-  });
-
-  it("keeps only the tail when the event count exceeds maxEvents", () => {
-    const events = Array.from({ length: 10 }, (_, i) => JSON.stringify({ seq: i })).join("\n");
-    writeSession("sess_many", {
-      meta: { sessionId: "sess_many", status: "idle" },
-      events: events + "\n",
-    });
-
-    const [recovered] = scanRecoverableSessions(join(root, "sessions"), 3);
-    expect(recovered!.events.map((e) => e.seq)).toEqual([7, 8, 9]);
-    expect(recovered!.lastSeq).toBe(9);
   });
 
   it("skips plain files and directories that hold no meta.json", () => {
@@ -586,7 +570,7 @@ describe("scanRecoverableSessions", () => {
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
     expect(recovered!.result).toBeNull();
     expect(recovered!.pidInfo).toBeNull();
-    expect(recovered!.events).toEqual([]);
+    expect(recovered!.lastSeq).toBe(-1);
   });
 });
 
