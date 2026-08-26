@@ -1,6 +1,14 @@
 name: CI
 
 on:
+  # The release run calls this workflow to check the commit that carries the new
+  # version, before the tag for it exists.
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to check. Defaults to the commit that triggered the run.
+        type: string
+        required: false
   workflow_dispatch:
   push:
     branches: [main, master]
@@ -36,6 +44,8 @@ jobs:
           git config --global core.autocrlf false
           git config --global core.eol lf
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
@@ -57,6 +67,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-node@v7
         with:
           node-version: 24
