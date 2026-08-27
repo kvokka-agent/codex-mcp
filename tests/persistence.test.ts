@@ -16,6 +16,23 @@ function failFs(
   fsFaults.set(`${call}\0${path}`, code);
 }
 
+/**
+ * No test here has a live process to ask about, so nothing spawns one to ask.
+ * Left real, `identifyProcess` runs `ps` on POSIX and a CIM query and then a
+ * `wmic` one on Windows — each with a five-second budget — against a pid this
+ * machine may or may not have handed to somebody else by then.
+ */
+vi.mock("node:child_process", async () => {
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  return {
+    ...actual,
+    default: actual,
+    execSync: vi.fn(() => {
+      throw new Error("no process table in these tests");
+    }),
+  };
+});
+
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   const failIfInjected = (call: string, target: unknown): void => {
@@ -82,6 +99,7 @@ import {
   scanRecoverableSessions,
 } from "../src/persistence/index.js";
 import { getDirSize } from "../src/persistence/retention.js";
+import { isoMsAgo, msSince, useFakeClock } from "./helpers/clock.js";
 
 let root: string;
 
@@ -90,14 +108,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   fsFaults.clear();
   rmSync(root, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 describe("atomicWriteJson", () => {
   it("creates missing parent directories and writes pretty JSON with a trailing newline", () => {
@@ -144,6 +159,7 @@ describe("EventLog", () => {
   });
 
   it("batches normal events until the interval elapses", async () => {
+    const clock = useFakeClock();
     const filePath = join(root, "events.jsonl");
     const log = new EventLog({ filePath, batchIntervalMs: 10 });
 
@@ -151,7 +167,8 @@ describe("EventLog", () => {
     log.append({ type: "progress", n: 2 });
     expect(existsSync(filePath)).toBe(false);
 
-    await sleep(80);
+    // The batch interval, on a clock that owes nothing to how busy the machine is.
+    await clock.advance(10);
 
     const lines = readFileSync(filePath, "utf-8").trim().split("\n");
     expect(lines.map((l) => JSON.parse(l))).toEqual([
@@ -212,12 +229,15 @@ describe("EventLog", () => {
   });
 
   it("cancels the pending batch timer on destroy", async () => {
+    const clock = useFakeClock();
     const filePath = join(root, "events.jsonl");
     const log = new EventLog({ filePath, batchIntervalMs: 10 });
 
     log.append({ type: "progress" });
     log.destroy();
-    await sleep(60);
+    // Six batch intervals with the timer gone: destroy flushed the one line, and
+    // the cancelled timer adds no second copy of it.
+    await clock.advance(60);
 
     expect(readFileSync(filePath, "utf-8")).toBe('{"seq":0,"type":"progress"}\n');
   });
@@ -260,8 +280,7 @@ describe("session ownership", () => {
     expect(written.pid).toBe(process.pid);
     // The claim dates the process, not the machine: a start time older than the
     // process is what os.uptime() would have written.
-    const recordedMs = Date.parse(written.startedAt);
-    expect(Date.now() - recordedMs).toBeLessThan(process.uptime() * 1000 + 2000);
+    expect(msSince(written.startedAt)).toBeLessThan(process.uptime() * 1000 + 2000);
     expect(ownerState(written)).toEqual({ kind: "self", owner: written });
 
     releaseSession(dir);
@@ -287,16 +306,16 @@ describe("session ownership", () => {
     // shared across accounts is where it appears. Its start time is unreadable
     // from here, so the claim stands unproven and the session stays held.
     killFails(424243, "EPERM");
+    // Linux reads the start time from /proc when `ps` says nothing; refusing that
+    // read is what leaves the identity unknown on this platform too.
+    failFs("readFileSync", "/proc/424243/stat", "ENOENT");
     const state = ownerState({ pid: 424243, startedAt: "2024-01-01T00:00:00.000Z" });
     expect(state).toEqual({
       kind: "held",
       owner: { pid: 424243, startedAt: "2024-01-01T00:00:00.000Z" },
       proven: false,
     });
-    // 30s: the identity check asks the OS for the start time of a pid nothing
-    // holds, and on Windows that is a CIM query and then a wmic one, each with a
-    // five-second budget of its own.
-  }, 30_000);
+  });
 
   it("reads an owner whose liveness no source establishes as held", () => {
     killFails(424244, "EINVAL");
@@ -577,7 +596,7 @@ describe("pruneSessionDirs", () => {
     return dir;
   }
 
-  const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
+  const iso = (msAgo: number) => isoMsAgo(msAgo);
 
   it("returns zero for a missing directory", () => {
     expect(pruneSessionDirs(join(root, "absent"))).toBe(0);
@@ -659,7 +678,7 @@ describe("pruneSessionDirs", () => {
 
   it("falls back to the directory mtime when meta.json is unusable", () => {
     const stale = makeSession("stale", null);
-    const old = new Date(Date.now() - 120_000);
+    const old = new Date(isoMsAgo(120_000));
     utimesSync(stale, old, old);
     const fresh = makeSession("fresh", iso(1_000));
 
