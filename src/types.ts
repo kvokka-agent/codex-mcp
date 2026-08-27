@@ -373,8 +373,16 @@ export const DEFAULT_POLL_INTERVAL = 120_000;
  * Kept short so callers can unblock pending actions before approval timeout.
  */
 export const WAITING_APPROVAL_POLL_INTERVAL = 1000;
-/** Ceiling for `codex_check(action="poll").waitMs`, and for any single wait inside it. */
-export const MAX_LONG_POLL_WAIT_MS = 120_000;
+/**
+ * The longest `codex_check(action="poll")` holds a call, whatever `waitMs` asks
+ * for and whatever the client tolerates.
+ *
+ * The client's own tool-call ceiling is what normally ends a wait — `PollWindow`
+ * reads it and cuts the window to fit. This bound is the one the server keeps
+ * on its own, so a caller that asks for a day cannot pin a waiter slot of the
+ * session for one.
+ */
+export const MAX_LONG_POLL_WAIT_MS = 3_600_000;
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 60_000;
 export const DEFAULT_IDLE_CLEANUP_MS = 30 * 60 * 1000;
 export const DEFAULT_RUNNING_CLEANUP_MS = 4 * 60 * 60 * 1000;

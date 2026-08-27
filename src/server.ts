@@ -26,6 +26,7 @@ import {
   DEFAULT_EFFORT_LEVEL,
   ErrorCode,
 } from "./types.js";
+import { PollWindow } from "./utils/poll-window.js";
 import { redactPaths } from "./utils/redact.js";
 import { classifyTurnCompatibilityError, compatibilityErrorMessage } from "./utils/turn-compat.js";
 
@@ -67,6 +68,13 @@ export function createServer(
   options?: SessionManagerOptions & { clientMode?: string }
 ): ServerContext {
   const sessionManager = new SessionManager(options);
+  // One per connection: the tool-call ceiling belongs to the client on the
+  // other end of the pipe, and every session of that client shares it.
+  const pollWindow = new PollWindow();
+  const budget = pollWindow.describe();
+  console.error(
+    `[codex-mcp] long poll: up to ${budget.budgetMs}ms per call (client ceiling: ${budget.ceilingMs ?? "none declared"}, source: ${budget.source})`
+  );
 
   const server = new McpServer({
     name: "codex-mcp",
@@ -227,7 +235,7 @@ export function createServer(
         .nonnegative()
         .optional()
         .describe(
-          `Long-poll for action='poll': block up to this many ms (max ${MAX_LONG_POLL_WAIT_MS}) until the status changes, an action arrives or the turn ends. Omit or 0 to answer at once.`
+          `Long-poll for action='poll': block until the status changes, an action arrives or the turn ends. Ask for more than the task can take — ${MAX_LONG_POLL_WAIT_MS} is the maximum — and the server holds the call for as long as this MCP client tolerates one, then answers with the state it found. Omit or 0 to answer at once, which is polling on a timer.`
         ),
       // respond_permission
       requestId: z.string().optional().describe("Request ID from actions[]"),
@@ -677,9 +685,9 @@ export function createServer(
     "codex_check",
     {
       title: "Poll & Respond",
-      description: `Report where a session stands and answer what it waits for. Every action returns the same payload: { sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }. The turn's own events are never returned — Codex writes the full transcript to its rollout log under ~/.codex/sessions/. Answer every entry of actions[]; stop checking on terminal status (idle/error/cancelled), where result carries the final answer once. WARNING: running sessions usually poll at >=120000ms, but approvalTimeoutMs defaults to ${DEFAULT_APPROVAL_TIMEOUT_MS}ms, so approvals can expire between checks unless you raise the timeout, use non-interactive policies, or pass waitMs. See codex-mcp:///quickstart and codex-mcp:///gotchas.
+      description: `Report where a session stands and answer what it waits for. Every action returns the same payload: { sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }. The turn's own events are never returned — Codex writes the full transcript to its rollout log under ~/.codex/sessions/. Answer every entry of actions[]; stop checking on terminal status (idle/error/cancelled), where result carries the final answer once. WARNING: without waitMs you are polling on a timer, and approvalTimeoutMs defaults to ${DEFAULT_APPROVAL_TIMEOUT_MS}ms, so approvals expire between checks unless you raise the timeout, use non-interactive policies, or pass waitMs — which answers the moment an approval arrives. See codex-mcp:///quickstart and codex-mcp:///gotchas.
 
-poll: current status; with waitMs it blocks until the status changes, an action arrives or the turn ends.
+poll: current status; with waitMs it blocks until the status changes, an action arrives or the turn ends, and answers with the state it found only when the client will hold the call no longer.
 respond_permission: answer an approval action.
 respond_user_input: answer a user-input action.`,
       inputSchema: codexCheckInputSchema,
@@ -743,7 +751,7 @@ respond_user_input: answer a user-input action.`,
     },
     async (args, extra) => {
       try {
-        const result = await executeCodexCheck(args, sessionManager, extra.signal);
+        const result = await executeCodexCheck(args, sessionManager, extra.signal, pollWindow);
         const isError =
           typeof (result as { isError?: boolean }).isError === "boolean"
             ? (result as { isError: boolean }).isError

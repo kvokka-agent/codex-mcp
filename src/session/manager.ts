@@ -1378,8 +1378,11 @@ export class SessionManager {
    * The turn's own events are not part of it: Codex writes the whole transcript
    * to its rollout log under `~/.codex/sessions/`, and repeating it here would
    * put the run through the caller's context a second time.
+   *
+   * `consumeResult: false` reads the same payload but leaves the turn's answer
+   * undelivered, for a caller whose response the transport is going to drop.
    */
-  pollStatus(sessionId: string): CheckResult {
+  pollStatus(sessionId: string, options?: { consumeResult?: boolean }): CheckResult {
     const session = this.getSessionOrThrow(sessionId);
 
     const actions: PendingAction[] = [];
@@ -1414,7 +1417,7 @@ export class SessionManager {
         Array.from(new Set(actions.map((action) => action.type)))
       ),
       actions,
-      result: this.consumeTurnResult(sessionId),
+      result: options?.consumeResult === false ? undefined : this.consumeTurnResult(sessionId),
     };
   }
 
