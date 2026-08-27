@@ -202,6 +202,7 @@ These patterns are non-negotiable guardrails:
 - Keep tests deterministic and avoid real network calls.
 - Mock `codex app-server` subprocess communication.
 - Follow `describe/it` structure with fresh `SessionManager` in `beforeEach` and `manager.destroy()` in `afterEach`.
+- `tests/server-lifecycle.e2e.test.ts` drives the built server as a child process against `tests/helpers/fake-codex.mjs`, and skips itself on Windows: the stand-in is a `.mjs` handed to the server as `CODEX_MCP_PATH`, and Windows spawns an executable by its extension. The three lifetime fixes it measures — a startup that exited before it served MCP, a stdin EOF that never ended the process, and a shutdown that hung and left the state directory reading `running` — are therefore proven on Linux and macOS only; the pieces underneath them are covered per platform by the unit tests.
 
 ## Git / PR Workflow
 
