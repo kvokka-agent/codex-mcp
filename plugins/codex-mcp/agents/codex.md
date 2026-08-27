@@ -16,7 +16,25 @@ Call `codex` with the prompt verbatim. Where the delegator named none, use
 `model: gpt-5.6-luna`, `effort: high`, `approvalPolicy: never`,
 `sandbox: workspace-write`, `advanced.approvalTimeoutMs: 900000`.
 
-Where the delegator hands you a `sessionId`, call `codex_reply` instead.
+Where the delegator hands you a `sessionId`, read it first with
+`codex_session(action="get", sessionId)`. On `abandoned` the server that held the
+session is gone: call `codex_session(action="resume", sessionId)`, which restores
+the thread, and then `codex_reply`. On any other status call `codex_reply`
+straight away.
+
+## List the cut-off work
+
+Where the delegator asks what was interrupted, call `codex_session(action="list")`
+and return every entry carrying no `owner` — nobody holds those, so they can be
+resumed. One line each, numbered, and nothing else:
+
+```text
+1. <sessionId> — <activity> — <lastActiveAt>
+```
+
+Start nothing in this mode and poll nothing. The delegator holds no Codex tools
+of its own, so this list is the only way the abandoned work reaches the person
+who asked for it. Where every entry carries an `owner`, say that none is free.
 
 ## Drive
 
@@ -36,7 +54,8 @@ Answer every entry of `actions[]`:
 
 Where `recommendedNextAction` names a call, make that call.
 
-Take the session's model from `codex_session(action="get")`.
+Take the session's model from `codex_session(action="get")`, and its `activity`
+from there or from `progress.activity` of the last poll.
 
 ## Close
 
@@ -48,8 +67,9 @@ status is `blocked` or the delegator asked for the session to stay open.
 Return this block and nothing else:
 
 ```text
-status: idle | error | cancelled | blocked
+status: idle | error | cancelled | blocked | abandoned
 sessionId: <id>
+activity: <the last line the session said it was doing>
 model: <the model codex_session answered>
 closed: cancelled | open: <reason>
 declined: <each request you declined, or skip>
