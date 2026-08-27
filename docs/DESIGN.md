@@ -1,969 +1,523 @@
-# codex-mcp Design
+# Design
 
-`codex-mcp` is an MCP stdio server that exposes the Codex `app-server` JSON-RPC protocol through 5 tools (`codex`, `codex_reply`, `codex_setup`, `codex_session`, `codex_check`) and 7 read-only resources. Each session runs in its own `codex` child process; MCP clients drive it by checking the session's status and answering what it waits for.
+How `codex-mcp` is built. The tools are described in [TOOLS.md](TOOLS.md), how
+to drive them in [SESSIONS.md](SESSIONS.md), and the terms in
+[GLOSSARY.md](GLOSSARY.md); this document holds what is behind them.
 
-## Document Boundary (AGENTS vs DESIGN)
-
-- `AGENTS.md` holds the execution handbook: change checklists and implementation guardrails.
-- `docs/DESIGN.md` holds architecture and protocol truth, upgrade methodology, and field-level semantics.
-- Each rule has one full definition. `AGENTS.md` keeps the summary and the entry point; this file keeps the rule.
-
-## Dependency And SDK Upgrade Handbook (Single Source Of Truth)
-
-This chapter is the authoritative procedure for dependency upgrades and interface alignment. The `AGENTS.md` upgrade checklist links back here.
-
-### 1. Source-Of-Truth Priority
-
-1. The `codex app-server` protocol definition plus `codex-schema/` (including `codex-schema/metadata.json`)
-2. The repository implementation (`src/server.ts`, `src/tools/*`, `SessionManager`, `protocol.ts`, `types.ts`)
-3. The public documents (`README.md`, `AGENTS.md`, `CHANGELOG.md`, `docs/E2E_LOCAL_TEST_PLAN.md`)
-
-Constraints:
-
-- `CHANGELOG` helps locate a change; it never substitutes for a protocol comparison.
-- On conflict the upstream protocol and the vendored schema win, and code and documents follow them.
-
-### 2. Upgrade Triggers
-
-Any one of these enters this procedure:
-
-- The `codex` CLI / `codex app-server` changes protocol, events, fields, or behavior
-- `@modelcontextprotocol/sdk` changes the MCP tool contract or transport behavior
-- `zod` changes schema or type-inference behavior
-- Node.js or TypeScript constraints change in a way that affects tool interfaces, types, or the error model
-
-### 3. Dependency Matrix
-
-| Dependency / interface      | Truth source                      | Main impact                                                        | Change artifacts                                                                    |
-| --------------------------- | --------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| `codex app-server` protocol | `codex-schema/` + `metadata.json` | JSON-RPC methods, params/result, server-initiated requests, events | `src/app-server/protocol.ts`, `src/session/manager.ts`, `src/server.ts`, tests, docs |
-| `@modelcontextprotocol/sdk` | Official SDK behavior             | Tool registration, `CallToolResult` shape, stdio interaction       | `src/server.ts`, `src/index.ts`, tests, README/docs                                  |
-| `zod`                       | Zod API and inference semantics   | Tool input validation, output schemas, error messages              | `src/server.ts`, tests                                                               |
-| Node / TS runtime           | `package.json` engines + tsconfig | Build and type system, boundary behavior                           | build/typecheck scripts, implementation and docs when behavior changes               |
-
-### 4. Standard Upgrade Procedure
-
-1. **Pull the truth and set a comparison baseline.**
-   - Record the current repository version and dependency versions, including `codex-schema/metadata.json`.
-   - State the target version and the scope of this upgrade.
-2. **Refresh the schema baseline** when the app-server protocol is involved.
-   - Regenerate and commit: `codex app-server generate-json-schema --experimental --out codex-schema`
-   - Confirm `codex-schema/metadata.json` reflects the new baseline.
-3. **Classify the diff (decision gate).**
-   - Sort each change into: field added / field renamed / field removed / semantics changed / event behavior changed.
-   - Mark whether it is a breaking change and whether it touches public MCP parameters.
-4. **Align the implementation.**
-   - Tool schemas: `src/server.ts`
-   - Tool handlers: `src/tools/*`
-   - Session state machine and approval flow: `src/session/manager.ts`
-   - Protocol types: `src/app-server/protocol.ts`
-   - Constants and shared types: `src/types.ts`
-5. **Check naming consistency.**
-   - Public MCP parameter names match upstream field names exactly.
-   - `snake_case` stays `snake_case`; `camelCase` stays `camelCase`.
-6. **Rule on compatibility.**
-   - Keep no old aliases by default.
-   - A compatibility layer that must stay records its scope, its removal version, its removal date, and its test coverage.
-   - Compatibility runs through the whitelist below; anything outside the whitelist is deleted.
-
-### 5. Compatibility Whitelist (Strict)
-
-The project keeps only necessary compatibility.
-
-- Necessary compatibility (the whole whitelist):
-  - Response-id parsing for `thread/start` / `thread/fork` / `thread/resume` / `turn/start` accepts both `v1 {threadId|turnId}` and `v2 {thread:{id}|turn:{id}}`. Real runs still return mixed shapes; the parsing changes no public MCP field and only stabilizes internal id extraction.
-- Forbidden compatibility:
-  - `snake_case` field aliases `approval_id` and `network_approval_context`
-  - The user-input question-id alias `questionId`; the schema field `id` is the only accepted name.
-
-The whitelist constrains alias and compatibility layers only. Deprecated methods that still exist in `codex-schema` — `applyPatchApproval`, `execCommandApproval` — count as protocol coverage, not as aliases.
-
-### 6. Diff Classification And Handling
-
-- **Field added (non-breaking):** pass it through, complete the types, document its default and optionality, add a minimal regression test.
-- **Field renamed (usually breaking):** switch to the new name, write no dual-write compatibility, and record a migration window and a removal plan if compatibility is unavoidable.
-- **Field removed (breaking):** delete the implementation entry point and the documentation, state the error code or degraded behavior, add a test for misuse of the old parameter.
-- **Semantics changed (breaking behavior):** update the state machine, error model, and polling semantics together, and state the new semantics in README and DESIGN.
-
-### 7. Change Closure Checklist (Check On Every PR)
-
-An interface field change confirms every item:
-
-- `src/server.ts` (tool schema and output schema)
-- `src/tools/codex.ts`
-- `src/tools/codex-reply.ts`
-- `src/tools/codex-session.ts`
-- `src/tools/codex-check.ts`
-- `src/tools/codex-setup.ts`
-- `src/session/manager.ts`
-- `src/app-server/protocol.ts`
-- `src/types.ts`
-- `README.md`
-- `docs/DESIGN.md`
-- `AGENTS.md`
-- `CHANGELOG.md`
-- `docs/E2E_LOCAL_TEST_PLAN.md`
-- The matching `tests/*.test.ts`
-
-### 8. Review Approach
-
-- Explore the key paths in parallel first: schema, handlers, manager, docs.
-- Cross-verify once independently before merging.
-- Review priority: behavior regression > field consistency > documentation sync.
-
-### 9. Single-Pass Update Template
-
-```bash
-codex --version
-codex app-server generate-json-schema --experimental --out codex-schema
-git diff --name-only -- codex-schema
-git diff -- codex-schema/metadata.json
-```
-
-Decision rule:
-
-- `git diff --name-only -- codex-schema` is empty: the schema baseline is unchanged; record "update executed, no diff".
-- There are diffs: run section 4 in full and close the code, test, and documentation loop before merging.
-
-### 10. Latest Run Record
-
-- Run date: `2026-02-27` (local environment)
-- `codex` version: `codex-cli 0.106.0`
-- Command: `codex app-server generate-json-schema --experimental --out codex-schema`
-- Result: no file diffs under `codex-schema`, no change to `codex-schema/metadata.json`
-- Conclusion: the vendored schema baseline matches what the local CLI generates
-
-Each single-pass update overwrites this section so the latest run stays auditable.
-
-## System Architecture
-
-> **Same-machine assumption:** the MCP client and the codex-mcp server run on one machine. All transport is stdio (local IPC), child processes share the local filesystem and `~/.codex/config.toml`, and `cwd` paths are local paths.
+## Architecture
 
 ```text
-MCP Client (Claude/Kiro/etc.)
-    │
-    │ MCP Protocol (stdio, same machine)
+MCP client
+    │  MCP over stdio, same machine
     ▼
 codex-mcp server (Node.js)
-    │
-    │ JSON-RPC (stdio, per-session subprocess)
+    │  JSON-RPC over stdio, one child process per session
     ▼
-codex app-server (Rust binary)      ── or ──  codex exec --json (fallback)
+codex app-server        ── or ──  codex exec --json
     │
-    │ OpenAI Responses API
     ▼
-Codex Agent (cloud)
+Codex
 ```
 
-### Why app-server Rather Than The TypeScript SDK
+The MCP client and the server run on one machine. Everything travels over
+stdio, child processes share the local filesystem and `~/.codex/config.toml`,
+and every `cwd` is a local path. There is no cross-machine deployment.
 
-| Dimension            | TypeScript SDK (@openai/codex-sdk) | app-server protocol                                                       |
-| -------------------- | ---------------------------------- | -------------------------------------------------------------------------- |
-| Approvals            | No per-item approval callback      | Full: command approvals (6 decisions) + file-change approvals (4 decisions) |
-| Event stream         | Limited event types                | Rich: AgentMessageDelta, ReasoningDelta, CommandOutputDelta, and more       |
-| Thread management    | start/resume                       | start/resume/fork/archive/list/read/compact/rollback                        |
-| Turn management      | None                               | start/interrupt/steer                                                       |
-| Configuration        | Parse config.toml yourself         | Native config.toml plus read/write API                                      |
-| Protocol stability   | High-level wrapper, API may change | The low-level protocol the VSCode extension uses, with a full JSON Schema   |
+The server drives the `codex app-server` protocol rather than the TypeScript
+SDK because the protocol carries what this server exists to expose: per-item
+approval requests the caller answers, thread fork and resume, and native
+`config.toml` handling — and because it ships a JSON Schema this repository
+vendors under `codex-schema/` and tests against.
 
-### Codex Executable Resolution
+## Configuration resolution
 
-`src/utils/codex-executable.ts` resolves the executable once at startup and caches the result:
-
-1. `CODEX_MCP_PATH` — a filesystem path. The server resolves it to an absolute path and throws when the file is missing or not executable.
-2. `CODEX_MCP_COMMAND` — a bare command name looked up on `PATH` (with `PATHEXT` handling on Windows). The server throws when the value looks like a path or is not found.
-3. Auto-detection — `codex`, then `codex-internal`, resolved from `PATH` to an absolute path.
-4. The bare string `codex`, which lets the later `spawn` produce a clear "not found" error.
-
-`CODEX_MCP_PATH` and `CODEX_MCP_COMMAND` are mutually exclusive; setting both throws at startup. `src/index.ts` calls `checkDefaultCodexExecutableAvailability()` before creating the server, so a misconfiguration fails immediately and prints the resolved path to stderr.
-
-### Backend Mode Detection
-
-`src/app-server/detect.ts` probes `<binary> app-server --help` with a 5-second timeout and picks `app-server` on success, `exec` otherwise. `CODEX_MCP_MODE=app-server|exec` skips the probe. In `exec` mode `src/app-server/exec-client.ts` drives `codex exec --json` and `codex exec resume <threadId>`; it rejects `threadFork` and `threadResume` with `EXEC_NOT_SUPPORTED` and surfaces no approval or user-input requests. Clients read the active mode from `codex-mcp:///server-info` (`clientMode`).
-
-## Tool Design
-
-### Tool 1: `codex` — Start A New Session
-
-Starts asynchronously and returns `{ sessionId, threadId, status: "running", pollInterval, progress, execution, interactionState, recommendedNextAction }`.
-
-**Parameter principle:** `prompt`, `approvalPolicy`, and `sandbox` are required; `effort` defaults to `low` and callers raise it for harder tasks; other frequent parameters stay at the top level and rare ones move into `advanced`.
+A `codex` call becomes spawn arguments:
 
 ```text
-Top level (frequent):
-├── prompt: string          # required, task description
-├── approvalPolicy: enum    # required: untrusted | on-failure | on-request | never
-├── sandbox: enum           # required: read-only | workspace-write | danger-full-access
-├── effort?: enum           # default low: none | minimal | low | medium | high | xhigh
-├── cwd?: string            # working directory, default server cwd
-├── model?: string          # model, default from config.toml
-└── profile?: string        # config.toml profile name
-
-advanced (rare):
-├── baseInstructions?: string        # replaces the default instructions
-├── developerInstructions?: string   # developer instructions
-├── personality?: enum               # none | friendly | pragmatic
-├── summary?: enum                   # reasoning summary: auto | concise | detailed | none
-├── config?: Record<string, unknown> # arbitrary config.toml overrides
-├── ephemeral?: boolean              # do not persist the thread
-├── outputSchema?: object            # JSON Schema for structured output
-├── images?: string[]                # local image paths
-├── approvalTimeoutMs?: number       # approval timeout, default 60000ms
-└── waitForResult?: number           # foreground wait budget in ms, max 300000
+codex app-server
+  -c model=…                      ← model
+  -c approval_policy=…            ← approvalPolicy
+  -c sandbox_mode=…               ← sandbox
+  -c <key>=<value>                ← advanced.config
+  -p <profile>                    ← profile
 ```
 
-**Workflow:**
-
-1. Build the `codex app-server` spawn arguments (`-c` / `-p`).
-2. Write `meta.json` for the new session and spawn the child process.
-3. Write `pid.json` once the child process reports a PID.
-4. Send `initialize` (params: `{ clientInfo: { name: "codex-mcp", version }, capabilities? }`).
-5. Send `thread/start` to create the thread (every param optional: cwd, model, modelProvider, approvalPolicy, sandbox, personality, ephemeral, baseInstructions, developerInstructions, config).
-6. Send `turn/start` for the first turn (params: `{ threadId, input: [{ type: "text", text: prompt }] }`). Each `images` entry becomes a `{ type: "localImage", path }` element of `input`.
-7. Register the notification and server-request handlers before `client.start()`.
-8. Take `activeTurnId` from the `turn/started` notification, which `turn/interrupt` needs.
-9. Return the session id, or wait for the result when `advanced.waitForResult` is set.
-
-For `kind="command"` approvals, `actions[]` and the matching `approval_request` event carry `commandActions`, `proposedExecpolicyAmendment`, `availableDecisions`, `additionalPermissions`, `networkApprovalContext`, and `proposedNetworkPolicyAmendments`, so a client can render the approval context directly.
-
-### Tool 2: `codex_reply` — Continue A Session
-
-```text
-├── sessionId: string       # required
-├── prompt: string          # required, follow-up message
-├── model?: string          # overrides the model for this and later turns
-├── approvalPolicy?: string # overrides the approval policy
-├── effort?: string         # overrides reasoning effort
-├── summary?: string        # overrides the reasoning summary
-├── personality?: string    # overrides the personality
-├── sandbox?: enum          # read-only | workspace-write | danger-full-access, mapped to a SandboxPolicy object
-├── cwd?: string            # overrides the working directory
-├── outputSchema?: object   # structured output for this turn
-└── waitForResult?: number  # foreground wait budget in ms, max 300000
-```
-
-The override parameters map to the same-named fields of `TurnStartParams` and apply to the current turn and later ones.
-
-**Workflow:**
-
-1. Look up the session and require status `idle` or `error`; a cancelled session returns error code `CANCELLED`.
-2. Require a `threadId`.
-3. Drop the previous turn's `result` and `error` events.
-4. Send `turn/start` over the existing child process; on failure restore the session to `error`.
-5. Return immediately, or wait for the result when `waitForResult` is set.
-
-### Tool 3: `codex_setup` — Report Local Readiness
-
-Takes an optional `cwd` and returns:
-
-```text
-├── ready: boolean               # executable resolved and auth not rejected
-├── cwd: string
-├── executable: { ok, source, command?, isPath?, detail }
-├── auth: { ok, state, detail }  # state: authenticated | unauthenticated | unknown
-├── runtime: { sameMachineRequired: true, clientMode?, stateDir }
-├── projectContext: { hasUserConfig, hasProjectConfig }
-├── warnings: string[]
-└── nextSteps: string[]
-```
-
-`auth` comes from `codex login status` with a 5-second timeout. A `codex-internal` executable skips the probe and reports `state: "unknown"` without blocking readiness. `projectContext` reports whether `~/.codex/config.toml` and `<cwd>/.codex/config.toml` exist. `runtime.clientMode` runs the same probe as startup detection.
-
-### Tool 4: `codex_session` — Manage Sessions
-
-```text
-├── action: "list" | "get" | "cancel" | "interrupt" | "fork" | "clean" | "clean_background_terminals"
-├── sessionId?: string          # required for get/cancel/interrupt/fork/clean_background_terminals
-├── includeSensitive?: boolean  # get: include sensitive fields
-├── statuses?: ("idle"|"error"|"cancelled")[]  # clean: default all three
-├── olderThanMs?: number        # clean: only sessions inactive at least this long
-├── dryRun?: boolean            # clean: report matches, remove nothing
-└── includeDisk?: boolean       # clean: default true, also remove persisted state
-```
-
-**Actions:**
-
-- `list`: public, redacted info for every session in memory.
-- `get`: one session's details; `includeSensitive=true` adds `threadId`, `cwd`, `profile`, and `config`.
-- `cancel`: terminal. Resolves every pending request with `cancel`, kills the child process, and records `cancelledReason`.
-- `interrupt`: sends `turn/interrupt` with `threadId` + `activeTurnId` and keeps the session; the interrupted turn ends as `idle`.
-- `fork`: sends `thread/fork` on the original client, then runs the forked thread in a new session with its own child process. The source session is unchanged.
-- `clean`: batch-removes sessions matching `statuses` and `olderThanMs`, returning `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }`. `dryRun` fills `matchedSessionIds` only.
-- `clean_background_terminals`: sends `thread/backgroundTerminals/clean` for the thread. The client asks for the `experimentalApi` capability during `initialize`, so a backend that carries the method serves it; a CLI build that does not know the capability answers `INTERNAL`.
-
-### Tool 5: `codex_check` — Report Status And Answer Requests
-
-```text
-├── action: "poll" | "respond_permission" | "respond_user_input"
-├── sessionId: string
-│
-│ # poll
-├── waitMs?: number          # long-poll budget in ms, clamped to 120000; poll only
-│
-│ # respond_permission
-├── requestId?: string       # approval request id
-├── decision?: "accept" | "acceptForSession" | "acceptWithExecpolicyAmendment" | "applyNetworkPolicyAmendment" | "decline" | "cancel"
-├── execpolicy_amendment?: string[]        # acceptWithExecpolicyAmendment only
-├── network_policy_amendment?: { action: "allow" | "deny"; host: string }  # applyNetworkPolicyAmendment only
-├── denyMessage?: string     # recorded in the session's event log, never sent to app-server
-│
-│ # respond_user_input
-├── requestId?: string       # user-input request id
-└── answers?: Record<string, { answers: string[] }>  # question id → answers
-```
-
-**response (the same for every action):**
-
-```json
-{
-  "sessionId": "sess_abc123",
-  "status": "running",
-  "pollInterval": 120000,
-  "progress": {
-    "phase": "acting",
-    "lastEventAt": "2026-02-15T...",
-    "activeTurnId": "turn_1",
-    "pendingActionCount": 0,
-    "tokens": { "input": 1200, "output": 340, "total": 1540 }
-  },
-  "interactionState": "working",
-  "recommendedNextAction": "poll",
-  "actions": [
-    {
-      "type": "approval",
-      "requestId": "req_001",
-      "kind": "command",
-      "params": { "command": "npm install", "cwd": "/project", "reason": "Install dependencies" },
-      "itemId": "item_xxx",
-      "reason": "Install dependencies",
-      "commandActions": [],
-      "proposedExecpolicyAmendment": [],
-      "createdAt": "2026-02-15T..."
-    }
-  ],
-  "result": null
-}
-```
-
-`result` carries the finished turn's answer on the first check that sees a terminal
-status, and nothing on the checks after it.
-
-The events of the turn are not part of this payload and of no payload the caller
-receives. Codex writes the whole run to its rollout log under
-`~/.codex/sessions/**/rollout-*.jsonl`, and this server writes its own view to the
-session's `events.jsonl` under the state directory. Both are read from disk, by whoever
-opens them; sending either through an MCP client would put the run through the model's
-context a second time.
-
-### Static Resources (Not Tools)
-
-The server exposes 7 read-only MCP resources carrying metadata and usage guidance. They take no part in agent lifecycle control:
-
-- `codex-mcp:///server-info` (`application/json`): server version, runtime, platform, `clientMode`, and the resource index
-- `codex-mcp:///compat-report` (`application/json`): cross-backend capability report
-- `codex-mcp:///config` (`text/markdown`): parameter guide and the mapping to `codex app-server -c`
-- `codex-mcp:///gotchas` (`text/markdown`): checking a session, approval timeouts, and exec-mode failure modes
-- `codex-mcp:///quickstart` (`text/markdown`): the minimal end-to-end workflow
-- `codex-mcp:///errors` (`text/markdown`): error-code reference and recovery hints
-- `codex-mcp:///delegation-guide` (`text/markdown`): approval/sandbox presets per task type
-
-Constraints:
-
-- The server keeps 5 MCP tools and adds no others.
-- The server exposes no prompts.
-- Resource content is static documentation and metadata; it carries no environment variables or other sensitive values.
-
-## Session Lifecycle
-
-```text
-                    +---> waiting_approval ---+
-                    |                         |
-  (start) ---> running ---+---> idle ---+---> running (reply)
-                    |                   |
-                    +---> error         +---> cancelled
-                    |
-                    +---> cancelled
-```
-
-**Statuses:**
-
-- `running`: the agent is executing
-- `idle`: the turn finished and the session accepts a follow-up
-- `waiting_approval`: the agent needs an approval or user input
-- `error`: the turn failed
-- `cancelled`: the session was cancelled (terminal)
-
-**Transitions:**
-
-- `running` → `idle`: the turn completed (`turn/completed`)
-- `running` → `error`: the turn failed (an `error` notification with `willRetry: false`)
-- `running` → `waiting_approval`: an approval or user-input request arrived
-- `running` → `cancelled`: the caller cancelled
-- `waiting_approval` → `running`: the request was answered or timed out
-- `waiting_approval` → `cancelled`: the caller cancelled
-- `idle` → `running`: `codex_reply` sent a new message
-- `error` → `running`: `codex_reply` retried
-- A late approval request against a `cancelled` or `error` session gets an immediate rejection and creates no pending request, so the status never jumps back.
-
-An `error` notification with `willRetry: true` keeps the status and writes a `progress` line whose `data.method` is `codex-mcp/reconnect` and whose `phase` is `retrying`; the session stays `running`, so a client sees a turn that is still going rather than a failure.
-
-## Foreground Execution
-
-`codex` (`advanced.waitForResult`) and `codex_reply` (`waitForResult`) turn the normal background start into a foreground wait of up to 300000 ms. `src/utils/execution.ts` polls the session status in slices bounded by `SessionManager.waitForChange`, and:
-
-- returns the final `result` and `completedAt` when the status becomes `idle`, `error`, or `cancelled`;
-- returns immediately with `execution.fallbackReason: "interactive_poll_required"` when the status becomes `waiting_approval`, because answering an approval needs another tool call;
-- returns session metadata with `execution.fallbackReason: "wait_for_result_timeout"` when the budget runs out;
-- returns session metadata with `execution.fallbackReason: "wait_refused"` when the session already holds its
-  maximum of four waiters, so the caller polls instead of waiting on a queue it cannot join.
-
-Every `codex`, `codex_reply`, and `codex_check` response carries three orchestration hints: `execution` (`requested` vs `effective` mode plus the fallback reason), `interactionState` (`working` / `waiting_input` / `finished`), and `recommendedNextAction` (`poll` / `respond_permission` / `respond_user_input` / `none`).
-
-## Progress Reporting
-
-`progress` summarizes a session without reading its events:
-
-| Field                | Source                                                                                              |
-| -------------------- | --------------------------------------------------------------------------------------------------- |
-| `phase`              | Status first (`waiting_approval`/`cancelled`/`error`/`finished`), then `starting` when no turn is active, then `reasoning` or `acting` from the last observed method, else `running` |
-| `lastEventAt`        | Timestamp of the last notification or server request                                                |
-| `activeTurnId`       | The turn id tracked from `turn/started`                                                             |
-| `pendingActionCount` | Unresolved pending requests                                                                         |
-| `tokens`             | Merged from `thread/tokenUsage/updated` and the exec turn's `usage`, accepting both camelCase and snake_case key names |
-| `activity`           | The last activity marker extracted from `item/agentMessage/delta`, cleared when a turn starts |
-
-`reasoning` covers `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`, and `item/plan/delta`. `acting` covers `item/commandExecution/outputDelta`, `item/commandExecution/terminalInteraction`, `item/fileChange/outputDelta`, `item/mcpToolCall/progress`, `turn/diff/updated`, and `turn/plan/updated`.
-
-### The Activity Marker
-
-`progress.activity` names the work: one line Codex writes about what it is doing, in the
-language of the request. `phase` and `tokens` say a turn is moving; between two approval
-requests they say nothing about what it is moving on.
-
-**Delivery.** `SessionManager.createSession` composes the thread's developer instructions
-in `src/session/activity-marker.ts` and passes them to `thread/start` →
-`developerInstructions` (`codex-schema/v2/ThreadStartParams.json`, `["string","null"]`,
-not in `required`). The server sets them, so a marker reaches every client rather than the
-one that read the documentation. `advanced.developerInstructions` is appended after the
-server's block; `thread/fork` and `thread/resume` carry the same composed string, so a
-forked session keeps the protocol. `CODEX_MCP_DISABLE_ACTIVITY_MARKER=1` sends no
-instruction, and extraction and stripping stay on either way.
-
-`codex exec` accepts no developer instructions — `buildExecArgs` has nothing to put them
-on — so an exec-mode session produces no markers and reports no `activity`.
-
-**Form.** `%%%ACTIVITY: <one line>%%%`. The `ACTIVITY:` tag carries the recognition: a bare
-`%%%` run reaches the stream whenever Codex quotes a `printf` format or a template, and
-matching on the sigil alone would fire on it. A whole marker Codex quotes back out of a
-file is indistinguishable from one it means, and costs one wrong heading until the next
-real marker overwrites it.
-
-**Extraction.** `ActivityMarkerScanner` holds a carry buffer per session and decides on the
-concatenation of the deltas, not on one delta: `item/agentMessage/delta` carries model
-tokens, measured at a median of three characters over 626 real deltas, and a live run
-delivered the closing sentinel as `"%%"` then `"%\n"`. Text outside a marker is dropped as
-it passes, so the buffer holds at most eleven characters between markers and
-`ACTIVITY_SCAN_LIMIT` (480) inside one. An opener whose line ends, or which runs past that
-limit, without a closing sentinel is given up as ordinary text and the scan resumes after
-it. A closed line is trimmed and cut to `MAX_ACTIVITY_LENGTH` (120).
-
-The scanner is reset when an `agentMessage` item completes and when `turn/started`
-arrives, which also clears `progress.activity` — the new turn has not said what it is
-doing yet.
-
-**Removal from the result.** `stripActivityMarkers` runs over the completed `agentMessage`
-text and over the exec turn's `output`, so `result.text`, `result.output` and the JSON that
-`structuredOutput` is parsed from carry the answer alone. Text holding no marker comes back
-byte for byte.
-
-**Cost.** One string per session, overwritten. A marker does not move `signalOf`, so a long
-poll sleeps through it: an activity line is a heading the caller reads on its next poll, not
-something it answers.
-
-## The Event Log
-
-Every notification and server-initiated request the manager handles is written to the
-session's `events.jsonl` under the state directory, as one line
-`{ seq, type, data, timestamp }`. The manager holds no copy of it: what a session keeps
-in memory is its status, its open requests, its progress counters and the result of its
-last turn.
-
-The log is read from disk. `codex_check` returns none of it, and a restart reads it only
-for the sequence number to continue from.
-
-### Event Type Mapping
-
-> The left column is the real `method` of the app-server JSON-RPC notification or request, as generated by `codex app-server generate-json-schema`. It appears in the log at `data.method`.
-
-| app-server method                       | codex-mcp event type | Notes                                                                     |
-| --------------------------------------- | -------------------- | --------------------------------------------------------------------------- |
-| `item/agentMessage/delta`               | output               | Agent text increment; also the source of `activity` markers                 |
-| activity marker (codex-mcp internal)    | activity             | One extracted `%%%ACTIVITY: ...%%%` line, flushed to disk at once           |
-| `item/completed` (ThreadItem)           | output/progress      | By `item.type`: `agentMessage`/`userMessage` → output; everything else → progress |
-| `item/started`                          | progress             | Item started                                                                |
-| `rawResponseItem/completed` (ResponseItem) | progress          | ExecClient's `raw_response_item`; a ResponseItem, so no `agentMessage` type and no final answer to read |
-| `item/commandExecution/outputDelta`     | progress             | Command output increment, after shell-noise filtering                       |
-| `item/commandExecution/terminalInteraction` | progress         | Terminal interaction                                                        |
-| `item/fileChange/outputDelta`           | progress             | File-change increment                                                       |
-| `item/reasoning/textDelta`              | progress             | Reasoning text increment                                                    |
-| `item/reasoning/summaryTextDelta`       | progress             | Reasoning summary increment                                                 |
-| `item/reasoning/summaryPartAdded`       | progress             | Reasoning summary part                                                      |
-| `item/plan/delta`                       | progress             | Plan increment (EXPERIMENTAL)                                               |
-| `item/mcpToolCall/progress`             | progress             | MCP tool call progress                                                      |
-| `turn/started`                          | progress             | Turn started; the source of `activeTurnId`                                  |
-| `turn/completed`                        | result               | Turn finished                                                               |
-| `turn/diff/updated`                     | progress             | Turn-level unified diff                                                     |
-| `turn/plan/updated`                     | progress             | Turn-level plan update                                                      |
-| `thread/started`                        | progress             | Thread started; refreshes `threadId` when the notification carries a new one |
-| `thread/archived`, `thread/unarchived`, `thread/name/updated`, `thread/tokenUsage/updated` | progress | Thread state                                                          |
-| `model/rerouted`                        | progress             | Backend rerouted the model                                                  |
-| `fuzzyFileSearch/sessionUpdated`, `fuzzyFileSearch/sessionCompleted` | progress | Fuzzy file search                                                    |
-| `windows/worldWritableWarning`          | progress             | Windows permission warning                                                  |
-| `account/login/completed`               | progress             | Login completed                                                             |
-| `error` (`willRetry: false`)            | error                | Terminal error                                                              |
-| `error` (`willRetry: true`)             | progress             | Rewritten to `codex-mcp/reconnect`                                          |
-| `item/commandExecution/requestApproval` | approval_request     | Command approval (server-initiated request)                                 |
-| `item/fileChange/requestApproval`       | approval_request     | File-change approval (server-initiated request)                             |
-| `item/tool/requestUserInput`            | approval_request     | User input (server-initiated request)                                       |
-| approval response (codex-mcp internal)  | approval_result      | The decision, including timeouts                                            |
-| `codex-mcp/ttl_warning` (codex-mcp internal) | progress        | 60 seconds before TTL cleanup                                               |
-
-Notifications outside this table are ignored.
-
-### Shell Noise Filtering
-
-On Windows, PowerShell profile output (oh-my-posh banners, PSReadLine, terminal-integration escape sequences) leaks into every command execution. `item/commandExecution/outputDelta` deltas are stripped of those lines before they reach the log, and a delta that was entirely noise produces no line. `CODEX_MCP_DISABLE_NOISE_FILTER=1` turns the filter off.
-
-### Long Polling
-
-`waitMs` turns a check into a long poll. The handler reads the session signal — its
-status, the ids of its open actions, and the completion instant of its last result — and
-returns at once when the session already waits on the caller. Otherwise it waits on
-`SessionManager.waitForChange` and reads the signal again, until it differs from the one
-it started with, the request aborts, or the budget runs out. `waitMs` is clamped to
-120000 ms.
-
-`notifyWaiters` wakes waiters on that same signal and on nothing else, so a stream of
-deltas or token-counter updates leaves a waiter asleep. A measured run of ten parallel
-sessions delivered 20.2% agent-message deltas and 25.7% token-counter updates; waking on
-those turned a 120-second long poll into a 4.8-second median round trip.
-
-A session accepts 4 concurrent waiters; the fifth rejects, and the caller falls back to
-an immediate read.
-
-## Permission Model — Three Layers
-
-### Layer 0 — Approval Policy (`approvalPolicy`)
-
-Controls when the agent needs a human decision:
-
-- `never`: every operation is auto-approved, no interaction
-- `on-failure`: auto-approve, retry on failure
-- `on-request`: the model decides when to ask (the recommended default)
-- `untrusted`: strictest, every operation needs approval
-
-### Layer 1 — Sandbox Isolation (`sandbox`)
-
-Controls the agent's filesystem and network access:
-
-- `read-only`: read-only filesystem. Some client and policy combinations block shell commands entirely; `read-only + never` suits pure analysis.
-- `workspace-write`: workspace writable, network restricted (the recommended default)
-- `danger-full-access`: unrestricted (dangerous)
-
-### Layer 2 — Asynchronous Approval Arbitration
+`advanced.config` values serialize by type: a primitive through `String()`, an
+object or array through `JSON.stringify()`. The CLI then loads
+`~/.codex/config.toml`, applies the profile, and applies the `-c` overrides on
+top.
+
+## The subprocess
+
+Each session owns one child process. `AppServerClient` speaks JSON-RPC over its
+stdin and stdout: request ids map to a pending `{resolve, reject, timeout}`,
+notifications dispatch by method, and server-initiated requests dispatch to a
+handler that must answer. `ExecClient` presents the same interface over
+`codex exec --json`, translating the JSONL stream into the same notification
+methods and spawning one process per turn.
+
+The stdin write queue holds at most 5 MB. On overflow every pending request
+fails with `WRITE_QUEUE_DROPPED` and the child is terminated, because a backend
+that stopped reading its stdin cannot be driven.
+
+A child that exits while its session was running moves that session to `error`.
+
+### Startup
+
+1. The stdio preflight runs before the MCP handshake and reports
+   stdout-contamination risk — a TTY on stdin or stdout, or a PowerShell
+   environment on Windows. `CODEX_MCP_STDIO_MODE=strict` refuses to start on a
+   blocking risk; `auto` reports and carries on; `off` skips the check.
+2. The codex executable is resolved and the backend mode probed
+   ([INSTALL.md](INSTALL.md#picking-the-codex-binary)). A misconfiguration
+   fails here, before anything else runs.
+3. The state directory is opened: prune first, then scan. Pruning first keeps a
+   directory retention removed from coming back as a recovered session.
+4. The recovered sessions are ingested, and the transport is connected.
+5. **Then** the orphan reaper runs. Nothing holds the event loop before the
+   transport is connected, so an await there could let Node exit before a client
+   ever sees the server — and a confirmed orphan costs five seconds a client
+   would otherwise spend waiting for a server already able to answer.
+
+### Shutdown
+
+The server shuts down on `SIGINT`, `SIGTERM`, `SIGBREAK`, `beforeExit`, an
+uncaught exception, an unhandled rejection, or a stdin close that passes the
+guard. It runs once:
+
+1. Arm a force-exit timer — 5 seconds, 10 on Windows.
+2. `finalizeForShutdown()`, synchronously and first: every session still
+   `running` or `waiting_approval` is written as `abandoned`, every event log is
+   flushed, and every `owner.json` this server wrote is removed. It comes first
+   because a shutdown usually starts when the client went away, and every write
+   to that client from here on can block until the force-exit timer fires.
+3. The `server_stopping` notification and the transport close, each given one
+   second. A client that died leaves a pipe nothing drains, so the SDK's write
+   waits for a `drain` event that never arrives; the deadline reports the step
+   and the shutdown carries on.
+4. `SessionManager.destroy()` clears every pending timer and terminates every
+   child.
+
+**The stdin path.** On stdio there is one client, on the other end of that pipe,
+so a stdin that has really ended is the end of the session.
+`StdioServerTransport` subscribes to neither `end` nor `close`, so
+`isConnected()` answers true for the life of the process and cannot gate the
+decision. A stream that is readable again clears the shutdown attempt instead.
+With no active session the server exits at once; with one it waits up to 10
+seconds, 15 on Windows.
+
+## Progress
+
+`progress` summarizes a session without reading its events.
+
+| Field | Source |
+| --- | --- |
+| `phase` | The status first — `waiting_approval`, `cancelled`, `error`, `idle` → `finished` — then `starting` when no turn is active, then `reasoning` or `acting` from the last observed method, else `running` |
+| `lastEventAt` | The last notification or server request |
+| `activeTurnId` | `turn/started`, seeded from the `turn/start` response |
+| `pendingActionCount` | Unresolved pending requests |
+| `tokens` | Merged from `thread/tokenUsage/updated`, the exec turn's `usage`, and a recovered result, accepting camelCase and snake_case alike |
+| `activity` | The last activity marker of the turn, cleared when a turn starts |
+
+`reasoning` covers `item/reasoning/textDelta`,
+`item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded` and
+`item/plan/delta`. `acting` covers `item/commandExecution/outputDelta`,
+`item/commandExecution/terminalInteraction`, `item/fileChange/outputDelta`,
+`item/mcpToolCall/progress`, `turn/diff/updated` and `turn/plan/updated`.
+
+### The activity marker
+
+The contract is in [SESSIONS.md](SESSIONS.md#what-the-agent-is-doing). Three
+things about it belong here.
+
+**How it is delivered.** The instruction reaches Codex as the thread's
+`developerInstructions` on `thread/start` — a field the schema types
+`["string","null"]` and does not require. The server sets it, so a marker
+reaches every client rather than the one that read the documentation.
+`thread/fork` and `thread/resume` carry the same composed string, so a forked or
+resumed session keeps the protocol. `codex exec` has no field to put it on,
+which is why exec mode reports no activity.
+
+**Why the scanner buffers.** `item/agentMessage/delta` carries model tokens,
+measured at a median of three characters over 626 real deltas, and a live run
+delivered the closing sentinel as `"%%"` then `"%\n"`. The scanner decides on
+the concatenation of the deltas and holds at most eleven characters between
+markers, or 480 inside one.
+
+**Why it does not wake a long poll.** A marker does not move `signalOf`. An
+activity line is a heading the caller reads on its next check, not something it
+answers, and waking a two-minute wait for one would undo what the wait is for.
+
+## The event log
+
+Every notification and server-initiated request the manager handles is appended
+to the session's `events.jsonl` as one line `{ seq, type, data, timestamp }`.
+The manager keeps no copy in memory: a session holds its status, its open
+requests, its progress counters and the result of its last turn, and nothing
+else.
+
+`codex_check` returns none of it. A restart reads the file for two things: the
+sequence number to continue from, and the last `activity` record so a listing of
+an abandoned session says what it was cut off doing.
+
+### Event type mapping
+
+The left column is the `method` of the app-server JSON-RPC notification or
+request, as `codex app-server generate-json-schema` writes it. It appears in the
+log at `data.method`.
+
+| app-server method | event type | Notes |
+| --- | --- | --- |
+| `item/agentMessage/delta` | output | Agent text increment; also the source of activity markers |
+| activity marker (internal) | activity | One extracted `%%%ACTIVITY: …%%%` line, flushed at once |
+| `item/completed` | output / progress | `agentMessage` and `userMessage` → output; every other item type → progress |
+| `item/started` | progress | |
+| `rawResponseItem/completed` | progress | ExecClient's `raw_response_item`; a ResponseItem, so no final answer to read |
+| `item/commandExecution/outputDelta` | progress | After shell-noise filtering |
+| `item/commandExecution/terminalInteraction` | progress | |
+| `item/fileChange/outputDelta` | progress | |
+| `item/reasoning/textDelta`, `…/summaryTextDelta`, `…/summaryPartAdded` | progress | |
+| `item/plan/delta` | progress | Experimental |
+| `item/mcpToolCall/progress` | progress | |
+| `turn/started` | progress | The source of `activeTurnId` |
+| `turn/completed` | result | |
+| `turn/diff/updated`, `turn/plan/updated` | progress | |
+| `thread/started` | progress | Refreshes `threadId` when it carries a new one |
+| `thread/status/changed` | progress, or error | Drives the session to `idle` or `error`; the pending-request map, not the notification, decides `waiting_approval` |
+| `thread/closed`, `thread/compacted` | progress | Neither is a failure |
+| `thread/archived`, `thread/unarchived`, `thread/name/updated`, `thread/tokenUsage/updated` | progress | |
+| `deprecationNotice`, `configWarning` | progress | |
+| `model/rerouted` | progress | |
+| `fuzzyFileSearch/sessionUpdated`, `fuzzyFileSearch/sessionCompleted` | progress | |
+| `windows/worldWritableWarning` | progress | |
+| `account/login/completed` | progress | |
+| `error` with `willRetry: false` | error | Terminal |
+| `error` with `willRetry: true` | progress | Rewritten to `codex-mcp/reconnect`, phase `retrying`; the session stays `running` |
+| `item/commandExecution/requestApproval` | approval_request | Server-initiated request |
+| `item/fileChange/requestApproval` | approval_request | Server-initiated request |
+| `item/tool/requestUserInput` | approval_request | Server-initiated request |
+| approval response (internal) | approval_result | The decision, timeouts included |
+| `codex-mcp/ttl_warning` (internal) | progress | 60 seconds before TTL cleanup |
+
+Any other notification is ignored.
+
+### Shell noise filtering
+
+On Windows a PowerShell profile leaks into command output: oh-my-posh banners,
+PSReadLine, terminal-integration escape sequences. Those lines are stripped from
+`item/commandExecution/outputDelta` before the delta reaches the log, and a
+delta that was entirely noise produces no line at all.
+`CODEX_MCP_DISABLE_NOISE_FILTER=1` turns the filter off.
+
+## Long polling
+
+A check with `waitMs` reads the session's signal — its status, the ids of its
+open actions, and the completion instant of its last result — and returns at
+once when the session already waits on the caller. Otherwise it waits on
+`waitForChange` and reads the signal again, until it differs from the one it
+started with, the request aborts, or the budget runs out.
+
+`notifyWaiters` wakes waiters on that signal and on nothing else, so a stream of
+deltas or token-counter updates leaves a waiter asleep. A measured run of ten
+parallel sessions delivered 20.2% agent-message deltas and 25.7% token-counter
+updates; waking on those turned a 120-second long poll into a 4.8-second median
+round trip.
+
+Four waiters per session. A fifth is refused, and the caller answers from a
+single immediate read rather than queueing.
+
+## Foreground execution
+
+`advanced.waitForResult` on `codex`, and `waitForResult` on `codex_reply`, turn
+the background start into a wait of at most 300,000 ms over the same
+`waitForChange` slices. It returns:
+
+- the `result` and `completedAt` when the status becomes `idle`, `error`,
+  `cancelled` or `abandoned`;
+- at once with `execution.fallbackReason: "interactive_poll_required"` when the
+  status becomes `waiting_approval`, because answering needs another tool call;
+- session metadata with `"wait_for_result_timeout"` when the budget runs out;
+- session metadata with `"wait_refused"` when the session already holds its four
+  waiters.
+
+## Approval arbitration
 
 1. app-server sends a server-initiated request:
-   - `item/commandExecution/requestApproval` for command execution
-   - `item/fileChange/requestApproval` for file changes
-   - `item/tool/requestUserInput` for user input
+   `item/commandExecution/requestApproval`,
+   `item/fileChange/requestApproval` or `item/tool/requestUserInput`.
+2. The manager mints a `requestId`, stores the request with the closure that
+   answers it, moves the session to `waiting_approval`, records an
+   `approval_request` event, starts the timeout timer, and wakes the waiters.
+3. The caller answers through `codex_check`.
+4. The manager sends the decision as the response to that request, records an
+   `approval_result` event, and returns the session to `running` once no
+   unresolved request remains. A send that fails puts the request back and
+   leaves the session `waiting_approval`.
+5. A request that times out is declined — a question is answered with an empty
+   map — and the `approval_result` event carries `timeout: true`. The agent is
+   not interrupted.
 
-2. codex-mcp handles it:
-   - creates a `PendingRequest` (requestId, params, itemId, threadId, turnId, reason, approval context)
-   - pushes an `approval_request` event into the EventBuffer
-   - moves the session to `waiting_approval`
-   - starts the timeout timer (60000 ms by default)
-   - wakes any long-poll waiters
+A request arriving on a `cancelled` or `error` session is answered immediately
+and creates no pending request, so a terminal session never jumps back.
 
-3. The MCP client answers:
-   - `codex_check(action="respond_permission")` for approvals, `codex_check(action="respond_user_input")` for questions
-   - Command decisions: accept / acceptForSession / acceptWithExecpolicyAmendment / applyNetworkPolicyAmendment / decline / cancel
-   - File-change decisions: accept / acceptForSession / decline / cancel
+## Disk persistence
 
-4. codex-mcp forwards it:
-   - sends the decision back as the response to the server-initiated request
-   - pushes an `approval_result` event
-   - returns the session to `running` once no unresolved request remains
-
-5. Timeout:
-   - the request auto-declines without interrupting the agent
-   - the `approval_result` event carries `timeout: true`
-
-### Client Permission Guidance
-
-1. **Choosing `approvalPolicy`:** `never` for fully automated runs in trusted environments, `on-failure` for CI/CD, `on-request` for interactive development, `untrusted` for high-security work.
-2. **Choosing `sandbox`:** `read-only` for analysis, `workspace-write` for normal development, `danger-full-access` only when genuinely required.
-3. **Answering approvals:** the client can auto-approve by rule (read-only commands, for instance), or forward the decision to a person. `acceptForSession` cuts repeat prompts.
-
-## app-server Subprocess Management
-
-### Structure
-
-Every MCP session owns one `codex` child process over stdio transport.
-
-### Spawn
-
-```text
-codex app-server [-c key=value]... [-p profile]
-```
-
-- `-c` comes from `advanced.config` plus the top-level parameters
-- `-p` comes from `profile`
-- Top-level mapping: `model` → `-c model=gpt-5.2`, `approvalPolicy` → `-c approval_policy=on-request`, `sandbox` → `-c sandbox_mode=workspace-write`
-- `advanced.config` values serialize by type: primitives through `String(value)`, objects and arrays through `JSON.stringify(value)`
-
-### JSON-RPC Transport
-
-- Messages travel over the child's stdin/stdout.
-- Request ids map to `{ resolve, reject, timeout }`.
-- Notifications dispatch to a handler by method.
-- Server-initiated requests dispatch to a handler that returns a response.
-
-### Lifecycle
-
-- Start: spawn → initialize → ready
-- Run: forward thread and turn requests, dispatch events
-- Stop: close stdin → wait for exit → SIGKILL after the timeout
-- Fault: the child exits unexpectedly → the session becomes `error`
-
-### Graceful Shutdown
-
-`src/index.ts` shuts down on SIGINT, SIGTERM, SIGBREAK, an unhandled runtime error, or a stdin close that passes the guard:
-
-1. Stop accepting new tool calls.
-2. `SessionManager.finalizeForShutdown()` — synchronously: every session still `running` or `waiting_approval` is written as `abandoned`, the event logs are flushed, and every `owner.json` this server wrote is removed. It comes first because a shutdown usually starts when the client went away, and every write to that client from here on can block until the force-exit timer fires.
-3. The `server_stopping` notification and the transport close, each given one second. A client that died leaves a pipe nothing drains, so the SDK's write waits for a `drain` event that never arrives; the deadline reports the step and the shutdown carries on.
-4. `SessionManager.destroy()` clears every pending request timer.
-5. Send SIGTERM to every child process (`stdin.end` + kill), then SIGKILL after 5 seconds.
-6. Force-exit after 5 seconds (10 on Windows) if cleanup hangs anyway.
-
-`src/utils/stdin-shutdown.ts` decides the stdin path. On stdio there is one client, on the other end of that pipe, so a stdin that has really ended is the end of the session — `StdioServerTransport` subscribes to neither `end` nor `close`, so `isConnected()` answers true for the life of the process and cannot gate the decision. A transient close-like signal is caught by the availability check instead: a stream that is readable again clears the shutdown. The server exits at once when no session is active, and waits up to 10 seconds (15 on Windows) for active sessions before forcing the exit.
-
-### STDIO Preflight
-
-`src/utils/stdio-guard.ts` runs before the MCP handshake and reports stdout-contamination risk: a TTY on stdin or stdout, or a PowerShell environment on Windows. `CODEX_MCP_STDIO_MODE` selects the behavior — `auto` (default) warns, `strict` refuses to start on a blocking risk, `off` disables the guard.
-
-### Session TTL Cleanup
-
-`SessionManager` runs a cleanup pass every 60 seconds:
-
-- `idle` beyond 30 minutes → cancel the session and kill the child process
-- `running` or `waiting_approval` beyond 4 hours → cancel (this bounds zombie sessions)
-- `cancelled` or `error` beyond 5 minutes → evict from memory and remove the persisted directory
-- A session with an unparseable `lastActiveAt` → cancel immediately
-
-A session within 60 seconds of its TTL gets one `progress` event with `data.method = "codex-mcp/ttl_warning"` carrying `ttlRemainingMs` and `sessionId`. The event fires once per session and resets when the session's status changes.
-
-Cleanup-driven `cancelSession` pushes a `progress` event and a `result` with `status=cancelled`, never an extra `error` event.
-
-## Disk Persistence
-
-State lives under `CODEX_MCP_STATE_DIR`, defaulting to `~/.codex-mcp/state`.
+State lives under `CODEX_MCP_STATE_DIR`, default `~/.codex-mcp/state`.
 
 ```text
 STATE_DIR/
 └── sessions/
     └── <sessionId>/
-        ├── meta.json          # session metadata
-        ├── owner.json         # the codex-mcp process driving this session
-        ├── pid.json           # child-process identity for the orphan reaper
-        ├── result.json        # final turn result
-        └── events.jsonl       # append-only event log
+        ├── meta.json      what the session was started with, and its status
+        ├── owner.json     the codex-mcp process driving it, while one does
+        ├── pid.json       the child process and its spawn time
+        ├── result.json    the terminal result of the last turn
+        └── events.jsonl   the append-only event log
 ```
 
-Several codex-mcp servers share one state directory. Each writes its own sessions and
-reads the others'; what a server may act on is decided per session by `owner.json`.
+Several codex-mcp servers share one state directory. Each writes its own
+sessions and reads the others'; what a server may act on is decided per session
+by `owner.json`.
 
-### Write Path
+### Write path
 
-- `meta.json` holds `schemaVersion`, `sessionId`, `status`, `createdAt`, `lastActiveAt`, `cancelledAt`, `cancelledReason`, `threadId`, `model`, `cwd`, `approvalPolicy`, `sandbox`, `profile`, `personality`, `config`, `developerInstructions` and `approvalTimeoutMs` — everything `thread/resume` takes, so another server can pick the thread up. `SessionManager` writes it whenever any of those changes, so the thread id reaches the file the moment Codex hands it over rather than at the next status change; `lastActiveAt` alone does not trigger a write.
-- `owner.json` holds `{ pid, startedAt }` of the codex-mcp process driving the session. It is written when the session is created or resumed and removed when the session ends, is evicted, or the server shuts down.
-- `pid.json` holds `{ pid, spawnedAt, command }` and is written right after the child process starts.
-- `result.json` holds the final `TurnResult` and is written when a turn completes or ends in error.
-- `events.jsonl` holds one `{ seq, type, data, timestamp }` object per line. `EventLog` writes it with a tiered flush: `approval_request`, `approval_result`, `result`, and `error` flush immediately; everything else batches and flushes every 100 ms, and shutdown forces a final flush. Nothing in the current session write path calls `appendEvent`, so the file exists only for sessions whose events another writer produced.
+- `meta.json` carries everything a resumed session needs, which is two sets:
+  what `thread/resume` takes, so another server starts the thread with the
+  parameters it was created with, and what `turn/start` takes on every turn —
+  reasoning effort, summary mode and personality are not thread state, so a turn
+  that omits them falls back to `~/.codex/config.toml` rather than to what the
+  session was started with. `PersistedSessionMeta` in
+  `src/session/persistence.ts` is the field list; read it there rather than from
+  a copy. The file is rewritten when any of those fields changes — the thread id
+  reaches it the moment Codex hands it over, and a turn's parameters when the
+  turn starts, because the turn runs for minutes and the server can die inside
+  it. `lastActiveAt` alone never triggers a write, so a hot turn does not write a
+  file per notification.
 
-Every JSON file is written through `atomicWriteJson`: write a sibling temp file, then rename. A crash between the two steps leaves only the temp file.
+  The directory format carries a `schemaVersion`. A directory written by a newer
+  server is skipped rather than misread, so a version bump costs an older server
+  the sessions it cannot understand and nothing else.
+- `owner.json` carries `{ pid, startedAt }` of the process driving the session.
+  It is written on create, on fork and on resume, and removed when the session
+  ends, is evicted, is adopted from a dead owner, or the server shuts down.
+- `pid.json` carries `{ pid, spawnedAt, command?, model? }`, written right after
+  the child starts. `spawnedAt` comes from the spawn event, not from the clock
+  at write time, because it is what the reaper matches against the OS.
+- `result.json` carries the last `TurnResult`, written when a turn completes or
+  ends in error. **A cancel does not overwrite it.** A turn that already ended
+  left its answer there and a turn that starts clears it, so a result present at
+  cancellation belongs to a finished turn and the cancel keeps it; only a
+  cancellation that interrupts a turn with no answer of its own writes a
+  `cancelled` result. The cancellation itself is recorded as `cancelledAt` and
+  `cancelledReason` in `meta.json` and as an event in the log.
+- `events.jsonl` batches with a 100 ms timer and flushes `approval_request`,
+  `approval_result`, `result`, `activity` and `error` at once. Shutdown forces a
+  final flush.
+
+Every JSON file is written by writing a sibling temp file and renaming it. A
+crash between the two steps leaves the temp file and nothing half-written.
+
+Every persistence call is best-effort: a failure prints one stderr line per
+operation and session, and the session keeps running from memory. A state
+directory that cannot be opened at all drops persistence entirely and the server
+says so on stderr.
 
 ### Recovery
 
-`scanRecoverableSessions` runs at startup over `STATE_DIR/sessions/`, after retention has pruned, so a directory retention removed never reaches `SessionManager`:
+The scan runs over `STATE_DIR/sessions/`, after retention has pruned:
 
-- Reads `meta.json`; a directory without one, or with `schemaVersion` above the supported version, is skipped.
-- Parses `events.jsonl` line by line and stops at the first unparseable line, dropping the torn tail a crash left behind. It keeps the last 500 events.
-- Reads `result.json` and `pid.json` when present.
+- A directory with no `meta.json` is skipped; one with a `schemaVersion` above
+  the supported version is skipped with a stderr line.
+- A `meta.json` that is present but unreadable is recovered from the directory
+  itself — status `unknown`, timestamps from the mtime — so its `pid.json` still
+  reaches the reaper.
+- `events.jsonl` is read whole. Corrupt lines in the middle are counted and
+  passed over; only a corrupt final line is dropped as the tail a crash tore.
+  The scan keeps the highest `seq` and the last `activity` record, and no events.
+- `result.json` and `pid.json` are read when present.
 
-`SessionManager.ingestRecovered` then loads them into memory:
+Ingest then loads them into memory:
 
-- A session another running server holds is left on disk and never enters memory.
-- A session whose owner is gone is adopted and its stale `owner.json` removed. One that was `running` or `waiting_approval` becomes `abandoned`: the work was cut off, nothing failed, and `codex_session(action="resume")` picks the thread back up.
-- Other statuses carry over; an unrecognized status becomes `error`.
-- `result.json` becomes `lastResult`, so a client can still read the outcome of a completed session.
+- A session another running server holds stays on disk and never enters memory.
+- A session whose owner is gone is adopted and its stale `owner.json` removed.
+  One that was `running` or `waiting_approval` becomes `abandoned`.
+- A session whose `meta.json` records no `createdAt` or `lastActiveAt` is
+  skipped entirely, so restart-dated timestamps cannot defeat cleanup and
+  retention.
+- An unrecognized status becomes `error`.
+- `result.json` becomes `lastResult`, so the outcome of a finished session is
+  still readable.
 - The event-log sequence resumes at `lastSeq + 1`.
-- A session id already in memory is skipped.
 
-### Session ownership
+The scan is not startup-only: `codex_session(action="list")` and
+`action="resume"` re-read the directory, because the picture changes underneath
+a server that shares it.
 
-`src/persistence/session-owner.ts` decides who holds a session. `owner.json` carries the owner's pid and the instant that process started, because a pid is handed on as soon as its process exits:
+### Ownership
 
-- The pid is alive and its OS start time matches the record, within 5 seconds → **held**. The session is listed, and resume, prune and reap leave it alone.
-- The pid is gone, or it is alive with another start time → **gone**. The session is free: the successor removes the claim and adopts it.
-- Liveness or start time no source could read → **held, unproven**. The reason is in the error a caller sees; nothing takes the session on a guess.
+`owner.json` carries the owner's pid and the instant that process started,
+because a pid is handed on as soon as its process exits:
 
-An unproven owner keeps the session held for as long as `owner.json` names it: `resume` answers `SESSION_HELD_BY_OTHER_SERVER`, prune and reap skip it, and no argument overrides any of that. Deleting `owner.json` from the session directory is the only way to free such a session.
+- alive, and its OS start time matches within 5 seconds → **held**. The session
+  is listed, and resume, prune and reap leave it alone.
+- gone, or alive with another start time → **free**. The successor removes the
+  claim and adopts it.
+- liveness or start time no source could read → **held, unproven**. Nothing
+  takes a session on a guess; the reason reaches the caller in the error.
 
-`src/persistence/process-identity.ts` reads the start time — `Get-CimInstance Win32_Process` (then `wmic`) on Windows, `ps -p <pid> -o pgid=,lstart=` elsewhere, falling back to `/proc/<pid>/stat` on Linux. The orphan reaper identifies child processes through the same module.
+An unproven owner keeps the session held for as long as `owner.json` names it,
+and no argument overrides that. Deleting the file is the only way out.
 
-`startDiskPersistence()` in `src/session/persistence.ts` opens the directory: it hands back the adapter, the recovered sessions and the prune count, and warns on stderr and hands back nothing when creating the directory, pruning or scanning fails, leaving the server to run from memory.
-
-`codex_session(action="resume")` re-reads `owner.json` at the moment it is called rather than trusting what startup found, because a server that started since then may hold the session now.
+`src/persistence/process-identity.ts` reads the start time:
+`Get-CimInstance Win32_Process` on Windows, falling back to `wmic` — which is
+off by default from Windows 11 24H2 and absent from Server 2025;
+`ps -p <pid> -o pgid=,lstart=` elsewhere, falling back to `/proc/<pid>/stat` on
+Linux. `process.kill(pid, 0)` decides liveness, and `EPERM` means alive under
+another user.
 
 ### Retention
 
-`pruneSessionDirs` runs at startup, before the recovery scan, and removes session directories oldest-first, ordering by `meta.lastActiveAt` with the directory mtime as the fallback:
+The prune runs once per server start and removes session directories oldest
+first, dating each by `meta.lastActiveAt`, then `meta.createdAt`, then the
+directory mtime:
 
-1. Age: older than 7 days
-2. Count: beyond 200 retained sessions
-3. Size: beyond 500 MB total across all session directories
-
-### Orphan Reaper
+1. A directory a live owner holds is skipped, whatever its age.
+2. Age: older than 7 days.
+3. Count: beyond 200 retained sessions.
+4. Size: beyond 500 MB across all session directories.
 
-`src/session/orphan-reaper.ts` runs after the transport is connected, over the sessions this server adopted — a session another server holds never reaches it, so its live codex process is never signalled. Nothing holds the event loop until the transport is connected, so an await before that point lets Node exit before a client ever sees the server; and a confirmed orphan is given five seconds to exit gracefully, which is five seconds a client would otherwise wait for a server already able to answer.
+### Orphan reaper
 
-For every adopted session that has a `pid.json`:
+The reaper runs over the sessions this server adopted, so a session another
+server holds is never signalled. For each adopted session that has a `pid.json`:
+
+1. `process.kill(pid, 0)`. Dead → already gone. Unreadable → skipped, no signal.
+2. Compare the recorded `spawnedAt` against the OS start time, 5-second
+   tolerance. Anything but a match → skipped, no signal: a live pid that fails
+   the check is a reused number.
+3. Re-probe immediately before signalling, which closes the window in which the
+   pid could be recycled, then terminate gracefully — `SIGTERM` to the process
+   group when the child leads one, `taskkill /PID <pid> /T` on Windows.
+4. Poll every 250 ms for up to 5 seconds.
+5. Still alive and still the same process → force kill. Still alive and now a
+   different process → the pid was handed on, counted as reaped, no force kill.
+   Still alive and unreadable → left alone and reported unconfirmed.
 
-1. `process.kill(pid, 0)` decides whether the PID is alive; a dead PID counts as already gone.
-2. The identity check compares the recorded `spawnedAt` against the process start time reported by the OS, with a 5-second tolerance: `wmic process where "ProcessId=<pid>" get CreationDate` on Windows, `ps -p <pid> -o lstart=` elsewhere. When `ps` gives nothing but `/proc/<pid>/stat` field 22 exists, the reaper accepts the process as an orphan only while the recorded spawn time is under 24 hours old.
-3. A live PID that fails the identity check is a reused PID; the reaper logs it and leaves it alone.
-4. A confirmed orphan gets SIGTERM (`taskkill /PID` on Windows), a 5-second poll for exit, then SIGKILL (`taskkill /PID /F`).
+## Session TTL
 
-The reaper re-runs the liveness and identity checks immediately before signalling, which narrows the window in which the PID could be recycled.
+A pass runs every 60 seconds over `lastActiveAt`. The thresholds are in
+[SESSIONS.md](SESSIONS.md#cleanup). Two details belong here:
 
-## Configuration Resolution
+- A session within 60 seconds of its deadline gets one `ttl_warning` progress
+  event in its log. The flag is cleared only when the session is cancelled or
+  evicted, so a session that goes idle again after a reply gets no second
+  warning.
+- A cleanup-driven cancel records a `progress` event and a `result` with
+  `status=cancelled`, never an extra `error`.
 
-```text
-codex({ prompt, model, profile, advanced: { config } })
-    │
-    ▼
-app-server spawn arguments:
-  codex app-server
-    -c model=gpt-5.2                ← model
-    -c approval_policy=on-request   ← approvalPolicy
-    -c sandbox_mode=workspace-write ← sandbox
-    -c custom.key=value             ← advanced.config
-    -p my-profile                   ← profile
-    │
-    ▼
-codex app-server:
-  1. loads the ~/.codex/config.toml defaults
-  2. applies the profile
-  3. applies the -c overrides
-  4. runs with the result
-```
+`abandoned` sessions are outside this pass entirely. They are removed by
+`codex_session(action="clean", statuses: ["abandoned"])` or by the disk
+retention at a later start.
 
-## Error Handling
+## Errors
 
-### Error Codes
+A thrown error carries `Error [CODE]: message`. Before it reaches the client:
 
-- `INVALID_ARGUMENT`: parameter validation failed
-- `SESSION_NOT_FOUND`: no such session
-- `SESSION_HELD_BY_OTHER_SERVER`: another running codex-mcp drives this session
-- `SESSION_BUSY`: the session is running and takes no new message
-- `SESSION_NOT_RUNNING`: the action needs an active turn
-- `REQUEST_NOT_FOUND`: the approval or user-input request does not exist or is already resolved
-- `TIMEOUT`: the operation timed out
-- `CANCELLED`: the session is cancelled
-- `APP_SERVER_START_FAILED`: the child process failed to start
-- `THREAD_FORK_RESUME_FAILED`: `thread/fork` or `thread/resume` failed
-- `PROTOCOL_PARSE_ERROR`: an app-server message did not parse
-- `WRITE_QUEUE_DROPPED`: a write to the child process was dropped
-- `EXEC_NOT_SUPPORTED`: exec fallback mode does not implement this operation
-- `INTERNAL`: internal error
+1. A turn-compatibility failure — `effort=minimal` against the Codex
+   `web_search` tool — is replaced by the message naming the fix.
+2. A message already in `Error [CODE]: …` form passes through, except
+   `INTERNAL`, whose tail is run through path redaction.
+3. Anything else becomes `Error [INTERNAL]: …`, redacted.
 
-### Error Response Shape
+Redaction replaces UNC paths, `C:\…` paths and multi-segment POSIX paths with
+`<path>`.
 
-```json
-{
-  "content": [
-    { "type": "text", "text": "Error [SESSION_NOT_FOUND]: Session 'sess_abc' not found" }
-  ],
-  "isError": true
-}
-```
+The codes are listed in [TOOLS.md](TOOLS.md#errors). Two of them —
+`TIMEOUT` and `APP_SERVER_START_FAILED` — are declared and served in the
+`codex-mcp:///errors` resource but are not thrown anywhere in `src/`.
 
-`INTERNAL` messages pass through path redaction before they reach the client.
+### Turn compatibility fallback
 
-### Subprocess Errors
+A `turn/start` that fails with a message naming `minimal`, `web_search` and
+reasoning effort together, on a turn sent with `effort=minimal`, is retried once
+at `effort=low`. The response then carries a `compatWarnings` line saying so. A
+retry that fails again surfaces the message telling the caller to raise the
+effort itself.
 
-- The child exits unexpectedly: the session becomes `error` and an `error` event is pushed.
-- A JSON-RPC request times out: `TIMEOUT`.
-- Initialization fails: `INTERNAL`, and the child process is cleaned up.
+## Protocol notes
 
-### Turn Compatibility Fallback
+`codex-schema/` vendors the JSON Schema bundle of `codex app-server` as a
+committed baseline. [CODEX-UPGRADE.md](CODEX-UPGRADE.md) is how it is
+regenerated and followed.
 
-`src/utils/turn-compat.ts` classifies a `turn/start` failure whose message names `minimal`, `web_search`, and reasoning effort together. When such a failure follows a turn sent with `effort=minimal`, `SessionManager` retries once with `effort=low` and returns `compatWarnings` describing the substitution. A retry that fails again surfaces the message telling the caller to use `effort=low` or higher.
+### Approval responses must match the schema exactly
 
-## Dependencies
+Command approval (`CommandExecutionRequestApprovalResponse`):
 
-- `@modelcontextprotocol/sdk` — MCP protocol (McpServer, StdioServerTransport)
-- `zod` — input validation
-- Node.js `child_process` — the codex child processes
+- `accept`, `acceptForSession`, `decline`, `cancel` → `{ decision: "<name>" }`
+- `acceptWithExecpolicyAmendment` →
+  `{ decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: string[] } } }`
+- `applyNetworkPolicyAmendment` →
+  `{ decision: { applyNetworkPolicyAmendment: { network_policy_amendment: { action: "allow"|"deny", host: string } } } }`
 
-The server talks to the `codex` child process directly and needs no `@openai/codex-sdk`.
+File-change approval (`FileChangeRequestApprovalResponse`): `accept`,
+`acceptForSession`, `decline`, `cancel` → `{ decision: "<name>" }`.
 
-## Protocol Implementation Notes
+`denyMessage` is not a protocol field. It decorates the `approval_result` event
+and goes no further.
 
-> `codex-schema/` vendors the JSON Schema bundle of `codex app-server` as a versioned commit, used for protocol alignment and as a regression baseline.
-> Regenerate it with `codex app-server generate-json-schema --experimental --out codex-schema` and update `codex-schema/metadata.json` in the same change.
+### Approval request params
 
-### Approval Response Format (Must Match The Schema Exactly)
+`CommandExecutionRequestApprovalParams` requires `itemId`, `threadId` and
+`turnId`, and optionally carries `approvalId`, `command`, `cwd`, `reason`,
+`commandActions`, `proposedExecpolicyAmendment`, `availableDecisions`,
+`additionalPermissions`, `networkApprovalContext` and
+`proposedNetworkPolicyAmendments`. When the request advertises
+`availableDecisions`, an answer outside that set is refused.
 
-Command approval response (`CommandExecutionRequestApprovalResponse`):
+`FileChangeRequestApprovalParams` requires the same three ids and optionally
+carries `grantRoot` and `reason`. It carries no `changes[]`: file-change detail
+comes from `item/fileChange/outputDelta` aggregated by `itemId`.
 
-- `accept` → `{ decision: "accept" }`
-- `acceptForSession` → `{ decision: "acceptForSession" }`
-- `acceptWithExecpolicyAmendment` → `{ decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: string[] } } }`
-- `applyNetworkPolicyAmendment` → `{ decision: { applyNetworkPolicyAmendment: { network_policy_amendment: { action: "allow"|"deny", host: string } } } }`
-- `decline` → `{ decision: "decline" }`
-- `cancel` → `{ decision: "cancel" }`
+### Every server-initiated request is answered
 
-File-change approval response (`FileChangeRequestApprovalResponse`):
+app-server hangs the turn when one goes unanswered.
 
-- `accept` / `acceptForSession` / `decline` / `cancel` → `{ decision: "..." }`
+| Request | What the server does |
+| --- | --- |
+| `item/tool/requestUserInput` | Buffered as an action of kind `user_input`, answered by the caller through `codex_check` |
+| `item/tool/call` | Declined with `{ success: false, contentItems: [{ type: "inputText", text: "Not supported by codex-mcp" }] }` |
+| `account/chatgptAuthTokens/refresh` | JSON-RPC error `-32000` — this server manages no external auth |
+| `applyPatchApproval`, `execCommandApproval` | Answered `{ decision: "denied" }` with a stderr line; deprecated, still sent by some CLI builds |
+| anything else | JSON-RPC error `-32601` |
 
-`denyMessage` is not a protocol field; it only decorates the codex-mcp `approval_result` event.
+### turn/start input
 
-### Approval Request Params
+`prompt` becomes `input: [{ type: "text", text: prompt }]`, and each entry of
+`advanced.images` appends `{ type: "localImage", path }`.
 
-`CommandExecutionRequestApprovalParams`:
+### Reading ids out of responses
 
-- required: `itemId`, `threadId`, `turnId`
-- optional: `approvalId?`, `command?` (string | null), `cwd?`, `reason?`, `commandActions?` (array | null), `proposedExecpolicyAmendment?` (string[] | null)
-- optional, richer approval context: `availableDecisions?`, `additionalPermissions?`, `networkApprovalContext?`, `proposedNetworkPolicyAmendments?`
+`thread/start`, `thread/fork` and `thread/resume` answer `{ thread: Thread }`,
+and the server reads the id at `thread.id` and nowhere else: a session needs a
+real thread id, so a differently shaped answer raises `INTERNAL` rather than
+carrying on with an invented one. `turn/start` answers `{ turn: Turn }` and the
+id there is only a seed — the `turn/started` notification settles `activeTurnId`.
 
-`FileChangeRequestApprovalParams`:
+## Security
 
-- required: `itemId`, `threadId`, `turnId`
-- optional: `grantRoot?` (UNSTABLE), `reason?`
-- It carries no `changes[]`; file-change detail comes from `item/fileChange/outputDelta` aggregated by `itemId`.
+**Input.** Zod validates every tool parameter, including the cross-field rules
+of `codex_check`. `cwd` is resolved and validated before use, and app-server
+validates it again. `advanced.images` paths are resolved against `cwd`.
 
-### Other Server-Initiated Requests (All Must Be Answered)
+**Isolation.** Sessions run in separate child processes and do not affect each
+other. A child inherits the parent's environment, and no public session output
+exposes it. A child that dies does not take the server with it.
 
-app-server hangs the turn when a server-initiated request goes unanswered, so codex-mcp answers each one:
+**Sensitive data.** `codex_session(action="get")` redacts by default;
+`includeSensitive: true` adds `cwd`, `profile`, `config` and `threadId`. An
+answer to a question marked `isSecret` reaches Codex as given and enters
+`events.jsonl` as `<secret>`. `INTERNAL` messages are path-redacted.
 
-1. `item/tool/requestUserInput` — the tool asks the user a question
-   - params: `{ itemId, threadId, turnId, questions: [{ id, header, question, isOther?, isSecret?, options? }] }`
-   - response: `{ answers: Record<question-id, { answers: string[] }> }`
-   - handling: buffered as an `approval_request` event of kind `user_input`, answered through `codex_check(action="respond_user_input")`
-
-2. `item/tool/call` — a dynamic tool call
-   - params: `{ threadId, turnId, callId, tool, arguments }`
-   - response: `{ success: boolean, contentItems: [...] }`
-   - handling: declined automatically with `{ success: false, contentItems: [{ type: "inputText", text: "Not supported by codex-mcp" }] }`
-
-3. `account/chatgptAuthTokens/refresh` — auth token refresh
-   - params: `{ reason: "unauthorized", previousAccountId? }`
-   - response: `{ accessToken, chatgptAccountId, chatgptPlanType? }`
-   - handling: a JSON-RPC error with code `-32000`, because codex-mcp manages no external auth
-   - messages: `"account/chatgptAuthTokens/refresh unsupported: codex-mcp does not manage external ChatGPT auth tokens"` while running or waiting, `"account/chatgptAuthTokens/refresh unsupported: session is terminal"` in a terminal state
-
-4. `applyPatchApproval` / `execCommandApproval` — deprecated approvals
-   - handling: respond `{ decision: "denied" }` and log a warning
-
-### turn/start Input Format
-
-`prompt: string` becomes a `UserInput[]`:
-
-```text
-input: [{ type: "text", text: prompt }]
-```
-
-`images: string[]` (local paths) append:
-
-```text
-input: [..., { type: "localImage", path: imagePath }]
-```
-
-### State SessionManager Tracks
-
-- `threadId` from the `thread/start` response (whitelist compatibility: v1 `{threadId}` and v2 `{thread: {id}}`), refreshed by a `thread/started` notification that carries a different id
-- `activeTurnId` from the `turn.id` of the `turn/started` notification, needed by `turn/interrupt`
-- `pendingRequests`, mapping requestId to the record that backs both `actions[]` and the response to the server-initiated request
-- `lastAgentMessageText`, the last completed `agentMessage` item text, used as `result.text`: the app-server `Turn` carries no final text, and `turn.output` is sent by `codex exec` alone
-- `progressState`, the running `lastEventAt`, `lastMethod`, and token counters
-
-## Security Considerations
-
-### Input Validation
-
-- Zod schemas validate every tool parameter, including cross-field rules for the `codex_check` actions.
-- `cwd` defaults to the server cwd and is resolved and validated before use; app-server validates it again.
-- `advanced.config` values serialize by type before reaching app-server.
-- `advanced.images` paths are resolved and validated against `cwd`.
-
-### Subprocess Isolation
-
-- Sessions run in separate child processes and do not affect each other.
-- A child inherits the parent's environment variables, and public session output exposes none of them.
-- A child that exits abnormally does not take down the MCP server process.
-
-### Sensitive Data
-
-- `codex_session(action="get")` returns redacted info by default; `includeSensitive=true` adds `cwd`, `profile`, `config`, and `threadId`.
-- Approval requests carry the command text verbatim, and the client decides how to show it.
-- `INTERNAL` error messages pass through path redaction.
-- The answer to a user-input question marked `isSecret` reaches codex as given and enters `events.jsonl` as `<secret>`.
-
-### Approval Timeout
-
-- The default 60-second timeout auto-declines, which stops a session from hanging forever.
-- A user-input request that times out is answered with an empty `answers` map, which says the caller answered nothing.
-- A timeout declines the operation without interrupting the agent.
-
-## Client Guide
-
-### Checking Strategy
-
-`codex_check` returns `pollInterval` as a **minimum** interval; a client waiting longer for a slow task is behaving correctly:
-
-```text
-status = "waiting_approval" → pollInterval: 1000ms (respond before the approval times out)
-status = "running"          → pollInterval: 120000ms (at least 2 minutes; 3-10+ for large tasks)
-status = "idle"/"error"/"cancelled" → pollInterval: undefined (terminal, stop polling)
-```
-
-Long stretches with no change are normal while the model reasons and mean nothing about failure. A client that wants to hear about the next change as it happens passes `waitMs` instead of shortening the interval: one call then covers the whole stretch and costs one round trip.
-
-### Typical Loop
-
-```text
-1. codex({ prompt, approvalPolicy, sandbox }) → sessionId
-2. loop:
-   a. codex_check({ action: "poll", sessionId, waitMs: 120000 })
-   b. answer every entry of actions[]
-      - codex_check({ action: "respond_permission", requestId, decision })
-      - codex_check({ action: "respond_user_input", requestId, answers })
-   c. branch on status:
-      - "idle": the turn finished; read result and continue with codex_reply or stop
-      - "error": read result.error and decide whether codex_reply retries
-      - "cancelled": the session is over, leave the loop
-      - "running" / "waiting_approval": check again
-   d. without waitMs, wait at least pollInterval
-3. optionally codex_session({ action: "cancel" }) to release the child process
-```
-
-### Notes
-
-- `result` arrives once, on the first check that sees a terminal status.
-- The turn's own history is in the Codex rollout log under `~/.codex/sessions/`; no check returns it.
-- Approvals expire, so answer them within `approvalTimeoutMs`.
-- `codex-mcp/ttl_warning` gives 60 seconds of notice before a session is cleaned up; a `codex_reply` or another tool call refreshes `lastActiveAt` and postpones the cleanup.
-- A session recovered after a server restart reports `status: "error"` with `cancelledReason` naming the restart, and its last result is still readable.
+**Approval timeout.** The default 60 seconds auto-declines rather than letting a
+session hang forever, and declining does not interrupt the agent.
