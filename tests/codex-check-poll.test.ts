@@ -118,6 +118,18 @@ describe("executeCodexCheck", () => {
     return actions[0]!.requestId;
   }
 
+  /**
+   * The window of a client that configured nothing.
+   *
+   * `executeCodexCheck` builds one from `process.env` when the caller names
+   * none, so a shell exporting `MCP_TOOL_TIMEOUT=500` would leave every wait
+   * below with no window to hold and nothing to wake from. Every poll that
+   * waits names its own.
+   */
+  function pinnedWindow(): PollWindow {
+    return new PollWindow({});
+  }
+
   function completeTurn(text = "done"): void {
     client.emitNotification(Methods.TURN_COMPLETED, {
       turn: { id: "turn_mock", output: text, status: "completed" },
@@ -328,7 +340,12 @@ describe("executeCodexCheck", () => {
       const waitForChange = vi.spyOn(manager, "waitForChange");
 
       const res = expectCheck(
-        await executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager)
+        await executeCodexCheck(
+          { action: "poll", sessionId, waitMs: 5000 },
+          manager,
+          undefined,
+          pinnedWindow()
+        )
       );
 
       expect(res.actions).toHaveLength(1);
@@ -340,7 +357,12 @@ describe("executeCodexCheck", () => {
       const waitForChange = vi.spyOn(manager, "waitForChange");
 
       const res = expectCheck(
-        await executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager)
+        await executeCodexCheck(
+          { action: "poll", sessionId, waitMs: 5000 },
+          manager,
+          undefined,
+          pinnedWindow()
+        )
       );
 
       expect(res.status).toBe("idle");
@@ -350,7 +372,12 @@ describe("executeCodexCheck", () => {
 
     it("sleeps through a stream of deltas and token-counter updates", async () => {
       const clock = useFakeClock();
-      const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 120 }, manager);
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 120 },
+        manager,
+        undefined,
+        pinnedWindow()
+      );
 
       for (let i = 0; i < 50; i++) {
         emitOutput(`chunk-${i}`);
@@ -374,7 +401,12 @@ describe("executeCodexCheck", () => {
 
     it("wakes on a new action", async () => {
       const clock = useFakeClock();
-      const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager);
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 5000 },
+        manager,
+        undefined,
+        pinnedWindow()
+      );
       setTimeout(() => requestApproval(), 20);
 
       await clock.advance(20);
@@ -389,7 +421,12 @@ describe("executeCodexCheck", () => {
 
     it("wakes when the turn ends and carries its answer", async () => {
       const clock = useFakeClock();
-      const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager);
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 5000 },
+        manager,
+        undefined,
+        pinnedWindow()
+      );
       setTimeout(() => completeTurn("the answer"), 20);
 
       await clock.advance(20);
@@ -403,7 +440,12 @@ describe("executeCodexCheck", () => {
 
     it("wakes on a status change with nothing to answer", async () => {
       const clock = useFakeClock();
-      const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager);
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 5000 },
+        manager,
+        undefined,
+        pinnedWindow()
+      );
       setTimeout(() => void manager.cancelSession(sessionId, "stopped by test"), 20);
 
       await clock.advance(20);
@@ -415,7 +457,12 @@ describe("executeCodexCheck", () => {
 
     it("reports the state it found when the wait window expires", async () => {
       const clock = useFakeClock();
-      const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 30 }, manager);
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 30 },
+        manager,
+        undefined,
+        pinnedWindow()
+      );
 
       await clock.advance(30);
       const res = expectCheck(await pending);
@@ -435,7 +482,8 @@ describe("executeCodexCheck", () => {
         await executeCodexCheck(
           { action: "poll", sessionId, waitMs: 5000 },
           manager,
-          controller.signal
+          controller.signal,
+          pinnedWindow()
         )
       );
 
@@ -449,7 +497,8 @@ describe("executeCodexCheck", () => {
       const pending = executeCodexCheck(
         { action: "poll", sessionId, waitMs: 5000 },
         manager,
-        controller.signal
+        controller.signal,
+        pinnedWindow()
       );
       setTimeout(() => controller.abort(), 20);
 
@@ -529,7 +578,8 @@ describe("executeCodexCheck", () => {
       const pending = executeCodexCheck(
         { action: "poll", sessionId, waitMs: 5000 },
         manager,
-        controller.signal
+        controller.signal,
+        pinnedWindow()
       );
       // The turn ends and the client's clock runs out in the same instant.
       setTimeout(() => {
@@ -662,7 +712,12 @@ describe("executeCodexCheck", () => {
       );
 
       const res = expectCheck(
-        await executeCodexCheck({ action: "poll", sessionId, waitMs: 200 }, manager)
+        await executeCodexCheck(
+          { action: "poll", sessionId, waitMs: 200 },
+          manager,
+          undefined,
+          pinnedWindow()
+        )
       );
 
       expect(res.sessionId).toBe(sessionId);
@@ -678,7 +733,12 @@ describe("executeCodexCheck", () => {
 
     it("wakes on a change delivered between the read and the waiter registration", async () => {
       const clock = useFakeClock();
-      const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 120_000 }, manager);
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 120_000 },
+        manager,
+        undefined,
+        pinnedWindow()
+      );
       // The long poll has run its synchronous part: it read the session state and
       // registered its waiter. This is the exact window the single-threaded loop
       // leaves between those two steps, so a change delivered here must still end
