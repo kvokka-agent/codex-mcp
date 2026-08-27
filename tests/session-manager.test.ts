@@ -1729,4 +1729,96 @@ describe("SessionManager disk persistence", () => {
       error: "user stopped it",
     });
   });
+
+  it("records every thread parameter a resumed turn needs in meta.json", async () => {
+    const { sessionId } = await manager.createSession(
+      "hi",
+      workspace,
+      {
+        model: "gpt-5-codex",
+        profile: "work",
+        approvalPolicy: "never",
+        sandbox: "read-only",
+        config: { model_provider: "oss" },
+      },
+      "high",
+      {
+        summary: "detailed",
+        personality: "friendly",
+        baseInstructions: "be terse",
+        approvalTimeoutMs: 4242,
+      }
+    );
+
+    expect(readSessionJson(sessionId, "meta.json")).toMatchObject({
+      model: "gpt-5-codex",
+      profile: "work",
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      config: { model_provider: "oss" },
+      effort: "high",
+      summary: "detailed",
+      personality: "friendly",
+      baseInstructions: "be terse",
+      approvalTimeoutMs: 4242,
+    });
+  });
+
+  it("runs the turn after a restart and resume with the effort the session was started with", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "high", {
+      summary: "detailed",
+      personality: "friendly",
+      baseInstructions: "be terse",
+    });
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId,
+      turn: { id: "turn_done", status: "completed" },
+    });
+
+    // Second run: a fresh adapter and manager, so every parameter comes off disk.
+    manager.destroy();
+    persistence.destroy();
+    persistence = new SessionPersistence(root);
+    manager = new SessionManager({
+      disableCleanup: true,
+      persistence,
+      createClient: () => client as unknown as AppServerClient,
+    });
+    manager.ingestRecovered(persistence.recoverSessions());
+
+    await manager.resumeSession(sessionId);
+    const [resumeParams] = client.threadResume.mock.calls.at(-1) as [
+      { personality?: string; baseInstructions?: string },
+    ];
+    expect(resumeParams).toMatchObject({ personality: "friendly", baseInstructions: "be terse" });
+
+    await manager.replyToSession(sessionId, "and again");
+    const [turnParams] = client.turnStart.mock.calls.at(-1) as [
+      { effort?: string; summary?: string; personality?: string },
+    ];
+    expect(turnParams).toMatchObject({
+      effort: "high",
+      summary: "detailed",
+      personality: "friendly",
+    });
+  });
+
+  it("keeps the newest turn override as the session's own parameter", async () => {
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "low");
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId,
+      turn: { id: "turn_done", status: "completed" },
+    });
+
+    await manager.replyToSession(sessionId, "harder", { effort: "xhigh" });
+    expect(readSessionJson(sessionId, "meta.json")).toMatchObject({ effort: "xhigh" });
+
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId,
+      turn: { id: "turn_two", status: "completed" },
+    });
+    await manager.replyToSession(sessionId, "again");
+    const [turnParams] = client.turnStart.mock.calls.at(-1) as [{ effort?: string }];
+    expect(turnParams.effort).toBe("xhigh");
+  });
 });

@@ -23,10 +23,12 @@ import {
 
 import type {
   ApprovalPolicy,
+  EffortLevel,
   Personality,
   SandboxMode,
   SessionInfo,
   SessionEventType,
+  SummaryMode,
 } from "../types.js";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -34,10 +36,11 @@ import type {
 /**
  * What meta.json records.
  *
- * Everything `thread/resume` takes is here: a session picked up by another
- * server starts its thread with the parameters it was created with, and a
- * missing `developerInstructions` would silently drop the activity-marker
- * instruction from the resumed thread.
+ * Everything a resumed session needs is here: what `thread/resume` takes, so a
+ * session picked up by another server starts its thread with the parameters it
+ * was created with, and what `turn/start` takes per turn — `effort` and
+ * `summary` are not thread state, so a turn that omits them silently falls back
+ * to `~/.codex/config.toml` instead of the values the session was started with.
  */
 export interface PersistedSessionMeta {
   schemaVersion: number;
@@ -54,7 +57,10 @@ export interface PersistedSessionMeta {
   sandbox?: SandboxMode;
   profile?: string;
   personality?: Personality;
+  effort?: EffortLevel;
+  summary?: SummaryMode;
   config?: Record<string, unknown>;
+  baseInstructions?: string;
   developerInstructions?: string;
   approvalTimeoutMs?: number;
 }
@@ -156,7 +162,10 @@ export class SessionPersistence {
       sandbox: session.sandbox,
       profile: session.profile,
       personality: session.personality,
+      effort: session.effort,
+      summary: session.summary,
       config: session.config,
+      baseInstructions: session.baseInstructions,
       developerInstructions: session.developerInstructions,
       approvalTimeoutMs: session.approvalTimeoutMs,
     };

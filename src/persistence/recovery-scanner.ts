@@ -13,10 +13,11 @@ import { isMissing } from "./fs-errors.js";
 import { ownerState, readOwner, type OwnerState } from "./session-owner.js";
 
 /**
- * The version of the session directory format. Version 2 records the whole set
- * of thread parameters a resume needs and the owner of the session.
+ * The version of the session directory format. Version 3 records the owner of the
+ * session, the parameters `thread/resume` takes, and the parameters `turn/start`
+ * takes per turn — `effort` and `summary`, which the thread does not hold.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export interface RecoveredSessionMeta {
   schemaVersion: number;

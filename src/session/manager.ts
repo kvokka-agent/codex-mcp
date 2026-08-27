@@ -251,7 +251,10 @@ export class SessionManager {
         approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
         sandbox: rec.meta.sandbox as SandboxMode | undefined,
         personality: rec.meta.personality as Personality | undefined,
+        effort: rec.meta.effort as EffortLevel | undefined,
+        summary: rec.meta.summary as SummaryMode | undefined,
         config: isRecord(rec.meta.config) ? rec.meta.config : undefined,
+        baseInstructions: normalizeOptionalString(rec.meta.baseInstructions),
         developerInstructions: normalizeOptionalString(rec.meta.developerInstructions),
         approvalTimeoutMs:
           typeof rec.meta.approvalTimeoutMs === "number" ? rec.meta.approvalTimeoutMs : undefined,
@@ -439,10 +442,13 @@ export class SessionManager {
       approvalPolicy: spawnOpts.approvalPolicy,
       sandbox: spawnOpts.sandbox,
       personality: advanced?.personality,
+      effort,
+      summary: advanced?.summary,
       config: spawnOpts.config,
       pendingRequests: new Map(),
       lastAgentMessageText: undefined,
       progressState: { lastEventAt: now },
+      baseInstructions: advanced?.baseInstructions,
       developerInstructions,
     };
 
@@ -605,9 +611,12 @@ export class SessionManager {
       input,
       model: overrides?.model,
       approvalPolicy: overrides?.approvalPolicy,
-      effort: overrides?.effort,
-      summary: overrides?.summary,
-      personality: overrides?.personality,
+      // `turn/start` carries these on every turn; the thread holds none of them, so a
+      // turn that omits one takes the value from ~/.codex/config.toml rather than the
+      // one the session was started with.
+      effort: overrides?.effort ?? session.effort,
+      summary: overrides?.summary ?? session.summary,
+      personality: overrides?.personality ?? session.personality,
       cwd: resolvedCwd,
       outputSchema: overrides?.outputSchema,
     };
@@ -647,9 +656,17 @@ export class SessionManager {
       if (overrides?.approvalPolicy) {
         session.approvalPolicy = overrides.approvalPolicy as ApprovalPolicy;
       }
+      // The turn parameters travel with the turn, so the newest one is what the next
+      // turn of this session — and a turn of the session after a resume — runs with.
+      if (overrides?.effort) session.effort = overrides.effort;
+      if (overrides?.summary) session.summary = overrides.summary;
+      if (overrides?.personality) session.personality = overrides.personality;
       if (overrides?.sandbox && canOverride && applied("sandbox")) {
         session.sandbox = overrides.sandbox as SandboxMode;
       }
+      // The turn runs for minutes and the server can die inside it; what the session
+      // now runs with reaches meta.json here rather than at the next status change.
+      this.persistSessionIfChanged(session);
 
       if (unapplied.length > 0) {
         if (unapplied.includes("outputSchema")) {
@@ -1073,6 +1090,8 @@ export class SessionManager {
       });
       await client.threadResume({
         threadId,
+        personality: session.personality,
+        baseInstructions: session.baseInstructions,
         developerInstructions: session.developerInstructions,
       });
       session.threadId = threadId;
@@ -1182,6 +1201,7 @@ export class SessionManager {
     // Fork the thread on the ORIGINAL client (which holds the thread state)
     const forkResult = await originalClient.threadFork({
       threadId: session.threadId,
+      baseInstructions: session.baseInstructions,
       developerInstructions: session.developerInstructions,
     });
     const forkedThreadId = extractThreadId(forkResult);
@@ -1203,8 +1223,11 @@ export class SessionManager {
       approvalPolicy: session.approvalPolicy,
       sandbox: session.sandbox,
       personality: session.personality,
+      effort: session.effort,
+      summary: session.summary,
       config: session.config,
       pendingRequests: new Map(),
+      baseInstructions: session.baseInstructions,
       developerInstructions: session.developerInstructions,
     };
 
@@ -1230,6 +1253,8 @@ export class SessionManager {
       // Resume the forked thread on the new process
       await newClient.threadResume({
         threadId: forkedThreadId,
+        personality: session.personality,
+        baseInstructions: session.baseInstructions,
         developerInstructions: session.developerInstructions,
       });
       newSession.threadId = forkedThreadId;
@@ -2375,6 +2400,9 @@ function metaFingerprint(session: SessionInfo): string {
     session.approvalPolicy,
     session.sandbox,
     session.personality,
+    session.effort,
+    session.summary,
+    session.baseInstructions,
     session.developerInstructions,
     session.approvalTimeoutMs,
     session.cancelledAt,
