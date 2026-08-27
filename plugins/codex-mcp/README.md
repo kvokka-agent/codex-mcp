@@ -67,6 +67,45 @@ subagent.
 The hook finds itself through `${CLAUDE_PLUGIN_ROOT}`, so it runs from wherever
 the plugin is installed.
 
+## Picking work back up after the server went away
+
+A Codex session is driven by one codex-mcp process. When that process goes — the
+client quit, `/mcp` reconnected it, the machine rebooted — the turn it was running
+is left as `abandoned`: nothing failed, nobody holds the session, and Codex still
+carries the thread in its rollout log.
+
+"Continue what was interrupted" runs as two spawns:
+
+1. Spawn the subagent with the question and no `sessionId`. It calls
+   `codex_session(action="list")`, keeps the entries carrying no `owner` — those
+   are the free ones — and answers with a numbered list, one line each, and
+   nothing else:
+
+   ```text
+   1. sess_abc123 — Counting the TypeScript files in src — 2026-08-26T11:04:18Z
+   2. sess_def456 — Running the test suite — 2026-08-26T09:51:02Z
+   ```
+
+2. The user picks a number. Spawn a fresh subagent with that `sessionId` and what
+   Codex should do next. It reads the session with `codex_session(action="get")`,
+   sees `abandoned`, calls `codex_session(action="resume", sessionId)` — which
+   starts a codex process and restores the thread, the cut-off turn included —
+   and then continues with `codex_reply`.
+
+The head agent cannot do step 1 itself: the hook denies it the Codex tools, and
+that denial is the whole design. The subagent is the only path the list travels
+to the person asking, which is why it answers the list alone — no session
+started, nothing polled, no context spent.
+
+Two things this cannot do:
+
+- `codex_reply` to an abandoned session that was not resumed answers
+  `SESSION_NOT_RUNNING` and names `resume`.
+- On a codex CLI with no `app-server` the server runs in `exec` mode, where
+  `resume` fails with `THREAD_FORK_RESUME_FAILED` carrying `EXEC_NOT_SUPPORTED`:
+  `codex exec` implements no thread resume. The session stays `abandoned`, and
+  the work has to be handed to a new session.
+
 ## What the pieces are
 
 ```text
