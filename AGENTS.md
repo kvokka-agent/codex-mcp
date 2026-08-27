@@ -130,6 +130,12 @@ These are the patterns a change keeps, each of them written after it was broken:
   `AgentMessageThreadItem` requires `id`, `text` and `type` and carries no
   `status`, so a `status === "completed"` check there matched nothing and
   returned every foreground answer empty.
+- A job that calls a reusable workflow declares every permission the called
+  workflow's jobs ask the token for. GitHub refuses the whole file at startup
+  otherwise — `The nested job 'publish' is requesting 'id-token: write', but is
+  only allowed 'id-token: none'` — with no job run and no log to read.
+  `actionlint` checks one file at a time and passes it; `tests/workflows.test.ts`
+  reads both sides, so `npm run check` catches it before the push.
 
 ## Tests
 
