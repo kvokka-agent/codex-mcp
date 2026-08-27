@@ -100,11 +100,11 @@ order of preference: pass `waitMs`, which returns the moment the action arrives;
 raise `advanced.approvalTimeoutMs`; or take approvals out of the run with
 `approvalPolicy: "never"`.
 
-Not every command raises an approval. The Codex CLI classifies commands itself
-before the server ever sees one: under `never` all commands pass, under
-`on-failure` a command is approved until it fails, and under `on-request` and
-`untrusted` read-only commands mostly pass while writes and unknown commands
-ask. An expected approval that never appears was auto-approved, not lost.
+Not every command raises an approval. The approval policy goes to the Codex CLI,
+which classifies each command itself and sends a request only for the ones its
+policy holds back; `codex-mcp` sees a request or it does not. An expected
+approval that never appears was auto-approved upstream, not lost here — and
+under `never` none appears at all.
 
 Answering several open actions at once is allowed, and a response that arrives
 after the request was already resolved answers `REQUEST_NOT_FOUND`. Answering
