@@ -1,44 +1,35 @@
 # Contributing to codex-mcp
 
-Thanks for your interest in contributing!
-
-## Getting Started
+## The gate
 
 ```bash
-git clone https://github.com/kvokka/codex-mcp.git
-cd codex-mcp
-npm install
-npm run build
+npm ci
+npm run check
 ```
 
-## Development Workflow
-
-```bash
-npm run check        # The CI gate: lint, format, types, tests, build, and the two runtime scripts
-```
+`npm run check` is what CI runs: lint, format, types, tests, build, the two
+runtime scripts, and the markdown lint. A pull request passes it before it is
+opened.
 
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) sets up the loop that command does
 not cover: running your build inside a real Claude Code session, restarting the
-server after a rebuild, and reading its logs.
+server after a rebuild, and reading its logs. [AGENTS.md](AGENTS.md) holds the
+code conventions and the implementation patterns this repository keeps.
 
-## Pull Requests
+## Pull requests
 
-1. Fork the repo and create a branch from `master` (or the repository default branch)
-2. Make your changes
-3. Ensure `npm run check` passes
-4. Submit a PR with a clear description
+1. Branch from `master`.
+2. Make the change, and update the documents it makes wrong in the same branch.
+3. `npm run check`.
+4. Open the pull request against `kvokka/codex-mcp`; a fork only holds the
+   branch.
 
-## Reporting Issues
+A `release:major`, `release:minor` or `release:patch` label cuts the release
+when the pull request merges — [docs/RELEASING.md](docs/RELEASING.md) says what
+the merge does with it. A pull request without one merges without releasing.
 
-Use [GitHub Issues](https://github.com/kvokka/codex-mcp/issues). Include:
+## Reporting issues
 
-- Steps to reproduce
-- Expected vs actual behavior
-- Node.js and Codex CLI versions
-
-## Code Style
-
-- TypeScript strict mode
-- ESM modules
-- Prefer `as const` tuples for shared constants
-- Keep tool handlers thin — delegate to SessionManager
+Use [GitHub Issues](https://github.com/kvokka/codex-mcp/issues). Include the
+steps to reproduce, what you expected against what happened, and the Node.js and
+Codex CLI versions.

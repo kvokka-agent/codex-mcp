@@ -27,7 +27,8 @@ Minimum pass target:
 2. `codex` and `codex_reply` are asynchronous (return immediately, then progress via polling).
 3. Approval flow works (`respond_permission`) and session state changes correctly.
 4. A real coding task closes the loop: test fails -> agent fixes -> test passes.
-5. Session management works (`list/get/cancel/interrupt/fork/clean/clean_background_terminals`).
+5. Session management works (`list/get/resume/cancel/interrupt/fork/clean/clean_background_terminals`).
+6. A session whose server went away comes back as `abandoned` and `resume` carries its thread on.
 
 Optional but recommended:
 
@@ -269,19 +270,13 @@ After `codex` or `codex_reply`:
 
 1. Check with `codex_check(action="poll")`. Every action — `poll`, `respond_permission`, `respond_user_input` — answers with the same payload: `{ sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }`.
 2. No check returns the events of the turn. Codex writes the whole run to its rollout log under `~/.codex/sessions/**/rollout-*.jsonl`, and codex-mcp writes its own view to `events.jsonl` in the state directory. Read either from disk; the tool reports state.
-3. Terminal statuses are `idle`, `error`, `cancelled`.
+3. Terminal statuses are `idle`, `error`, `cancelled`. `abandoned` also ends the turn, but the session is resumable rather than finished.
 4. `result` arrives with the first check that sees a terminal status and carries the turn's final answer. Later checks of the same turn report the status alone.
 5. `waitMs` long-polls: the call blocks until the status changes, a new action arrives, or the turn ends. Reasoning, command output and token counters do not end the wait. It is capped at `120000` ms, and a session accepts 4 concurrent long polls — the fifth returns immediately instead of waiting.
-6. `progress` reports `phase`, `lastEventAt`, `activeTurnId`, `pendingActionCount`, and `tokens` when the backend reports them. `interactionState` and `recommendedNextAction` tell you what to call next.
+6. `progress` reports `phase`, `lastEventAt`, `activeTurnId`, `pendingActionCount`, `tokens` when the backend reports them, and `activity` — one line in Codex's own words saying what it is doing, absent until the turn writes one. `interactionState` and `recommendedNextAction` tell you what to call next.
 7. Inputs the tool no longer takes — `cursor`, `nextCursor`, `maxEvents`, `responseMode`, `pollOptions` — are refused with a message naming what replaced them.
 
-Observed internal polling cadence (codex-mcp → app-server, NOT MCP client → codex-mcp):
-
-These values describe how often codex-mcp internally checks the app-server subprocess for new events. They are **not** recommendations for how often MCP clients should call `codex_check`.
-
-1. `running`: codex-mcp checks app-server every ~3000ms internally.
-2. `waiting_approval`: codex-mcp checks every ~1000ms internally.
-3. During long reasoning phases, no new events for 30-60+ seconds can still be normal.
+codex-mcp does not poll the app-server. The backend pushes JSON-RPC notifications as they happen, and the only recurring timer in the server is the once-a-minute TTL sweep. During long reasoning phases 30-60+ seconds with no notification is normal.
 
 Recommended MCP client polling strategy:
 
@@ -293,7 +288,7 @@ Codex tasks often take 2-10+ minutes. Do not poll every turn.
 4. The tool descriptions for `codex`, `codex_reply`, and `codex_check` include this guidance so LLM callers see it directly.
 5. To learn about a change as it happens without shortening the interval, pass `waitMs`: one call covers the whole stretch and costs one round trip.
 6. `codex` (`advanced.waitForResult`) and `codex_reply` (`waitForResult`) skip polling entirely for short non-interactive runs: they block up to 300000 ms and return the result. Use them only with `approvalPolicy` `on-failure` or `never`; an approval request makes them return early with `execution.fallbackReason="interactive_poll_required"`.
-7. A session writes one `codex-mcp/ttl_warning` line to its event log 60 seconds before TTL cleanup. Any tool call on the session postpones the cleanup.
+7. A session writes one `codex-mcp/ttl_warning` line to its event log 60 seconds before TTL cleanup. Checking a session does not postpone it: the TTL measures `lastActiveAt`, which moves when the session does — a reply, a cancel, a resume, a notification from the backend — and a `poll` writes nothing.
 
 **CRITICAL: Approval timeout vs polling interval conflict.** The default `approvalTimeoutMs` is 60 seconds, but the recommended `running` polling interval is ≥2 minutes. If a session transitions from `running` to `waiting_approval` between polls, the approval will auto-decline before the client can respond. Mitigations:
 
@@ -360,7 +355,7 @@ Steps:
 Pass criteria:
 
 1. 5 tools present.
-2. At least 3 resources present and readable (`server-info`, `config`, `gotchas`). Up to 6 if running latest build.
+2. All 7 resources present, and `server-info`, `config` and `gotchas` readable.
 3. No transport-level JSON-RPC corruption.
 
 ## TC1: Async Start + Poll (Read-Only Path)
@@ -449,20 +444,21 @@ After session reaches `idle`, call:
 Pass criteria:
 
 1. Reply returns immediately.
-2. Subsequent polling shows new turn events.
+2. Subsequent polling shows the status and `progress` moving; no check returns turn events.
 3. Model uses existing context without re-explaining repository basics.
 
 ## TC5: Session Management (`codex_session`)
 
 Validate:
 
-1. `action="list"` returns active sessions.
+1. `action="list"` returns every session of the state directory, each with its `activity` and its `owner` when a running server holds it.
 2. `action="get"` returns details.
 3. `action="cancel"` moves to `cancelled`.
 4. `action="interrupt"` works only while active turn is running.
 5. `action="fork"` creates a new session/thread branch.
-6. `action="clean"` batch-removes terminal sessions. Run it first with `dryRun: true` and confirm `matchedSessionIds` lists only `idle`/`error`/`cancelled` sessions, then run it for real and confirm `removedCount` matches and `codex_session(action="list")` no longer shows them.
-7. `action="clean_background_terminals"` returns success and does not crash the session. **Note:** codex-mcp asks for the `experimentalApi` capability during `initialize`, so a CLI build that carries this method serves it. An older build that does not know the capability answers `Error [INTERNAL]` naming `experimentalApi` — record the error and continue.
+6. `action="resume"` is refused with `SESSION_BUSY` on a session this server already drives, and with `SESSION_HELD_BY_OTHER_SERVER` on one another running server holds. Section 7.7 covers the case it is for.
+7. `action="clean"` batch-removes terminal sessions. Run it first with `dryRun: true` and confirm `matchedSessionIds` lists only `idle`/`error`/`cancelled` sessions, then run it for real and confirm `removedCount` matches and `codex_session(action="list")` no longer shows them.
+8. `action="clean_background_terminals"` returns success and does not crash the session. **Note:** codex-mcp asks for the `experimentalApi` capability during `initialize`, so a CLI build that carries this method serves it. An older build that does not know the capability answers `Error [INTERNAL]` naming `experimentalApi` — record the error and continue.
 
 Example payload:
 
@@ -592,7 +588,7 @@ When an approval action appears, intentionally do not respond for >3 seconds.
 Expected:
 
 1. Request auto-declines.
-2. Event stream includes an `approval_result` with `timeout: true`.
+2. The session's `events.jsonl` under the state directory holds an `approval_result` with `timeout: true`. No check returns it.
 
 ## 7.2 Invalid Decision Contract
 
@@ -646,10 +642,15 @@ Steps:
 
 Expected:
 
-1. The session is present with `status: "error"` and a `cancelledReason` naming the server restart.
-2. A completed session recovered the same way still returns its last `result`.
-3. The `codex` child process from before the restart is gone; the server logs the reap count to stderr.
-4. Starting a second server against the same state directory logs a lock warning and keeps serving.
+1. The session is present with `status: "abandoned"` and no `owner` — the work was cut off, nothing failed, and nobody holds it.
+2. Its `activity` says what it was cut off doing.
+3. `codex_reply` on it answers `SESSION_NOT_RUNNING` and names `resume`.
+4. `codex_session(action="resume", sessionId=...)` answers `status: "idle"`, and `codex_reply` then carries the same thread on — the agent knows what the interrupted turn was about.
+5. A completed session recovered the same way still returns its last `result`.
+6. The `codex` child process from before the restart is gone; the server logs the reap count to stderr.
+7. Starting a second server against the same state directory reports how many sessions belong to another running codex-mcp and keeps serving; each server lists the other's sessions and acts on none of them.
+
+In `exec` mode step 4 fails with `THREAD_FORK_RESUME_FAILED` carrying `EXEC_NOT_SUPPORTED`, and the session stays `abandoned`.
 
 ## 8. Generic Troubleshooting
 
@@ -698,7 +699,7 @@ Likely cause:
 
 Mitigation (code-level):
 
-Since v0.2.0, codex-mcp includes a built-in shell noise filter that strips known PowerShell profile noise patterns (oh-my-posh, PSReadLine, module warnings, etc.) from `COMMAND_OUTPUT_DELTA` events before they enter the event buffer. This significantly reduces token waste without user intervention. The filter can be disabled with `CODEX_MCP_DISABLE_NOISE_FILTER=1` if it incorrectly strips legitimate output.
+Since v0.2.0, codex-mcp includes a built-in shell noise filter that strips known PowerShell profile noise patterns (oh-my-posh, PSReadLine, module warnings, etc.) from `item/commandExecution/outputDelta` deltas before they reach the event log. This significantly reduces token waste without user intervention. The filter can be disabled with `CODEX_MCP_DISABLE_NOISE_FILTER=1` if it incorrectly strips legitimate output.
 
 Additional fix (recommended):
 

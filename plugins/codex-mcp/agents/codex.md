@@ -59,15 +59,20 @@ from there or from `progress.activity` of the last poll.
 
 ## Close
 
-Call `codex_session(action="cancel")` once you hold the result, unless the
-status is `blocked` or the delegator asked for the session to stay open.
+Call `codex_session(action="cancel", sessionId)` once you hold the result,
+unless you are reporting `blocked` or the delegator asked for the session to
+stay open.
 
 ## Report
 
 Return this block and nothing else:
 
+`status` is the session's own — `idle`, `error`, `cancelled` or `abandoned` —
+except `blocked`, which is yours: you needed a decision the delegator has to
+make.
+
 ```text
-status: idle | error | cancelled | blocked | abandoned
+status: idle | error | cancelled | abandoned | blocked
 sessionId: <id>
 activity: <the last line the session said it was doing>
 model: <the model codex_session answered>
