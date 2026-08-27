@@ -24,7 +24,7 @@ fork, resume.
 **exec mode** — the fallback backend for a codex binary that carries no
 `app-server` subcommand. `codex-mcp` spawns `codex exec --json` and continues a
 thread with `codex exec resume`. No approvals, no user input, no fork, no
-resume, and no activity marker. [docs/DESIGN.md](DESIGN.md) states what each
+resume, and no activity marker. [DESIGN.md](DESIGN.md) states what each
 mode reaches.
 
 **the plugin** — the Claude Code plugin published from this repository:
@@ -80,7 +80,7 @@ line overwrites the one before it, and nothing accumulates.
 **activity marker** — the `%%%ACTIVITY: …%%%` line Codex writes because the
 server puts a standing developer instruction on the thread. The server lifts
 each marker out of the agent-message stream and cuts every one of them out of
-the result text. [docs/SESSIONS.md](SESSIONS.md) states the bounds.
+the result text. [SESSIONS.md](SESSIONS.md) states the bounds.
 
 **long poll** — `codex_check(action="poll", waitMs=…)`: the call blocks until
 the status changes, an action arrives or the turn ends. One wait is capped;
@@ -154,8 +154,8 @@ JSON-RPC risks reaching stdout, since stdout is the MCP channel.
 `CODEX_MCP_STDIO_MODE` selects `auto`, `strict` or `off`.
 
 **the gate** — `npm run check`: everything CI runs, in one command.
-[docs/DEVELOPMENT.md](DEVELOPMENT.md) states what it covers.
+[DEVELOPMENT.md](DEVELOPMENT.md) states what it covers.
 
 **release label** — `release:major`, `release:minor` or `release:patch` on a
 pull request. The merge of a labelled pull request cuts the release.
-[docs/RELEASING.md](RELEASING.md) states the path from the label to npm.
+[RELEASING.md](RELEASING.md) states the path from the label to npm.
