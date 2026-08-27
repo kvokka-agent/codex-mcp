@@ -2,6 +2,7 @@
  * codex_check tool — report session status and answer what it waits for.
  */
 import type { SessionManager } from "../session/manager.js";
+import { PollWindow } from "../utils/poll-window.js";
 import {
   ALL_DECISIONS,
   ErrorCode,
@@ -35,7 +36,8 @@ export type CodexCheckReturn =
 export function executeCodexCheck(
   args: CodexCheckParams,
   sessionManager: SessionManager,
-  requestSignal?: AbortSignal
+  requestSignal?: AbortSignal,
+  pollWindow: PollWindow = new PollWindow()
 ): CodexCheckReturn {
   switch (args.action) {
     case "poll": {
@@ -54,12 +56,14 @@ export function executeCodexCheck(
       }
 
       const waitMs = args.waitMs;
-      if (typeof waitMs === "number" && waitMs > 0) {
+      const budgetMs = pollWindow.budgetMs();
+      if (typeof waitMs === "number" && waitMs > 0 && budgetMs > 0) {
         return pollWithWait(
           sessionManager,
           args.sessionId,
-          Math.min(waitMs, MAX_LONG_POLL_WAIT_MS),
-          requestSignal
+          Math.min(waitMs, MAX_LONG_POLL_WAIT_MS, budgetMs),
+          requestSignal,
+          pollWindow
         );
       }
 
@@ -179,17 +183,19 @@ export function executeCodexCheck(
  * Hold the call until the session state the caller acts on moves.
  *
  * A status change, a new action to answer and the end of the turn return at
- * once; the delta and token-counter traffic in between returns nothing, so a
- * `waitMs` of two minutes costs the caller one round trip rather than the
- * hundreds the event stream used to.
+ * once; the delta and token-counter traffic in between returns nothing, and a
+ * window in which none of the three happened returns the status it started
+ * with, because the client will not hold the call any longer.
  */
 async function pollWithWait(
   sessionManager: SessionManager,
   sessionId: string,
   waitMs: number,
-  signal?: AbortSignal
+  signal: AbortSignal | undefined,
+  pollWindow: PollWindow
 ): Promise<CheckResult> {
-  const deadline = Date.now() + waitMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + waitMs;
   let state = sessionManager.getSessionSignal(sessionId);
   const baseline = state.key;
 
@@ -213,6 +219,22 @@ async function pollWithWait(
     }
 
     state = sessionManager.getSessionSignal(sessionId);
+  }
+
+  if (signal?.aborted) {
+    // The client cut this call, so the SDK drops whatever the handler returns
+    // rather than sending it. Reading the status the usual way would hand the
+    // finished turn's answer to a response that never leaves this process, and
+    // the next poll would report a terminal session with no answer in it.
+    const heldMs = Date.now() - startedAt;
+    const ceilingBefore = pollWindow.ceilingMs();
+    pollWindow.recordCut(heldMs, signal.reason);
+    if (pollWindow.ceilingMs() !== ceilingBefore) {
+      console.error(
+        `[codex-mcp] The MCP client cut a long poll after ${heldMs}ms; polls now answer within ${pollWindow.budgetMs()}ms.`
+      );
+    }
+    return sessionManager.pollStatus(sessionId, { consumeResult: false });
   }
 
   return sessionManager.pollStatus(sessionId);

@@ -105,7 +105,7 @@ Every action answers with the same payload:
 | --- | --- | --- |
 | `action` | `poll` \| `respond_permission` \| `respond_user_input` | always |
 | `sessionId` | string | always |
-| `waitMs` | number, clamped to `120000` | `poll` |
+| `waitMs` | number, clamped to `3600000` and to what the client tolerates | `poll` |
 | `requestId` | string | both `respond_*`, required |
 | `decision` | see below | `respond_permission`, required |
 | `execpolicy_amendment` | string[] | `decision="acceptWithExecpolicyAmendment"`, required there |
@@ -144,9 +144,24 @@ The payload's parts:
 
 `waitMs` long-polls: the call returns when the status changes, an action
 arrives, or the turn ends. Reasoning, command output, message deltas and token
-counters do not end the wait. One wait is capped at `120000` ms and a timeout
-answers with the current status and no error. A session serves four concurrent
-long polls; a fifth answers at once with a single read.
+counters do not end the wait. Nothing else returns either, so ask for more than
+the task can take — `3600000` is this server's own maximum.
+
+What ends an otherwise silent wait is the MCP client, which cuts a tool call
+that runs too long. The server returns 5 seconds inside that ceiling with the
+current status and no error, which costs the caller one round trip per ceiling
+rather than one per two minutes. Three things tell the server where the ceiling
+is, in falling order of authority: a cut it watched, `MCP_TOOL_TIMEOUT` in its
+environment, and the client's own default — 60 s for a client on the MCP
+TypeScript SDK, and none for Claude Code, which held a call open for 1500 s and
+cut nothing. Raise `MCP_TOOL_TIMEOUT` for the client and the window follows it.
+
+A cut costs the caller an error instead of a status, so the server learns from
+the first one and returns inside it from then on; the turn's answer is held back
+across a cut rather than handed to a response the client already threw away.
+
+A session serves four concurrent long polls; a fifth answers at once with a
+single read.
 
 ## `codex_session` — the sessions on this machine
 

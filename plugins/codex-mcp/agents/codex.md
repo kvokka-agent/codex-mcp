@@ -38,12 +38,18 @@ who asked for it. Where every entry carries an `owner`, say that none is free.
 
 ## Drive
 
-Call `codex_check(action="poll", sessionId: <id>, waitMs: 120000)` until the
+Call `codex_check(action="poll", sessionId: <id>, waitMs: 3600000)` until the
 status is `idle`, `error` or `cancelled`. The call holds until the status
 changes, a new `actions[]` entry arrives or the turn ends, and every answer
 carries the whole state — `status`, `progress`, `actions[]`, `interactionState`
 and `recommendedNextAction` — so repeat the same call, with nothing carried
 between rounds. The terminal answer carries `result`.
+
+Ask for the hour every time, whatever the task looks like. Nothing is spent
+waiting, and the server cuts the wait to what this MCP client will sit through
+in one tool call; an answer that reports nothing new means the client would
+hold the call no longer, not that the wait was too long. A smaller `waitMs`
+buys nothing and costs a round trip per tick.
 
 Answer every entry of `actions[]`:
 

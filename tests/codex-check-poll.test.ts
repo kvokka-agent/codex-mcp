@@ -13,6 +13,8 @@ import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
 import { executeCodexCheck } from "../src/tools/codex-check.js";
+import { POLL_WINDOW_MARGIN_MS, PollWindow } from "../src/utils/poll-window.js";
+import { DEFAULT_APPROVAL_TIMEOUT_MS, MAX_LONG_POLL_WAIT_MS } from "../src/types.js";
 import type { CheckResult } from "../src/types.js";
 
 class MockClient extends EventEmitter {
@@ -450,7 +452,8 @@ describe("executeCodexCheck", () => {
       expect(Date.now() - started).toBeLessThan(4000);
     });
 
-    it("caps the wait window at 120 seconds", async () => {
+    it("cuts the wait down to what the client tolerates", async () => {
+      const window = new PollWindow({ MCP_TOOL_TIMEOUT: "600000" });
       const observed: number[] = [];
       vi.spyOn(manager, "waitForChange").mockImplementation(async (_id, timeoutMs) => {
         observed.push(timeoutMs);
@@ -459,13 +462,173 @@ describe("executeCodexCheck", () => {
       });
 
       const res = expectCheck(
-        await executeCodexCheck({ action: "poll", sessionId, waitMs: 5_000_000 }, manager)
+        await executeCodexCheck(
+          { action: "poll", sessionId, waitMs: 5_000_000 },
+          manager,
+          undefined,
+          window
+        )
       );
 
       expect(res.status).toBe("idle");
       expect(observed).toHaveLength(1);
-      expect(observed[0]).toBeLessThanOrEqual(120_000);
-      expect(observed[0]).toBeGreaterThan(115_000);
+      expect(observed[0]).toBeLessThanOrEqual(window.budgetMs());
+      expect(observed[0]).toBeGreaterThan(window.budgetMs() - 1_000);
+      expect(window.budgetMs()).toBe(600_000 - POLL_WINDOW_MARGIN_MS);
+    });
+
+    it("holds a call the whole window when the caller asked for the whole window", async () => {
+      const window = new PollWindow({ CLAUDECODE: "1", MCP_TOOL_TIMEOUT: "300000" });
+      const observed: number[] = [];
+      vi.spyOn(manager, "waitForChange").mockImplementation(async (_id, timeoutMs) => {
+        observed.push(timeoutMs);
+        completeTurn();
+      });
+
+      await executeCodexCheck(
+        { action: "poll", sessionId, waitMs: window.budgetMs() },
+        manager,
+        undefined,
+        window
+      );
+
+      expect(observed).toHaveLength(1);
+      expect(observed[0]).toBeGreaterThan(window.budgetMs() - 1_000);
+    });
+
+    it("gives a caller asking for less than the window exactly what it asked for", async () => {
+      const window = new PollWindow({ MCP_TOOL_TIMEOUT: "600000" });
+      const observed: number[] = [];
+      vi.spyOn(manager, "waitForChange").mockImplementation(async (_id, timeoutMs) => {
+        observed.push(timeoutMs);
+        completeTurn();
+      });
+
+      await executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 3_000 },
+        manager,
+        undefined,
+        window
+      );
+
+      expect(observed).toHaveLength(1);
+      expect(observed[0]).toBeLessThanOrEqual(3_000);
+      expect(observed[0]).toBeGreaterThan(2_000);
+    });
+
+    it("leaves the finished turn's answer undelivered when the client cut the call", async () => {
+      const controller = new AbortController();
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 5000 },
+        manager,
+        controller.signal
+      );
+      // The turn ends and the client's clock runs out in the same instant.
+      setTimeout(() => {
+        completeTurn("the answer");
+        controller.abort("SdkError: Request timed out");
+      }, 20);
+
+      const cut = expectCheck(await pending);
+      expect(cut.result).toBeUndefined();
+
+      // The response the SDK dropped took nothing with it: the next call has it.
+      const next = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
+      expect(next.status).toBe("idle");
+      expect(next.result?.text).toBe("the answer");
+    });
+
+    it("measures the cut and returns inside it from then on", async () => {
+      const window = new PollWindow({ CLAUDECODE: "1" });
+      const controller = new AbortController();
+
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 5_000 },
+        manager,
+        controller.signal,
+        window
+      );
+      setTimeout(() => controller.abort("SdkError: Request timed out"), 40);
+      await pending;
+
+      // The client named no ceiling until it cut this call.
+      const measured = window.ceilingMs();
+      expect(measured).toBeGreaterThanOrEqual(40);
+      expect(window.describe().source).toBe("measured");
+
+      // A ceiling of some tens of milliseconds leaves no window worth holding,
+      // so the next poll answers at once rather than walking into the same cut.
+      expect(window.budgetMs()).toBe(0);
+      const waitForChange = vi.spyOn(manager, "waitForChange");
+      const res = expectCheck(
+        await executeCodexCheck(
+          { action: "poll", sessionId, waitMs: 5_000_000 },
+          manager,
+          undefined,
+          window
+        )
+      );
+      expect(waitForChange).not.toHaveBeenCalled();
+      expect(res.status).toBe("running");
+    });
+
+    it("hands an approval over long before it expires, whatever the window is", async () => {
+      const window = new PollWindow({ CLAUDECODE: "1" });
+      const started = Date.now();
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: MAX_LONG_POLL_WAIT_MS },
+        manager,
+        undefined,
+        window
+      );
+      setTimeout(() => requestApproval(), 20);
+
+      const res = expectCheck(await pending);
+      const elapsed = Date.now() - started;
+
+      expect(window.budgetMs()).toBe(MAX_LONG_POLL_WAIT_MS);
+      expect(res.status).toBe("waiting_approval");
+      expect(res.actions).toHaveLength(1);
+      expect(res.recommendedNextAction).toBe("respond_permission");
+      // The pending request auto-declines after approvalTimeoutMs; the wait has
+      // to end inside that, not inside the window it was given.
+      expect(elapsed).toBeLessThan(DEFAULT_APPROVAL_TIMEOUT_MS);
+      expect(elapsed).toBeLessThan(1_000);
+    });
+
+    it("answers at once when the client tolerates no window at all", async () => {
+      const window = new PollWindow({ MCP_TOOL_TIMEOUT: "500" });
+      const waitForChange = vi.spyOn(manager, "waitForChange");
+
+      const res = expectCheck(
+        await executeCodexCheck(
+          { action: "poll", sessionId, waitMs: 120_000 },
+          manager,
+          undefined,
+          window
+        )
+      );
+
+      expect(window.budgetMs()).toBe(0);
+      expect(waitForChange).not.toHaveBeenCalled();
+      expect(res.status).toBe("running");
+    });
+
+    it("learns nothing from an abort the client did not blame on its clock", async () => {
+      const window = new PollWindow({ CLAUDECODE: "1" });
+      const controller = new AbortController();
+
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 5_000 },
+        manager,
+        controller.signal,
+        window
+      );
+      setTimeout(() => controller.abort("The user cancelled the request"), 20);
+      await pending;
+
+      expect(window.describe().source).toBe("none");
+      expect(window.budgetMs()).toBe(MAX_LONG_POLL_WAIT_MS);
     });
 
     it("answers without waiting when waitMs is zero", () => {

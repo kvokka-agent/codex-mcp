@@ -7,7 +7,7 @@ How the five tools are used together. Each tool's inputs are in
 
 ```text
 1. codex(prompt=…, approvalPolicy=…, sandbox=…)   → { sessionId, status: "running" }
-2. codex_check(action="poll", waitMs=120000)      → status, progress, actions[]
+2. codex_check(action="poll", waitMs=3600000)     → status, progress, actions[]
 3. answer every entry of actions[]                → respond_permission / respond_user_input
 4. repeat 2 until status is idle, error or cancelled
 5. read result from the check that first saw the terminal status
