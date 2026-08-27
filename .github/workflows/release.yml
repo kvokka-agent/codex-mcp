@@ -92,6 +92,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
+          # The push below asks git to prove the candidate descends from the release
+          # branch, and git reads that proof out of the history between the two. The
+          # default depth of 1 carries none of it, and the push is rejected as a
+          # non-fast-forward however far ahead the candidate actually is.
+          fetch-depth: 0
       - name: Move the release branch to the verified commit and tag it
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -100,7 +105,7 @@ jobs:
           RELEASE_BRANCH: ${{ github.ref_name }}
           CANDIDATE: ${{ needs.prepare.outputs.branch }}
         run: |
-          git fetch --no-tags --depth=1 origin "refs/heads/$RELEASE_BRANCH"
+          git fetch --no-tags origin "refs/heads/$RELEASE_BRANCH"
           tip=$(git rev-parse FETCH_HEAD)
           if [ "$tip" != "$BASE" ]; then
             echo "$RELEASE_BRANCH moved to $tip while the matrix ran, so v$VERSION was" \
