@@ -2,7 +2,8 @@
 
 A release starts with one label on a pull request and needs nothing else from you.
 Add `release:major`, `release:minor` or `release:patch` before the merge, and the
-merge itself raises the version, checks it, tags it and publishes it to npm.
+merge itself raises the version in all six files that carry it, checks that tree,
+tags it and publishes it to npm.
 
 ## The label
 
@@ -28,11 +29,11 @@ merge an empty follow-up pull request carrying the label you meant.
 `master` moves in the third of them, after the matrix has passed.
 
 1. **prepare** reads the labels of the pull request whose merge produced the commit,
-   through `repos/{repo}/commits/{sha}/pulls`. With no release label it stops here.
-   Otherwise it checks out the tip of `master`, runs
-   `node scripts/release.mjs bump <level>`, commits the version files as
-   `chore(release): vX.Y.Z` and pushes that commit to a branch of its own,
-   `release-candidate/<run id>-<attempt>`. `master` does not move.
+   through `repos/{repo}/commits/{sha}/pulls`. With no release label the job ends
+   here and the three below it are skipped. With one it runs
+   `node scripts/release.mjs bump <level>` on the tip of `master`, commits the
+   version files as `chore(release): vX.Y.Z` and pushes that commit to a branch of
+   its own, `release-candidate/<run id>-<attempt>`. `master` does not move.
 2. **verify** calls `.github/workflows/ci.yml` on the candidate commit — the same
    matrix of seven runners the pull request went through, plus the markdown lint. It
    checks the tree that ships, the raised version files included.
@@ -43,6 +44,9 @@ merge an empty follow-up pull request carrying the label you meant.
 4. **publish** calls `.github/workflows/publish.yml` on the tag, which runs
    `npm publish --provenance --access public` from the `npm` environment. The npm
    registry authenticates the run through OIDC, so the workflow carries no token.
+   The job runs in `kvokka/codex-mcp` and nowhere else: a fork that merges a
+   labelled pull request raises its own version and tags its own copy, and its run
+   reaches this job, skips it and ends green.
 
 A red matrix leaves `master`, the tags and npm as they were. The candidate branch is
 the only thing such a run wrote, and it holds the commit that failed.
@@ -108,6 +112,11 @@ release run does not touch it.
 ## When a run stops halfway
 
 Read the run in the Actions tab and find the first red job.
+
+**The run is `Startup failure` and lists no jobs.** GitHub rejected the workflow file
+before it started anything, and the run page names the reason under `Invalid workflow
+file`. Nothing was released and nothing needs undoing; fix the file and merge the fix
+with the label you meant.
 
 **prepare failed.** Nothing was released. `master`, the tags and npm are untouched.
 Fix what the log names and re-run the workflow from the Actions tab.
