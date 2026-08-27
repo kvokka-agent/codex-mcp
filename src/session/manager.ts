@@ -879,14 +879,21 @@ export class SessionManager {
 
     const cancelledTurnId = session.activeTurnId ?? "";
     session.activeTurnId = undefined;
-    session.resultDelivered = false;
-    session.lastResult = {
-      turnId: cancelledTurnId,
-      status: "cancelled",
-      error: session.cancelledReason,
-      completedAt: new Date().toISOString(),
-    };
-    this.persistResult(session);
+    // A turn that already ended left its answer in `lastResult`, and a turn that starts
+    // clears it — so a result here belongs to a finished turn and the cancel keeps it.
+    // Overwriting it left result.json saying "cancelled" for a session that had answered,
+    // and the answer was gone from disk. The cancellation is in meta.json's
+    // `cancelledAt`/`cancelledReason` and in the event log below.
+    if (!session.lastResult) {
+      session.resultDelivered = false;
+      session.lastResult = {
+        turnId: cancelledTurnId,
+        status: "cancelled",
+        error: session.cancelledReason,
+        completedAt: new Date().toISOString(),
+      };
+      this.persistResult(session);
+    }
     recordEvent(session, "result", {
       status: "cancelled",
       reason: session.cancelledReason,

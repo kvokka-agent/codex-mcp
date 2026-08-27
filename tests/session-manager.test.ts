@@ -1677,4 +1677,56 @@ describe("SessionManager disk persistence", () => {
     expect(errorLine.data.error.message).toBe("cannot read <path>");
     expect(errorLine.data.error).toMatchObject({ type: "io" });
   });
+
+  function sessionFile(sessionId: string, name: string): string {
+    return path.join(root, "sessions", sessionId, name);
+  }
+
+  function readSessionJson(sessionId: string, name: string): Record<string, unknown> {
+    return JSON.parse(readFileSync(sessionFile(sessionId, name), "utf-8")) as Record<
+      string,
+      unknown
+    >;
+  }
+
+  it("keeps the answer of the finished turn in result.json when a cancel follows it", async () => {
+    // A caller that polls the result and then cancels the session leaves the session
+    // with an answer; result.json is that answer, and the cancel is recorded beside it.
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+    client.emitNotification(Methods.ITEM_COMPLETED, {
+      threadId,
+      item: { id: "item_1", type: "agentMessage", text: "42" },
+    });
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId,
+      turn: { id: "turn_done", status: "completed" },
+    });
+    const delivered = manager.pollStatus(sessionId).result;
+    expect(delivered).toMatchObject({ turnId: "turn_done", status: "completed", text: "42" });
+
+    await manager.cancelSession(sessionId, "caller took the result");
+    persistence.flushAll();
+
+    expect(readSessionJson(sessionId, "result.json")).toEqual(delivered);
+    expect(readSessionJson(sessionId, "meta.json")).toMatchObject({
+      status: "cancelled",
+      cancelledReason: "caller took the result",
+    });
+    // The cancellation is not lost: the event log carries it after the turn's result.
+    expect(
+      readEventLines(sessionId)
+        .filter((line) => line.type === "result")
+        .map((line) => (line.data as { status?: string }).status)
+    ).toEqual(["completed", "cancelled"]);
+  });
+
+  it("writes the cancellation to result.json when the cancel cuts a running turn", async () => {
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+    await manager.cancelSession(sessionId, "user stopped it");
+
+    expect(readSessionJson(sessionId, "result.json")).toMatchObject({
+      status: "cancelled",
+      error: "user stopped it",
+    });
+  });
 });
