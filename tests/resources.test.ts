@@ -1,9 +1,29 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { registerResources, RESOURCE_URIS } from "../src/resources/register-resources.js";
-import { _resetForTesting } from "../src/utils/codex-executable.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * `detectCodexCliVersion` runs the resolved executable with `--version` under a
+ * 1.5s budget. Left real, every read of these two resources spawns a process and
+ * a runner slow enough to miss that budget turns the version into null; the stub
+ * decides what the binary answered instead.
+ */
+const cliVersionRun = vi.hoisted(() => ({
+  result: { status: 0, stdout: "codex-cli 0.52.0", stderr: "" } as unknown,
+}));
+
+vi.mock("child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("child_process")>();
+  return {
+    ...actual,
+    default: actual,
+    spawnSync: () => cliVersionRun.result,
+  };
+});
+
+const { registerResources, RESOURCE_URIS } = await import("../src/resources/register-resources.js");
+const { _resetForTesting } = await import("../src/utils/codex-executable.js");
 
 interface ReadResult {
   contents?: Array<{ uri?: string; text?: string; mimeType?: string }>;
@@ -127,8 +147,7 @@ describe("resources", () => {
 
   beforeEach(() => {
     envBackup = Object.fromEntries(PINNED_ENV_KEYS.map((key) => [key, process.env[key]]));
-    // node answers `--version`, so the CLI probe returns a value known ahead of time instead of
-    // whatever codex the machine happens to carry.
+    cliVersionRun.result = { status: 0, stdout: "codex-cli 0.52.0", stderr: "" };
     pinEnv({ PATH: emptyBinDir, CODEX_MCP_PATH: process.execPath, CODEX_MCP_STDIO_MODE: "strict" });
   });
 
@@ -170,7 +189,7 @@ describe("resources", () => {
     expect(payload.platform).toBe(process.platform);
     expect(payload.arch).toBe(process.arch);
     expect(payload.stdioMode).toBe("strict");
-    expect(payload.codexCliVersion).toBe(process.version.replace(/^v/, ""));
+    expect(payload.codexCliVersion).toBe("0.52.0");
     expect(payload.activeSessions).toBe(7);
     expect(payload.defaultModel).toBe("o4-mini");
     expect(payload.defaultModelSource).toBe("session-default");
@@ -240,7 +259,7 @@ describe("resources", () => {
     expect(runtime, "compat report has no runtime block").toBeDefined();
     expect(runtime.codexMcpVersion).toBe("9.9.9-test");
     expect(runtime.activeSessions).toBe(7);
-    expect(runtime.codexCliVersion).toBe(process.version.replace(/^v/, ""));
+    expect(runtime.codexCliVersion).toBe("0.52.0");
 
     // toolCounts.core is compared against the tools the server really registers in
     // tests/tools-list.test.ts; here only its shape is fixed.
@@ -269,9 +288,9 @@ describe("resources", () => {
     const detected = readJson(resource(collect(), RESOURCE_URIS.compatReport));
     expect(detected.runtimeWarnings).toEqual([]);
 
-    // An empty PATH and no override leaves the resolver on the bare "codex" fallback, which
-    // cannot be executed, so detection fails deterministically.
-    pinEnv({ PATH: path.join(emptyBinDir, "nowhere"), CODEX_MCP_STDIO_MODE: "strict" });
+    // A binary that could not be launched at all is what "not detected" means.
+    cliVersionRun.result = { error: new Error("spawnSync codex ENOENT"), status: null };
+    _resetForTesting();
     const undetected = readJson(resource(collect(), RESOURCE_URIS.compatReport));
     expect(undetected.runtime).toMatchObject({ codexCliVersion: null });
     expect(undetected.runtimeWarnings).toEqual([

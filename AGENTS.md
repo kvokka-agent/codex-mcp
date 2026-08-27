@@ -143,6 +143,20 @@ These are the patterns a change keeps, each of them written after it was broken:
   `manager.destroy()` in `afterEach`.
 - Deterministic, no network, the codex child process mocked.
 - A test asserts on a value the code under test produced.
+- A test measures on the fake clock, never on the wall clock. `useFakeClock()`
+  of `tests/helpers/clock.ts` installs vitest's fake timers and reports how far
+  the clock has moved, so a wait of 40ms is 40ms exactly; `eslint` refuses
+  `Date.now`, `performance.now` and `process.hrtime` in a test file. A real
+  `setTimeout(f, 40)` runs on libuv's millisecond loop clock and fires with a
+  `Date.now()` delta of 39 about once in two thousand waits, which is a red
+  master from a green pull request.
+- A test drives no real subprocess to learn about the machine it runs on. The
+  process table, the CLI version probe and the clock are stubs, and a budget
+  raised because a real query is slow on one platform is the query to remove.
+- A test passes every input the code would otherwise take from the environment
+  it runs in. `executeCodexCheck` builds its `PollWindow` from `process.env`
+  when the caller names none, and a shell exporting `MCP_TOOL_TIMEOUT=500` left
+  seven long-poll tests with no window to wait in and nothing to wake from.
 - `tests/protocol-schema.test.ts` holds `protocol.ts` against `codex-schema/`
   and fails on drift. A new protocol field gets a check there.
 - `tests/server-lifecycle.e2e.test.ts` drives the built server as a child

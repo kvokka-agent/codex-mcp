@@ -8,6 +8,6 @@ repos:
         files: \.ts$
       - id: rumdl
         name: rumdl
-        entry: npx --yes rumdl@0.2.60 check
+        entry: npx rumdl check
         language: system
         files: \.md$
