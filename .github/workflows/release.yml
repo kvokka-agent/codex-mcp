@@ -119,6 +119,13 @@ jobs:
 
   publish:
     needs: [prepare, promote]
+    # A called workflow's job is refused the permission its caller does not hold, and a
+    # caller that names no `permissions` holds `id-token: none` — which is the one the
+    # publish job needs for the npm OIDC token. GitHub rejects the whole file for it,
+    # before any job starts. `tests/workflows.test.ts` compares the two sides.
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/publish.yml
     with:
       ref: v${{ needs.prepare.outputs.version }}
