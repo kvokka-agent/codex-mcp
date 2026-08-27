@@ -214,6 +214,12 @@ export interface SessionInfo {
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
   personality?: Personality;
+  /** Reasoning effort of the session's turns: `turn/start` carries it on every turn, and a turn that omits it falls back to config.toml. */
+  effort?: EffortLevel;
+  /** Reasoning summary of the session's turns, carried per turn like `effort`. */
+  summary?: SummaryMode;
+  /** System instructions the thread was started with, reused when it is forked or resumed. */
+  baseInstructions?: string;
   config?: Record<string, unknown>;
   pendingRequests: Map<string, PendingRequest>;
   lastResult?: TurnResult;
