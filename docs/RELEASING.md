@@ -54,6 +54,10 @@ the only thing such a run wrote, and it holds the commit that failed.
 All four are one workflow run: the version, the tag and the published package come
 out of a single link in the Actions tab.
 
+The same workflow takes a `ref` by hand from the Actions tab. Given a tag it runs
+`publish` alone, which is how a tag that exists without its npm version reaches npm —
+see **publish failed** below.
+
 ## Two merges close together
 
 `concurrency: release-${{ github.ref }}` with `cancel-in-progress: false` runs one
@@ -75,11 +79,45 @@ time, or re-run the cancelled release from the Actions tab.
 
 ## The npm trusted publisher
 
-The npm trusted publisher for `@kvokka/codex-mcp` names the workflow that publishes,
-which is `.github/workflows/publish.yml` — the release run calls that file rather than
-repeating what it does, and the OIDC token names the file holding the job. If a
-release run reaches the publish job and npm rejects the token, that setting is where
-to look.
+The trusted publisher of `@kvokka/codex-mcp` on npmjs.com carries these values:
+
+| Field                | Value         |
+| -------------------- | ------------- |
+| Organization or user | `kvokka`      |
+| Repository           | `codex-mcp`   |
+| Workflow filename    | `release.yml` |
+| Environment name     | `npm`         |
+
+`release.yml` and not `publish.yml`, because npm matches the workflow filename against
+the `workflow_ref` claim of the GitHub token, and that claim names the file the run
+started in. A merge and a hand-started publish both start in `release.yml`; the
+`publish.yml` it calls reaches the token only as `job_workflow_ref`, which npm reads
+nothing from. npm states the rule under
+[Troubleshooting](https://docs.npmjs.com/trusted-publishers): "Some GitHub Actions
+workflows use `workflow_call` to invoke other workflows that run `npm publish`, or use
+`workflow_dispatch` for manual publishing. When this happens, validation checks the
+calling workflow's name instead of the workflow that actually contains the publish
+command, which can cause configuration mismatches."
+
+That is why `publish.yml` carries `workflow_call` and no trigger of its own, and why
+`tests/workflows.test.ts` fails when a second file grows a publish step or `publish.yml`
+grows a trigger: npm holds one workflow filename per package, so one file may start a
+run that publishes.
+
+npm checks nothing when the configuration is saved, and the registry answers a token it
+does not accept with `404 package not found` — what it also answers for a package that
+does not exist. The publish step therefore runs at `NPM_CONFIG_LOGLEVEL: verbose`, which
+puts the reason the registry gave into the log:
+
+```text
+verbose oidc Failed token exchange request with body message: OIDC token exchange error - package not found
+```
+
+Without that line a rejected token reads as `npm error code E404` on the package URL,
+naming neither the token nor the publisher.
+
+A repository secret `NPM_TOKEN` publishes instead when it exists — the workflow passes it
+as `NODE_AUTH_TOKEN`, and npm prefers the OIDC token whenever the exchange succeeds.
 
 ## Where the version lives
 
@@ -141,11 +179,21 @@ tagged, and only the candidate branch deletion failed: delete
 `release-candidate/<run id>-<attempt>` by hand and re-run the failed jobs so
 **publish** gets its turn.
 
-**publish failed.** The tag `vX.Y.Z` exists and `master` carries its version, but
-npm does not have the package. Nothing needs undoing. Run the `Publish` workflow by
-hand from the Actions tab with `ref` set to `vX.Y.Z`; it checks out the tag and
-publishes exactly what the release run would have published. A publish that failed
-because the version is already on npm needs nothing at all — the release is out.
+**publish failed.** The tag `vX.Y.Z` exists and `master` carries its version, but npm
+does not have the package. Nothing needs undoing, and the version stays the one the tag
+names. Run the `Release` workflow by hand with `ref` set to that tag:
+
+```bash
+gh workflow run release.yml --repo kvokka/codex-mcp --ref master -f ref=vX.Y.Z
+```
+
+The run skips `prepare`, `verify` and `promote` — it raises no version and moves no
+branch — and goes straight to `publish`, which checks out the tag and publishes exactly
+what the failed run would have published. Start it from `release.yml` and not from
+`publish.yml`: the trusted publisher matches the file the run starts in.
+
+A publish that failed because the version is already on npm needs nothing at all — the
+release is out.
 
 **The run published and then something failed.** npm versions cannot be replaced.
 Release the fix as a new patch.
