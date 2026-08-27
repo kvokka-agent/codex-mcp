@@ -112,6 +112,7 @@ mode is live.
 | `CODEX_MCP_STDIO_MODE` | `auto` | `auto` reports stdout-contamination risk on stderr, `strict` refuses to start when stdin or stdout is a TTY, `off` skips the check. |
 | `CODEX_MCP_DISABLE_NOISE_FILTER` | unset | `1` keeps shell-profile noise — oh-my-posh, PSReadLine, `WARNING:` lines, conda prefixes — in command output instead of stripping it. |
 | `CODEX_MCP_DISABLE_ACTIVITY_MARKER` | unset | `1` stops the server putting the activity-marker instruction on new threads, so `progress.activity` stays empty. |
+| `MCP_TOOL_TIMEOUT` | unset | The MCP client's own ceiling on one tool call, in ms. Set it for the client; a client hands its environment to the servers it spawns, so the server reads it and returns a `codex_check` long poll just inside it. |
 
 ## Checking the install
 

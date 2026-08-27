@@ -226,6 +226,29 @@ round trip.
 Four waiters per session. A fifth is refused, and the caller answers from a
 single immediate read rather than queueing.
 
+### The window the client allows
+
+`waitMs` names what the caller wants; `PollWindow` names what the client on the
+other end of the stdio pipe will sit through, and the wait is the smaller of the
+two. A tool call the client cuts is worse than one that returned: the caller
+gets an error rather than a status, the round trip is spent either way, and the
+finished turn's answer would ride out on a response the client already dropped.
+
+The window comes from a cut the server watched, else from `MCP_TOOL_TIMEOUT` in
+its environment, else from the client's default; 5 seconds come off the top so
+the answer is on the wire first. `notifications/cancelled` carries the client's
+reason, and `AbortSignal.reason` carries it into the handler, so a timeout is
+told apart from a person pressing Escape and only a timeout moves the window.
+An aborted poll reads the status without consuming the turn result, which stays
+undelivered for the next call.
+
+Measured against Claude Code 2.1.247: it puts a `progressToken` in `_meta` of
+every `tools/call`, `MCP_TOOL_TIMEOUT` reaches the spawned server's environment
+and bounds the call to the millisecond, `notifications/progress` does not push
+that bound out, and with nothing configured a call held 1500 s and was not cut.
+The server therefore sends no progress notifications: against this client they
+buy no time, and they never reach the caller's context.
+
 ## Foreground execution
 
 `advanced.waitForResult` on `codex`, and `waitForResult` on `codex_reply`, turn
