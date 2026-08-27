@@ -1,18 +1,15 @@
 name: Publish
 
 on:
-  # The release run calls this after it has tagged the version. Dispatch it by hand on a
-  # tag whose release run reached the tag but not the publish.
+  # `release.yml` is the only caller, both after a merge cut a tag and when someone
+  # publishes a tag by hand. This file carries no trigger of its own: npm matches the
+  # trusted publisher against the `workflow_ref` claim, which names the file the run
+  # started in, so a run started here would send `publish.yml` where the release path
+  # sends `release.yml` and only one of the two can be the configured name.
   workflow_call:
     inputs:
       ref:
         description: Tag to publish.
-        type: string
-        required: true
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: Tag to publish, for example v2.2.1.
         type: string
         required: true
 
@@ -38,3 +35,14 @@ jobs:
       - run: npm run build
       - run: npm pack --dry-run
       - run: npm publish --provenance --access public
+        env:
+          # npm exchanges the GitHub OIDC token for a publish token of its own and says
+          # nothing when the registry refuses the exchange: it publishes on with the empty
+          # token `setup-node` wrote, and the registry answers the unauthenticated PUT
+          # with a 404 that names neither the token nor the trusted publisher. At
+          # `verbose` the reason the registry gave lands in the log instead.
+          NPM_CONFIG_LOGLEVEL: verbose
+          # Empty when the repository holds no such secret, which leaves the OIDC token
+          # the only credential. A token in it publishes on its own, and npm still
+          # prefers the OIDC one when the trusted publisher accepts the exchange.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

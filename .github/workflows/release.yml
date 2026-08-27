@@ -3,6 +3,16 @@ name: Release
 on:
   push:
     branches: [main, master]
+  # npm reads the workflow file out of the `workflow_ref` claim, which names the file
+  # holding the job that started the run. Publishing a tag by hand therefore starts here
+  # and not in `publish.yml`: a run started anywhere else sends a file name the trusted
+  # publisher does not carry, and npm answers the publish with a 404.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Tag to publish, for example v2.3.0. Raises no version and moves no branch.
+        type: string
+        required: true
 
 # One release at a time: a second merge waits for the first to finish rather than
 # racing it for the branch tip. GitHub keeps at most one run waiting per group, so a
@@ -15,6 +25,8 @@ jobs:
   # Builds the commit the release would ship and parks it on a branch of its own.
   # The release branch does not move here.
   prepare:
+    # A hand-started run names the tag it publishes and raises nothing.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -127,7 +139,12 @@ jobs:
   # copy; the run reaches this job and skips it.
   publish:
     needs: [prepare, promote]
-    if: github.repository == 'kvokka/codex-mcp'
+    # `always()` is what lets a hand-started run reach this job over the three skipped
+    # above it. A merge that cut no version leaves `promote` skipped, and a merge whose
+    # matrix or promotion failed leaves it failed; neither publishes.
+    if: >-
+      always() && github.repository == 'kvokka/codex-mcp'
+      && (github.event_name == 'workflow_dispatch' || needs.promote.result == 'success')
     # A called workflow's job is refused the permission its caller does not hold, and a
     # caller that names no `permissions` holds `id-token: none` — which is the one the
     # publish job needs for the npm OIDC token. GitHub rejects the whole file for it,
@@ -137,5 +154,5 @@ jobs:
       id-token: write
     uses: ./.github/workflows/publish.yml
     with:
-      ref: v${{ needs.prepare.outputs.version }}
+      ref: ${{ inputs.ref || format('v{0}', needs.prepare.outputs.version) }}
     secrets: inherit
