@@ -718,6 +718,8 @@ Every JSON file is written through `atomicWriteJson`: write a sibling temp file,
 - The pid is gone, or it is alive with another start time → **gone**. The session is free: the successor removes the claim and adopts it.
 - Liveness or start time no source could read → **held, unproven**. The reason is in the error a caller sees; nothing takes the session on a guess.
 
+An unproven owner keeps the session held for as long as `owner.json` names it: `resume` answers `SESSION_HELD_BY_OTHER_SERVER`, prune and reap skip it, and no argument overrides any of that. Deleting `owner.json` from the session directory is the only way to free such a session.
+
 `src/persistence/process-identity.ts` reads the start time — `Get-CimInstance Win32_Process` (then `wmic`) on Windows, `ps -p <pid> -o pgid=,lstart=` elsewhere, falling back to `/proc/<pid>/stat` on Linux. The orphan reaper identifies child processes through the same module.
 
 `startDiskPersistence()` in `src/session/persistence.ts` opens the directory: it hands back the adapter, the recovered sessions and the prune count, and warns on stderr and hands back nothing when creating the directory, pruning or scanning fails, leaving the server to run from memory.

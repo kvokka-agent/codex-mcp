@@ -525,6 +525,18 @@ Pick the entry with no `owner` and read its `activity` and `lastActiveAt`, then:
 
 and reply to it as to any idle session.
 
+Where a resume cannot happen:
+
+- In `exec` mode — a codex binary without `app-server` — `resume` fails with
+  `THREAD_FORK_RESUME_FAILED` carrying `EXEC_NOT_SUPPORTED`, because `codex exec`
+  implements no thread resume. The session keeps its `abandoned` status; hand the
+  work to a new session.
+- A session whose owner could not be checked — the pid answered neither a
+  liveness probe nor a start-time read — counts as held, and `resume` refuses it
+  with `SESSION_HELD_BY_OTHER_SERVER`. No flag overrides that. Where you know the
+  process is gone, delete `owner.json` from the session's directory under the
+  state directory; that is the only way out.
+
 ## Error Model
 
 Tools return errors as:

@@ -112,6 +112,15 @@ Both start a real server, and both put its state directory in a fresh temporary
 one unless `CODEX_MCP_STATE_DIR` says otherwise, so a check run never disturbs
 the sessions of an installed server.
 
+The end-to-end suite inside `npm test` — `tests/server-lifecycle.e2e.test.ts` —
+spawns the built server and hands it `tests/helpers/fake-codex.mjs` as the codex
+binary. It skips itself on Windows, which spawns an executable by its extension
+and does not run a `.mjs`. So the three lifetime fixes it measures — a startup
+that exited before serving MCP, a stdin EOF that never ended the process, and a
+shutdown that hung and left the state directory reading `running` — carry
+evidence from Linux and macOS only. On Windows the run is green without having
+measured them.
+
 ## The plugin from the working tree
 
 `plugins/codex-mcp/` ships the `codex` subagent and the `PreToolUse` hook
