@@ -15,6 +15,7 @@ import { SessionManager } from "../src/session/manager.js";
 import { executeCodexCheck } from "../src/tools/codex-check.js";
 import { POLL_WINDOW_MARGIN_MS, PollWindow } from "../src/utils/poll-window.js";
 import { DEFAULT_APPROVAL_TIMEOUT_MS, MAX_LONG_POLL_WAIT_MS } from "../src/types.js";
+import { useFakeClock } from "./helpers/clock.js";
 import type { CheckResult } from "../src/types.js";
 
 class MockClient extends EventEmitter {
@@ -84,6 +85,7 @@ describe("executeCodexCheck", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     manager.destroy();
     vi.restoreAllMocks();
   });
@@ -323,19 +325,19 @@ describe("executeCodexCheck", () => {
   describe("long-poll", () => {
     it("answers at once when an action is already pending", async () => {
       requestApproval();
-      const started = Date.now();
+      const waitForChange = vi.spyOn(manager, "waitForChange");
 
       const res = expectCheck(
         await executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager)
       );
 
       expect(res.actions).toHaveLength(1);
-      expect(Date.now() - started).toBeLessThan(1000);
+      expect(waitForChange).not.toHaveBeenCalled();
     });
 
     it("answers at once when the turn is already over", async () => {
       completeTurn();
-      const started = Date.now();
+      const waitForChange = vi.spyOn(manager, "waitForChange");
 
       const res = expectCheck(
         await executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager)
@@ -343,11 +345,11 @@ describe("executeCodexCheck", () => {
 
       expect(res.status).toBe("idle");
       expect(res.result?.text).toBe("done");
-      expect(Date.now() - started).toBeLessThan(1000);
+      expect(waitForChange).not.toHaveBeenCalled();
     });
 
     it("sleeps through a stream of deltas and token-counter updates", async () => {
-      const started = Date.now();
+      const clock = useFakeClock();
       const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 120 }, manager);
 
       for (let i = 0; i < 50; i++) {
@@ -359,10 +361,11 @@ describe("executeCodexCheck", () => {
         });
       }
 
+      await clock.advance(120);
       const res = expectCheck(await pending);
 
       // The wait ran its full window: none of that traffic is a change to act on.
-      expect(Date.now() - started).toBeGreaterThanOrEqual(100);
+      expect(clock.elapsedMs()).toBe(120);
       expect(res.status).toBe("running");
       expect(res.actions).toEqual([]);
       // The counters the run produced still reach the caller, as a count.
@@ -370,59 +373,63 @@ describe("executeCodexCheck", () => {
     });
 
     it("wakes on a new action", async () => {
-      const started = Date.now();
+      const clock = useFakeClock();
       const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager);
       setTimeout(() => requestApproval(), 20);
 
+      await clock.advance(20);
       const res = expectCheck(await pending);
 
       expect(res.actions).toHaveLength(1);
       expect(res.status).toBe("waiting_approval");
       expect(res.recommendedNextAction).toBe("respond_permission");
-      expect(Date.now() - started).toBeLessThan(4000);
+      // The approval ended the wait, 4980ms before the window would have.
+      expect(clock.elapsedMs()).toBe(20);
     });
 
     it("wakes when the turn ends and carries its answer", async () => {
-      const started = Date.now();
+      const clock = useFakeClock();
       const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager);
       setTimeout(() => completeTurn("the answer"), 20);
 
+      await clock.advance(20);
       const res = expectCheck(await pending);
 
       expect(res.status).toBe("idle");
       expect(res.result?.text).toBe("the answer");
       expect(res.interactionState).toBe("finished");
-      expect(Date.now() - started).toBeLessThan(4000);
+      expect(clock.elapsedMs()).toBe(20);
     });
 
     it("wakes on a status change with nothing to answer", async () => {
-      const started = Date.now();
+      const clock = useFakeClock();
       const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 5000 }, manager);
       setTimeout(() => void manager.cancelSession(sessionId, "stopped by test"), 20);
 
+      await clock.advance(20);
       const res = expectCheck(await pending);
 
       expect(res.status).toBe("cancelled");
-      expect(Date.now() - started).toBeLessThan(4000);
+      expect(clock.elapsedMs()).toBe(20);
     });
 
     it("reports the state it found when the wait window expires", async () => {
-      const started = Date.now();
+      const clock = useFakeClock();
+      const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 30 }, manager);
 
-      const res = expectCheck(
-        await executeCodexCheck({ action: "poll", sessionId, waitMs: 30 }, manager)
-      );
+      await clock.advance(30);
+      const res = expectCheck(await pending);
 
       expect(res.status).toBe("running");
       expect(res.actions).toEqual([]);
       expect(res.result).toBeUndefined();
-      expect(Date.now() - started).toBeGreaterThanOrEqual(20);
+      expect(clock.elapsedMs()).toBe(30);
     });
 
     it("returns immediately when the request is already aborted", async () => {
       const controller = new AbortController();
       controller.abort();
-      const started = Date.now();
+      const waitForChange = vi.spyOn(manager, "waitForChange");
 
       const res = expectCheck(
         await executeCodexCheck(
@@ -433,12 +440,12 @@ describe("executeCodexCheck", () => {
       );
 
       expect(res.status).toBe("running");
-      expect(Date.now() - started).toBeLessThan(1000);
+      expect(waitForChange).not.toHaveBeenCalled();
     });
 
     it("stops waiting when the request is aborted mid-wait", async () => {
       const controller = new AbortController();
-      const started = Date.now();
+      const clock = useFakeClock();
       const pending = executeCodexCheck(
         { action: "poll", sessionId, waitMs: 5000 },
         manager,
@@ -446,10 +453,11 @@ describe("executeCodexCheck", () => {
       );
       setTimeout(() => controller.abort(), 20);
 
+      await clock.advance(20);
       const res = expectCheck(await pending);
 
       expect(res.sessionId).toBe(sessionId);
-      expect(Date.now() - started).toBeLessThan(4000);
+      expect(clock.elapsedMs()).toBe(20);
     });
 
     it("cuts the wait down to what the client tolerates", async () => {
@@ -541,6 +549,9 @@ describe("executeCodexCheck", () => {
     it("measures the cut and returns inside it from then on", async () => {
       const window = new PollWindow({ CLAUDECODE: "1" });
       const controller = new AbortController();
+      // The ceiling the server learns is the time it held the call, and only a
+      // fake clock says what that was to the millisecond.
+      const clock = useFakeClock();
 
       const pending = executeCodexCheck(
         { action: "poll", sessionId, waitMs: 5_000 },
@@ -548,12 +559,13 @@ describe("executeCodexCheck", () => {
         controller.signal,
         window
       );
-      setTimeout(() => controller.abort("SdkError: Request timed out"), 40);
+      await clock.advance(40);
+      controller.abort("SdkError: Request timed out");
       await pending;
 
-      // The client named no ceiling until it cut this call.
-      const measured = window.ceilingMs();
-      expect(measured).toBeGreaterThanOrEqual(40);
+      // The client named no ceiling until it cut this call, and the cut it
+      // watched is exactly the 40ms this call was held.
+      expect(window.ceilingMs()).toBe(40);
       expect(window.describe().source).toBe("measured");
 
       // A ceiling of some tens of milliseconds leaves no window worth holding,
@@ -574,7 +586,7 @@ describe("executeCodexCheck", () => {
 
     it("hands an approval over long before it expires, whatever the window is", async () => {
       const window = new PollWindow({ CLAUDECODE: "1" });
-      const started = Date.now();
+      const clock = useFakeClock();
       const pending = executeCodexCheck(
         { action: "poll", sessionId, waitMs: MAX_LONG_POLL_WAIT_MS },
         manager,
@@ -583,8 +595,9 @@ describe("executeCodexCheck", () => {
       );
       setTimeout(() => requestApproval(), 20);
 
+      await clock.advance(20);
       const res = expectCheck(await pending);
-      const elapsed = Date.now() - started;
+      const elapsed = clock.elapsedMs();
 
       expect(window.budgetMs()).toBe(MAX_LONG_POLL_WAIT_MS);
       expect(res.status).toBe("waiting_approval");
@@ -592,8 +605,8 @@ describe("executeCodexCheck", () => {
       expect(res.recommendedNextAction).toBe("respond_permission");
       // The pending request auto-declines after approvalTimeoutMs; the wait has
       // to end inside that, not inside the window it was given.
+      expect(elapsed).toBe(20);
       expect(elapsed).toBeLessThan(DEFAULT_APPROVAL_TIMEOUT_MS);
-      expect(elapsed).toBeLessThan(1_000);
     });
 
     it("answers at once when the client tolerates no window at all", async () => {
@@ -647,7 +660,6 @@ describe("executeCodexCheck", () => {
       const held = [0, 1, 2, 3].map(() =>
         manager.waitForChange(sessionId, 60_000, blockers.signal)
       );
-      const started = Date.now();
 
       const res = expectCheck(
         await executeCodexCheck({ action: "poll", sessionId, waitMs: 200 }, manager)
@@ -655,7 +667,8 @@ describe("executeCodexCheck", () => {
 
       expect(res.sessionId).toBe(sessionId);
       expect(res.status).toBe("running");
-      expect(Date.now() - started).toBeLessThan(100);
+      // One refusal logged and no second one: the poll gave the 200ms window up
+      // rather than re-asking for a slot until it ran out.
       expect(logged).toHaveBeenCalledTimes(1);
       expect(String(logged.mock.calls[0]![0])).toContain("Long-poll wait refused");
 
@@ -664,7 +677,7 @@ describe("executeCodexCheck", () => {
     });
 
     it("wakes on a change delivered between the read and the waiter registration", async () => {
-      const started = Date.now();
+      const clock = useFakeClock();
       const pending = executeCodexCheck({ action: "poll", sessionId, waitMs: 120_000 }, manager);
       // The long poll has run its synchronous part: it read the session state and
       // registered its waiter. This is the exact window the single-threaded loop
@@ -675,7 +688,7 @@ describe("executeCodexCheck", () => {
       const res = expectCheck(await pending);
 
       expect(res.actions).toHaveLength(1);
-      expect(Date.now() - started).toBeLessThan(1000);
+      expect(clock.elapsedMs()).toBe(0);
     });
   });
 
