@@ -216,7 +216,10 @@ describe("resume", () => {
     await expect(manager.resumeSession("sess_held")).rejects.toThrow(
       ErrorCode.SESSION_HELD_BY_OTHER_SERVER
     );
-  });
+    // 30s: proving the recorded pid is a live process asks the OS for its start
+    // time, and on Windows that is a CIM query and then a wmic one, each with a
+    // five-second budget of its own.
+  }, 30_000);
 
   it("refuses a session that recorded no thread id", async () => {
     writeAbandonedOnDisk("sess_no_thread", { threadId: undefined });
