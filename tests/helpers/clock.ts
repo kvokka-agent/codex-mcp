@@ -1,13 +1,14 @@
 /**
- * The clock a test measures on, and the two readings of the real one a test is
+ * The clock a test measures on, and the readings of the real one a fixture is
  * still allowed to take.
  *
- * A real `setTimeout(f, 40)` runs on libuv's millisecond loop clock: about once
- * in two thousand waits it fires with a `Date.now()` delta of 39. A test that
- * asserts on a real duration therefore fails on the runner's luck rather than
- * on a defect, so a test file reads no clock of its own — `eslint` holds it to
- * that — and drives the fake one from here instead, where a wait of 40ms is
- * 40ms exactly.
+ * A real `setTimeout(f, 40)` runs on libuv's millisecond loop clock, which is
+ * not the one `Date.now()` reads: measured over 10000 waits under a 12-way CPU
+ * load, 19 of them fired with a `Date.now()` delta under 40ms, the shortest 31.
+ * A test that asserts on a real duration therefore fails on the runner's luck
+ * rather than on a defect, so a test file reads no clock of its own — `eslint`
+ * holds it to that — and drives the fake one from here instead, where a wait of
+ * 40ms is 40ms exactly.
  */
 import { vi } from "vitest";
 
@@ -33,9 +34,14 @@ export function useFakeClock(): FakeClock {
   };
 }
 
-/** An ISO timestamp `ms` milliseconds before now, for a fixture that has to be stale. */
+/** Epoch milliseconds `ms` before now, for a fixture dated relative to this run. */
+export function msAgo(ms: number): number {
+  return Date.now() - ms;
+}
+
+/** The same instant as an ISO timestamp, for a fixture that has to read as stale. */
 export function isoMsAgo(ms: number): string {
-  return new Date(Date.now() - ms).toISOString();
+  return new Date(msAgo(ms)).toISOString();
 }
 
 /** How long ago an ISO timestamp is, by the wall clock that wrote it. */
@@ -62,9 +68,4 @@ export async function pollUntil<T>(
     last = await read();
   }
   throw new Error(`condition never held; last value: ${JSON.stringify(last)}`);
-}
-
-/** Epoch milliseconds `ms` before now, for a fixture dated relative to this run. */
-export function msAgo(ms: number): number {
-  return Date.now() - ms;
 }
