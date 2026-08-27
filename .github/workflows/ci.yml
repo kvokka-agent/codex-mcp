@@ -72,6 +72,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-      # rumdl ships as a Rust binary; the npm package carries the prebuilt one and the
-      # script pins its version, so the runner needs nothing beyond node.
+          cache: npm
+      # rumdl ships as a Rust binary, and the npm package carries the prebuilt one for
+      # every platform this matrix runs on. It is a locked devDependency, so this job
+      # fetches it from the same cached `npm ci` as everything else rather than from a
+      # registry call of its own that no retry covers.
+      - run: npm ci
       - run: npm run lint:md
