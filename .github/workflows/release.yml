@@ -117,8 +117,12 @@ jobs:
           git push --atomic origin "$SHA:refs/heads/$RELEASE_BRANCH" "refs/tags/v$VERSION"
           git push origin ":refs/heads/$CANDIDATE"
 
+  # npm carries one @kvokka/codex-mcp and this repository is where it comes from. A
+  # fork that merges a labelled pull request raises its own version and tags its own
+  # copy; the run reaches this job and skips it.
   publish:
     needs: [prepare, promote]
+    if: github.repository == 'kvokka/codex-mcp'
     # A called workflow's job is refused the permission its caller does not hold, and a
     # caller that names no `permissions` holds `id-token: none` — which is the one the
     # publish job needs for the npm OIDC token. GitHub rejects the whole file for it,
