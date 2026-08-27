@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reapOrphanProcesses } from "../src/session/orphan-reaper.js";
 import type { RecoveredSession } from "../src/persistence/index.js";
+import { msAgo } from "./helpers/clock.js";
 
 const { execSyncMock, spawnMock, readFileSyncMock, uptimeMock } = vi.hoisted(() => ({
   execSyncMock: vi.fn(),
@@ -330,7 +331,7 @@ describe("reapOrphanProcesses", () => {
     uptimeMock.mockReturnValue(3_600);
     killsOnSignal();
 
-    const startMs = Date.now() - 3_600_000 + 123_450;
+    const startMs = msAgo(3_600_000 - 123_450);
     const summary = await reapOrphanProcesses([session(913, new Date(startMs).toISOString())]);
 
     expect(summary).toEqual({ reaped: 1, alreadyDead: 0, unconfirmed: 0, skipped: 0 });

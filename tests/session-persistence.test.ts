@@ -60,6 +60,7 @@ import { join } from "node:path";
 import { SessionPersistence, startDiskPersistence } from "../src/session/persistence.js";
 import { SCHEMA_VERSION } from "../src/persistence/index.js";
 import type { SessionInfo } from "../src/types.js";
+import { isoMsAgo } from "./helpers/clock.js";
 
 let root: string;
 let persistence: SessionPersistence | null = null;
@@ -283,7 +284,7 @@ describe("SessionPersistence", () => {
       join(stale, "meta.json"),
       JSON.stringify({
         sessionId: "sess_old",
-        lastActiveAt: new Date(Date.now() - 60_000).toISOString(),
+        lastActiveAt: isoMsAgo(60_000),
       })
     );
     persistence.writeSessionMeta(makeSession({ lastActiveAt: new Date().toISOString() }));
@@ -403,7 +404,7 @@ describe("startDiskPersistence", () => {
 
   it("keeps pruned sessions out of what it hands back", () => {
     // Retention defaults to 7 days, so a session last active 30 days ago is pruned.
-    const longAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const longAgo = isoMsAgo(30 * 24 * 60 * 60 * 1000);
     const owner = new SessionPersistence(root);
     owner.writeSessionMeta(
       makeSession({ sessionId: "sess_stale", createdAt: longAgo, lastActiveAt: longAgo })
@@ -491,7 +492,7 @@ describe("startDiskPersistence", () => {
   });
 
   it("leaves a session a live owner holds out of a prune", () => {
-    const longAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const longAgo = isoMsAgo(30 * 24 * 60 * 60 * 1000);
     const owner = new SessionPersistence(root);
     owner.writeSessionMeta(
       makeSession({ sessionId: "sess_old_held", createdAt: longAgo, lastActiveAt: longAgo })

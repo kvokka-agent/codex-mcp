@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HARNESS_RUNS_HERE, ServerProcess } from "./helpers/server-harness.js";
+import { pollUntil } from "./helpers/clock.js";
 
 const servers: ServerProcess[] = [];
 const strays: ChildProcess[] = [];
@@ -40,21 +41,6 @@ function spawnStubbornChild(): ChildProcess {
   child.unref();
   strays.push(child);
   return child;
-}
-
-async function pollUntil<T>(
-  read: () => Promise<T> | T,
-  accept: (value: T) => boolean,
-  timeoutMs = 10_000
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  let last: T = await read();
-  while (Date.now() < deadline) {
-    if (accept(last)) return last;
-    await new Promise((r) => setTimeout(r, 100));
-    last = await read();
-  }
-  throw new Error(`condition never held; last value: ${JSON.stringify(last)}`);
 }
 
 afterEach(async () => {
