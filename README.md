@@ -330,22 +330,23 @@ Additional orchestration hints may be present in `codex`, `codex_reply`, and `co
 
 ### `codex_session` — Manage sessions
 
-List, inspect, cancel, interrupt, fork, batch-clean sessions, or clean background terminals.
+List, inspect, resume, cancel, interrupt, fork, batch-clean sessions, or clean background terminals.
 
-| Parameter          | Type     | Required                                                 | Description                                                                                          |
-| ------------------ | -------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `action`           | string   | Yes                                                      | `"list"`, `"get"`, `"cancel"`, `"interrupt"`, `"fork"`, `"clean"`, or `"clean_background_terminals"` |
-| `sessionId`        | string   | For get/cancel/interrupt/fork/clean_background_terminals | Target session ID                                                                                    |
-| `includeSensitive` | boolean  | No                                                       | Include `cwd`/`profile`/`config`/`threadId` in `get`. Default: `false`                               |
-| `statuses`         | string[] | No                                                       | For `clean` only. Terminal statuses to remove: `"idle"`, `"error"`, `"cancelled"`                    |
+| Parameter          | Type     | Required                                                        | Description                                                                                                     |
+| ------------------ | -------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `action`           | string   | Yes                                                             | `"list"`, `"get"`, `"resume"`, `"cancel"`, `"interrupt"`, `"fork"`, `"clean"`, or `"clean_background_terminals"` |
+| `sessionId`        | string   | For get/resume/cancel/interrupt/fork/clean_background_terminals | Target session ID                                                                                               |
+| `includeSensitive` | boolean  | No                                                              | Include `cwd`/`profile`/`config`/`threadId` in `get`. Default: `false`                                          |
+| `statuses`         | string[] | No                                                              | For `clean` only. Statuses to remove: `"idle"`, `"error"`, `"cancelled"`, `"abandoned"`. Default: the first three |
 | `olderThanMs`      | number   | No                                                       | For `clean` only. Only match sessions older than this many ms                                        |
 | `dryRun`           | boolean  | No                                                       | For `clean` only. Preview matches without deleting                                                   |
 | `includeDisk`      | boolean  | No                                                       | For `clean` only. Default: `true`; also remove persisted session state                               |
 
 **Returns:**
 
-- `action="list"` → `{ sessions: PublicSessionInfo[] }`
+- `action="list"` → `{ sessions: PublicSessionInfo[] }` — every session of the state directory, this server's and every other server's
 - `action="get"` → `PublicSessionInfo` (or `SensitiveSessionInfo` when `includeSensitive=true`)
+- `action="resume"` → `{ sessionId, threadId, status: "idle", pollInterval, progress }`
 - `action="cancel"|"interrupt"` → `{ success: true, message }`
 - `action="fork"` → `{ sessionId, threadId, status: "idle", pollInterval }`
 - `action="clean"` → `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }`
@@ -354,6 +355,7 @@ List, inspect, cancel, interrupt, fork, batch-clean sessions, or clean backgroun
 ```json
 { "action": "list" }
 { "action": "get", "sessionId": "sess_abc123", "includeSensitive": true }
+{ "action": "resume", "sessionId": "sess_abc123" }
 { "action": "cancel", "sessionId": "sess_abc123" }
 { "action": "interrupt", "sessionId": "sess_abc123" }
 { "action": "fork", "sessionId": "sess_abc123" }
@@ -488,7 +490,40 @@ Sessions auto-clean up in the background, checked once a minute:
 
 `codex_session(action="clean")` removes matching terminal sessions on demand: filter with `statuses` and `olderThanMs`, preview with `dryRun`, and keep the persisted state with `includeDisk=false`.
 
-After a server restart, sessions that were `running` or `waiting_approval` come back as `status: "error"` with a `cancelledReason` naming the restart, and their last result stays readable.
+### Sessions whose server went away
+
+A session belongs to one codex-mcp process, which records itself in the session's own
+directory as `owner.json`. Two clients can run two servers over one state directory:
+each writes its own sessions, neither touches the other's, and both list all of them.
+
+When a server dies or its client disconnects, the sessions it was driving are left with
+no owner. A turn that was running at that moment comes back as `status: "abandoned"` —
+the work was cut off, nothing failed, and the thread can be picked up. Every entry of
+`action="list"` carries:
+
+- `activity` — the last line Codex said it was working on, so the list reads
+  "abandoned — Counting the TypeScript files in src" rather than an id and a status;
+- `owner` — `{ pid, state: "self" | "other" }` for a session a running server holds,
+  and nothing at all for a session that is free.
+
+`codex_session(action="resume", sessionId)` starts a codex process for a free session
+and restores its thread from Codex's rollout log, including the turn it was interrupted
+in; the session becomes `idle` and `codex_reply` carries it on. A session another running
+server holds is refused with `SESSION_HELD_BY_OTHER_SERVER`.
+
+Looking for interrupted work, from a fresh session:
+
+```json
+{ "action": "list" }
+```
+
+Pick the entry with no `owner` and read its `activity` and `lastActiveAt`, then:
+
+```json
+{ "action": "resume", "sessionId": "sess_abc123" }
+```
+
+and reply to it as to any idle session.
 
 ## Error Model
 
@@ -544,7 +579,7 @@ MCP Client ←stdio→ codex-mcp server ←stdio→ codex exec --json ←→ Cod
 
 Each session spawns an independent child process. In app-server mode, it uses the JSON-RPC protocol over stdio. In exec fallback mode, it uses `codex exec --json` JSONL output with `codex exec resume` for multi-turn context.
 
-Session metadata, child-process identity, and turn results are persisted to disk (`~/.codex-mcp/state/` by default), one directory per session, written atomically. A PID lockfile at the state directory root keeps a single writer. On startup the server recovers persisted sessions, prunes them by age (7 days), count (200), and total size (500 MB), and reaps orphaned child processes left by the previous run after verifying each PID's recorded spawn time.
+Session metadata, child-process identity, and turn results are persisted to disk (`~/.codex-mcp/state/` by default), one directory per session, written atomically. Ownership is per session: `owner.json` in each directory names the codex-mcp process driving it, so several servers share one state directory. On startup a server takes over the sessions whose owner is gone, leaves the rest alone, prunes by age (7 days), count (200), and total size (500 MB), and reaps the orphaned child processes of the sessions it took over after verifying each PID's recorded spawn time.
 
 ### Environment Variables
 

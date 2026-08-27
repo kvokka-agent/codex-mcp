@@ -9,7 +9,7 @@ import type {
 } from "../types.js";
 import type { SessionManager } from "../session/manager.js";
 
-const TERMINAL_STATUSES = new Set<SessionStatus>(["idle", "error", "cancelled"]);
+const TERMINAL_STATUSES = new Set<SessionStatus>(["idle", "error", "cancelled", "abandoned"]);
 
 export function interactionStateForStatus(status: SessionStatus): InteractionState {
   if (status === "waiting_approval") return "waiting_input";
@@ -56,6 +56,7 @@ export function coerceProgressForStatus(
   if (status === "idle") phase = "finished";
   else if (status === "error") phase = "error";
   else if (status === "cancelled") phase = "cancelled";
+  else if (status === "abandoned") phase = "abandoned";
   else if (status === "waiting_approval") phase = "waiting_approval";
 
   return {

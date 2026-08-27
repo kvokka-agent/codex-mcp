@@ -3,12 +3,44 @@ import type { SessionManager } from "../src/session/manager.js";
 import { executeCodexSession } from "../src/tools/codex-session.js";
 
 describe("executeCodexSession", () => {
-  it("returns list output", async () => {
-    const listSessions = vi.fn(() => [{ sessionId: "sess_1", status: "idle" }]);
-    const sessionManager = { listSessions } as unknown as SessionManager;
+  it("lists every session of the state directory, not only the ones in memory", async () => {
+    const listAllSessions = vi.fn(() => [
+      { sessionId: "sess_1", status: "idle", owner: { pid: 1, state: "self" } },
+      { sessionId: "sess_2", status: "abandoned", activity: "Reading src/index.ts" },
+    ]);
+    const sessionManager = { listAllSessions } as unknown as SessionManager;
 
     const result = await executeCodexSession({ action: "list" }, sessionManager);
-    expect(result).toEqual({ sessions: [{ sessionId: "sess_1", status: "idle" }] });
+    expect(result).toEqual({
+      sessions: [
+        { sessionId: "sess_1", status: "idle", owner: { pid: 1, state: "self" } },
+        { sessionId: "sess_2", status: "abandoned", activity: "Reading src/index.ts" },
+      ],
+    });
+  });
+
+  it("resumes a session by id and refuses the action without one", async () => {
+    const resumeSession = vi.fn(async () => ({
+      sessionId: "sess_1",
+      threadId: "thr_1",
+      status: "idle" as const,
+      pollInterval: 120_000,
+    }));
+    const sessionManager = { resumeSession } as unknown as SessionManager;
+
+    await expect(
+      executeCodexSession({ action: "resume", sessionId: "sess_1" }, sessionManager)
+    ).resolves.toEqual({
+      sessionId: "sess_1",
+      threadId: "thr_1",
+      status: "idle",
+      pollInterval: 120_000,
+    });
+    expect(resumeSession).toHaveBeenCalledWith("sess_1");
+
+    await expect(executeCodexSession({ action: "resume" }, sessionManager)).resolves.toEqual(
+      expect.objectContaining({ isError: true, error: expect.stringContaining("INVALID_ARGUMENT") })
+    );
   });
 
   it("returns INVALID_ARGUMENT when sessionId is missing for required actions", async () => {

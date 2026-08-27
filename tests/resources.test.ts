@@ -233,7 +233,7 @@ describe("resources", () => {
     expect(features.checkLongPoll).toBe(true);
     expect(features.compatWarnings).toBe(true);
     expect(features.diskPersistence).toBe(true);
-    expect(features.diskResume).toBe(false);
+    expect(features.diskResume).toBe(true);
     expect(features.dynamicTools).toBe(false);
 
     const runtime = payload.runtime as Record<string, unknown>;

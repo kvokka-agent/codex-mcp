@@ -17,6 +17,8 @@ import {
   EFFORT_LEVELS,
   SUMMARY_MODES,
   SESSION_ACTIONS,
+  SESSION_STATUSES,
+  CLEANABLE_STATUSES,
   CHECK_ACTIONS,
   ALL_DECISIONS,
   DEFAULT_APPROVAL_TIMEOUT_MS,
@@ -83,7 +85,7 @@ export function createServer(
 
   const publicSessionInfoSchema = z.object({
     sessionId: z.string(),
-    status: z.enum(["running", "idle", "waiting_approval", "error", "cancelled"]),
+    status: z.enum(SESSION_STATUSES),
     createdAt: z.string(),
     lastActiveAt: z.string(),
     cancelledAt: z.string().optional(),
@@ -92,6 +94,16 @@ export function createServer(
     approvalPolicy: z.enum(APPROVAL_POLICIES).optional(),
     sandbox: z.enum(SANDBOX_MODES).optional(),
     pendingRequestCount: z.number().int(),
+    activity: z
+      .string()
+      .optional()
+      .describe("The last line the session said it was doing, in Codex's own words."),
+    owner: z
+      .object({ pid: z.number().int(), state: z.enum(["self", "other"]) })
+      .optional()
+      .describe(
+        "The codex-mcp process holding the session. Absent means nobody holds it, which is what makes it resumable."
+      ),
   });
 
   const errorOutputShape = {
@@ -557,30 +569,31 @@ export function createServer(
     "codex_session",
     {
       title: "Manage Sessions",
-      description: `Session actions: list, get, cancel, interrupt, fork, clean, clean_background_terminals.
+      description: `Session actions: list, get, resume, cancel, interrupt, fork, clean, clean_background_terminals.
 
-- list: sessions in memory.
+- list: every session of the state directory, this server's and every other server's. Each carries \`activity\` — what it last said it was doing — and \`owner\`, the process holding it. A session with status \`abandoned\` and no \`owner\` was cut off when its server went away and can be resumed.
 - get: details. includeSensitive defaults to false; true adds threadId/cwd/profile/config.
+- resume: pick an \`abandoned\` session back up and drive it from here. Codex restores the thread from its rollout log, including the turn it was interrupted in; continue with codex_reply. A session another running server holds is refused.
 - cancel: terminal.
 - interrupt: stop current turn.
 - fork: clone current thread into a new session; source remains unchanged.
-- clean: batch-remove idle/error/cancelled sessions, optionally from disk too.
+- clean: batch-remove idle/error/cancelled sessions, optionally from disk too. Pass statuses:["abandoned"] to drop cut-off sessions instead of resuming them.
 - clean_background_terminals: ask app-server to clean stale background terminals for this thread.`,
       inputSchema: {
         action: z.enum(SESSION_ACTIONS),
         sessionId: z
           .string()
           .optional()
-          .describe("Required for get/cancel/interrupt/fork/clean_background_terminals"),
+          .describe("Required for get/resume/cancel/interrupt/fork/clean_background_terminals"),
         includeSensitive: z
           .boolean()
           .default(false)
           .optional()
           .describe("Include cwd/config/threadId/profile in get (default: false)"),
         statuses: z
-          .array(z.enum(["idle", "error", "cancelled"]))
+          .array(z.enum(CLEANABLE_STATUSES))
           .optional()
-          .describe("For clean only. Default: idle/error/cancelled."),
+          .describe("For clean only. Default: idle/error/cancelled — abandoned only on request."),
         olderThanMs: z
           .number()
           .int()
@@ -596,7 +609,7 @@ export function createServer(
       outputSchema: {
         sessions: z.array(publicSessionInfoSchema).optional(),
         sessionId: z.string().optional(),
-        status: z.enum(["running", "idle", "waiting_approval", "error", "cancelled"]).optional(),
+        status: z.enum(SESSION_STATUSES).optional(),
         createdAt: z.string().optional(),
         lastActiveAt: z.string().optional(),
         cancelledAt: z.string().optional(),
@@ -605,6 +618,8 @@ export function createServer(
         approvalPolicy: z.enum(APPROVAL_POLICIES).optional(),
         sandbox: z.enum(SANDBOX_MODES).optional(),
         pendingRequestCount: z.number().int().optional(),
+        activity: z.string().optional(),
+        owner: z.object({ pid: z.number().int(), state: z.enum(["self", "other"]) }).optional(),
         threadId: z.string().optional(),
         cwd: z.string().optional(),
         profile: z.string().optional(),
@@ -670,7 +685,7 @@ respond_user_input: answer a user-input action.`,
       inputSchema: codexCheckInputSchema,
       outputSchema: {
         sessionId: z.string().optional(),
-        status: z.enum(["running", "idle", "waiting_approval", "error", "cancelled"]).optional(),
+        status: z.enum(SESSION_STATUSES).optional(),
         pollInterval: z
           .number()
           .int()

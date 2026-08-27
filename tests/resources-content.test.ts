@@ -559,23 +559,25 @@ describe("resource documents served over MCP", () => {
           lastSeq: -1,
           result: null,
           pidInfo: null,
+          owner: { kind: "unowned" },
           sessionDir: join(process.cwd(), "does-not-exist"),
         },
       ]);
       const recovered = manager.getSession("sess_recovered");
 
-      // The session survived the restart as history: it is listed and carries its restart reason.
+      // The session came back as work that was cut off, not as a failure.
       expect(compat.features.diskPersistence).toBe(true);
-      expect(compat.featureNotes.diskPersistence).toContain("read back at startup");
+      expect(compat.featureNotes.diskPersistence).toContain("every server sharing the directory");
       expect(compat.runtimeWarnings).toEqual([]);
       expect(manager.listSessions().map((s) => s.sessionId)).toContain("sess_recovered");
+      expect(recovered.status).toBe("abandoned");
       expect(compat.featureNotes.diskResume).toContain(`status \`${recovered.status}\``);
 
-      // It cannot take another turn: no codex process stands behind it.
+      // It cannot take another turn until it is resumed: no codex process stands behind it.
       const replied = manager.replyToSession("sess_recovered", "carry on");
-      await expect(replied).rejects.toThrow(ErrorCode.SESSION_NOT_FOUND);
-      expect(compat.features.diskResume).toBe(false);
-      expect(compat.featureNotes.diskResume).toContain(ErrorCode.SESSION_NOT_FOUND);
+      await expect(replied).rejects.toThrow(ErrorCode.SESSION_NOT_RUNNING);
+      expect(compat.features.diskResume).toBe(true);
+      expect(compat.featureNotes.diskResume).toContain(ErrorCode.SESSION_NOT_RUNNING);
     } finally {
       manager.destroy();
     }
@@ -951,11 +953,12 @@ describe("runtime metadata in server-info and compat-report", () => {
 
     expect(off.features.diskPersistence).toBe(false);
     expect(off.featureNotes.diskPersistence).toContain("memory only");
+    expect(off.featureNotes.diskPersistence).toContain("restart drops their history");
     expect(off.runtimeWarnings).toContain(
       "Disk persistence is off: sessions are held in memory only and are lost when the server restarts."
     );
     expect(on.features.diskPersistence).toBe(true);
-    expect(on.featureNotes.diskPersistence).toContain("read back at startup");
+    expect(on.featureNotes.diskPersistence).toContain("every server sharing the directory");
     expect(on.runtimeWarnings).toEqual([]);
   });
 

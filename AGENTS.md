@@ -122,13 +122,15 @@ src/
 ├── persistence/
 │   ├── index.ts
 │   ├── atomic-writer.ts
-│   ├── lockfile.ts
+│   ├── session-owner.ts
+│   ├── process-identity.ts
 │   ├── event-log.ts
 │   ├── recovery-scanner.ts
 │   └── retention.ts
 ├── session/
 │   ├── manager.ts
 │   ├── persistence.ts
+│   ├── activity-marker.ts
 │   └── orphan-reaper.ts
 ├── tools/
 │   ├── codex.ts

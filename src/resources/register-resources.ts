@@ -105,11 +105,13 @@ const RESOURCE_CATALOG: ResourceCatalogEntry[] = [
 const ERROR_CODE_HINTS: Record<ErrorCode, string> = {
   [ErrorCode.INVALID_ARGUMENT]: "Input shape/value mismatch. Fix payload and retry.",
   [ErrorCode.SESSION_NOT_FOUND]: "Unknown sessionId or already cleaned up.",
+  [ErrorCode.SESSION_HELD_BY_OTHER_SERVER]:
+    "Another running codex-mcp holds this session. Its own client drives it; this one lists it and nothing more.",
   [ErrorCode.SESSION_BUSY]: "Session is running or waiting approval. Poll until idle/error.",
   [ErrorCode.SESSION_NOT_RUNNING]: "Action requires running/waiting_approval session.",
   [ErrorCode.REQUEST_NOT_FOUND]: "requestId was resolved, stale, or never existed.",
   [ErrorCode.TIMEOUT]: "Operation timed out. Retry or use a longer timeout where supported.",
-  [ErrorCode.CANCELLED]: "Session was cancelled and cannot be resumed.",
+  [ErrorCode.CANCELLED]: "Session was cancelled and cannot be continued.",
   [ErrorCode.APP_SERVER_START_FAILED]: "codex app-server failed to boot. Check CLI install/path.",
   [ErrorCode.THREAD_FORK_RESUME_FAILED]:
     "Forked thread could not resume in new process. Retry fork from current source session.",
@@ -511,16 +513,17 @@ function buildCompatReport(deps: ResourceDeps, codexCliVersion: string | null): 
         checkLongPoll: true,
         compatWarnings: true,
         diskPersistence: deps.diskPersistence,
-        diskResume: false,
+        diskResume: deps.diskPersistence,
         dynamicTools: false,
         toolPermissionControl: false,
       },
       featureNotes: {
         diskPersistence: deps.diskPersistence
-          ? "Session metadata, events and results are written under the state directory and read back at startup, so a restart keeps session history readable."
-          : "The state directory was not claimed at startup — another codex-mcp holds its lock, or it could not be written. Sessions are held in memory only, and a restart drops their history.",
-        diskResume:
-          "A recovered session has no codex process behind it. `codex_reply` on it fails with SESSION_NOT_FOUND, and a session that was running at shutdown comes back as status `error` with a restart reason.",
+          ? "Session metadata, events and results are written under the state directory and read back on every listing, so every server sharing the directory sees the same sessions."
+          : "The state directory could not be written, so sessions are held in memory only and a restart drops their history.",
+        diskResume: deps.diskPersistence
+          ? 'A session whose server went away mid-turn comes back as status `abandoned` and carries the last line it said it was doing. `codex_session(action="resume")` starts a codex process for it and restores the thread from Codex\'s rollout log; `codex_reply` then carries it on. Replying to a session that has not been resumed fails with SESSION_NOT_RUNNING.'
+          : "Without a state directory nothing survives a restart, so there is nothing to resume.",
       },
       recommendedSettings: {
         codexCheck: {

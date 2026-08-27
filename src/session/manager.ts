@@ -7,6 +7,13 @@ import { AppServerClient } from "../app-server/client.js";
 import type { ICodexClient } from "../app-server/client-interface.js";
 import type { AppServerSpawnOptions } from "../app-server/lifecycle.js";
 import type { PidDetails } from "./persistence.js";
+import {
+  describeOwner,
+  ownerState,
+  readOwner,
+  type OwnerState,
+  type RecoveredSession,
+} from "../persistence/index.js";
 import { resolveAndValidateCwd } from "../utils/cwd.js";
 import { redactPaths } from "../utils/redact.js";
 import { interactionStateForStatus, recommendedNextActionForStatus } from "../utils/execution.js";
@@ -39,6 +46,7 @@ import {
   type EffortLevel,
   type Personality,
   type SessionInfo,
+  type SessionOwnership,
   type SessionSignal,
   type SessionStatus,
   type SandboxMode,
@@ -56,6 +64,8 @@ import {
   type TurnResult,
   type NetworkPolicyAmendment,
   ErrorCode,
+  SESSION_STATUSES,
+  type CleanableStatus,
   COMMAND_DECISIONS,
   FILE_CHANGE_DECISIONS,
   DEFAULT_POLL_INTERVAL,
@@ -126,7 +136,14 @@ export interface SessionManagerOptions {
 
 const MAX_WAITERS_PER_SESSION = 4;
 const EFFORT_FALLBACK_LEVEL: EffortLevel = "low";
-const CLEANABLE_SESSION_STATUSES: SessionStatus[] = ["idle", "error", "cancelled"];
+/**
+ * What `clean` removes when the caller names no statuses.
+ *
+ * `abandoned` is not among them: a session nobody holds is what somebody looking
+ * for interrupted work is about to resume, so removing it takes a caller asking
+ * for it by name.
+ */
+const DEFAULT_CLEANABLE_STATUSES: CleanableStatus[] = ["idle", "error", "cancelled"];
 const REASONING_PROGRESS_METHODS = new Set<string>([
   Methods.REASONING_TEXT_DELTA,
   Methods.REASONING_SUMMARY_DELTA,
@@ -154,8 +171,8 @@ export class SessionManager {
   private createClient: () => ICodexClient;
   /** Optional disk persistence adapter. */
   readonly persistence: import("./persistence.js").SessionPersistence | null;
-  /** Track last persisted status to avoid redundant writes. */
-  private lastPersistedStatus = new Map<string, string>();
+  /** Fingerprint of the metadata last written per session, to skip a write that changes nothing. */
+  private lastPersistedMeta = new Map<string, string>();
   /** Sessions for which a TTL warning event has already been emitted this cycle. */
   private ttlWarningEmitted = new Set<string>();
   /** Sessions whose event persistence already reported a failure — keeps stderr to one line. */
@@ -180,26 +197,28 @@ export class SessionManager {
   }
 
   /**
-   * Ingest recovered sessions from disk into the in-memory session store.
-   * Marks previously-running sessions as error, preserves completed results.
+   * Take into memory the sessions of this state directory that no other server holds.
+   *
+   * A session another running codex-mcp owns is left where it is: that server is
+   * writing into the directory, and two servers on one Codex thread would each
+   * answer half the turn. A session whose owner is gone is adopted, its stale
+   * claim removed, and a turn that was running when the owner died becomes
+   * `abandoned` — the work was cut off, and `resume` picks the thread back up.
    *
    * Every field comes from the recovered metadata, timestamps included: a session that
    * was cut off keeps the instant it was last active, so idle cleanup and the retention
    * policy — which both date a session by `lastActiveAt` — still measure its real age
    * after a restart instead of measuring the restart.
    */
-  ingestRecovered(
-    recovered: import("../persistence/recovery-scanner.js").RecoveredSession[]
-  ): void {
+  ingestRecovered(recovered: RecoveredSession[]): void {
     for (const rec of recovered) {
       if (this.sessions.has(rec.sessionId)) continue; // skip duplicates
-      const VALID_STATUSES: Set<string> = new Set([
-        "running",
-        "idle",
-        "waiting_approval",
-        "error",
-        "cancelled",
-      ]);
+      if (rec.owner.kind === "held") {
+        console.error(
+          `[codex-mcp] Session ${rec.sessionId} is ${describeOwner(rec.owner)} — leaving it to that server`
+        );
+        continue;
+      }
       const createdAt = normalizeOptionalString(rec.meta.createdAt);
       const lastActiveAt = normalizeOptionalString(rec.meta.lastActiveAt);
       if (!createdAt || !lastActiveAt) {
@@ -212,14 +231,7 @@ export class SessionManager {
         );
         continue;
       }
-      const wasActive = rec.meta.status === "running" || rec.meta.status === "waiting_approval";
-      const knownStatus = VALID_STATUSES.has(rec.meta.status)
-        ? (rec.meta.status as SessionStatus)
-        : null;
-      // A status the manager cannot read is an unrestorable session, which is an error —
-      // and the reason says so, so "codex failed" stays apart from "the status was
-      // unreadable".
-      const resolvedStatus: SessionStatus = wasActive ? "error" : (knownStatus ?? "error");
+      const resolvedStatus = statusOfRecovered(rec);
       const recoveredReason = normalizeOptionalString(rec.meta.cancelledReason);
       const session: SessionInfo = {
         sessionId: rec.meta.sessionId,
@@ -228,16 +240,21 @@ export class SessionManager {
         createdAt,
         lastActiveAt,
         cancelledAt: normalizeOptionalString(rec.meta.cancelledAt),
-        cancelledReason: wasActive
-          ? "Server restarted while session was active"
-          : (recoveredReason ??
-            (knownStatus === null
-              ? `Recovered with a status this server cannot read: ${JSON.stringify(rec.meta.status)}`
-              : undefined)),
+        cancelledReason:
+          recoveredReason ??
+          (resolvedStatus === "error" && !SESSION_STATUSES.includes(rec.meta.status as never)
+            ? `Recovered with a status this server cannot read: ${JSON.stringify(rec.meta.status)}`
+            : undefined),
         cwd: normalizeOptionalString(rec.meta.cwd),
         model: normalizeOptionalString(rec.meta.model),
+        profile: normalizeOptionalString(rec.meta.profile),
         approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
         sandbox: rec.meta.sandbox as SandboxMode | undefined,
+        personality: rec.meta.personality as Personality | undefined,
+        config: isRecord(rec.meta.config) ? rec.meta.config : undefined,
+        developerInstructions: normalizeOptionalString(rec.meta.developerInstructions),
+        approvalTimeoutMs:
+          typeof rec.meta.approvalTimeoutMs === "number" ? rec.meta.approvalTimeoutMs : undefined,
         pendingRequests: new Map(),
         lastResult: rec.result as TurnResult | undefined,
         lastAgentMessageText:
@@ -249,18 +266,20 @@ export class SessionManager {
         progressState: {
           lastEventAt: lastActiveAt,
           tokens: extractTokens((rec.result as TurnResult | undefined)?.turn),
+          activity: rec.lastActivity,
         },
       };
       this.registerSession(session);
+      // The owner is gone, so its claim on the session goes with it.
+      if (rec.owner.kind === "gone") this.persistence?.release(rec.sessionId);
       // Resume event log sequence numbering
       if (rec.lastSeq >= 0) {
         this.persistence?.setEventLogNextSeq(rec.sessionId, rec.lastSeq + 1);
       }
       this.attachEventSink(session);
-      // Persist the updated status if it changed
-      if (wasActive) {
-        this.persistSessionIfChanged(session);
-      }
+      // Record what the session now is, so the next reader sees `abandoned`
+      // rather than a `running` status no process backs.
+      if (resolvedStatus !== rec.meta.status) this.persistSessionIfChanged(session);
     }
   }
 
@@ -304,16 +323,20 @@ export class SessionManager {
   }
 
   /**
-   * Best-effort persist session metadata to disk when status changes.
-   * Deduplicates writes if status hasn't changed since last persist.
+   * Write the session's metadata to disk when any of it changed.
+   *
+   * The comparison covers every field meta.json carries, so the thread id
+   * reaches the file the moment Codex hands it over rather than at the next
+   * status change — a session cut off inside its first turn is resumable only
+   * if its thread id is already there.
    */
   private persistSessionIfChanged(session: SessionInfo): void {
     if (!this.persistence) return;
-    const lastStatus = this.lastPersistedStatus.get(session.sessionId);
-    if (lastStatus === session.status) return;
+    const fingerprint = metaFingerprint(session);
+    if (this.lastPersistedMeta.get(session.sessionId) === fingerprint) return;
     try {
       this.persistence.writeSessionMeta(session);
-      this.lastPersistedStatus.set(session.sessionId, session.status);
+      this.lastPersistedMeta.set(session.sessionId, fingerprint);
     } catch (err) {
       this.reportPersistFailure(PERSIST_OP_META, session.sessionId, err);
     }
@@ -415,6 +438,7 @@ export class SessionManager {
       profile: spawnOpts.profile,
       approvalPolicy: spawnOpts.approvalPolicy,
       sandbox: spawnOpts.sandbox,
+      personality: advanced?.personality,
       config: spawnOpts.config,
       pendingRequests: new Map(),
       lastAgentMessageText: undefined,
@@ -426,9 +450,10 @@ export class SessionManager {
     this.clients.set(sessionId, client);
     this.attachEventSink(session);
 
-    // Persist session metadata to disk
+    // Persist session metadata to disk and claim the session for this server
     try {
       this.persistence?.writeSessionMeta(session);
+      this.persistence?.claim(sessionId);
     } catch (err) {
       // The first write is what creates the session directory: without it nothing about
       // this session survives a restart, while the compat report still says
@@ -457,6 +482,10 @@ export class SessionManager {
       });
       const threadId = extractThreadId(threadStartResult);
       session.threadId = threadId;
+      // The first turn can run for minutes and a client can die inside it. The
+      // thread id is what a resume needs, so it goes to disk on arrival rather
+      // than with the next status change.
+      this.persistSessionIfChanged(session);
 
       // Build input array
       const input: UserInput[] = [{ type: "text", text: prompt }];
@@ -527,6 +556,12 @@ export class SessionManager {
     if (session.status === "cancelled") {
       throw new Error(
         `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be resumed`
+      );
+    }
+    if (session.status === "abandoned") {
+      throw new Error(
+        `Error [${ErrorCode.SESSION_NOT_RUNNING}]: Session '${sessionId}' was abandoned by the server that held it — ` +
+          `call codex_session(action="resume") to pick its thread back up`
       );
     }
     if (session.status !== "idle" && session.status !== "error") {
@@ -665,8 +700,57 @@ export class SessionManager {
 
   // ── Session Management ───────────────────────────────────────────
 
+  /** The sessions this server holds in memory. */
   listSessions(): PublicSessionInfo[] {
-    return Array.from(this.sessions.values()).map(toPublicInfo);
+    return Array.from(this.sessions.values()).map((session) =>
+      toPublicInfo(session, this.ownershipOfSession(session.sessionId))
+    );
+  }
+
+  /**
+   * Every session of the state directory: the ones this server drives, the ones
+   * another running server drives, and the ones nobody holds.
+   *
+   * The directory is read on each call rather than at startup, because the
+   * picture changes underneath: a server that died a minute ago left sessions
+   * this one can resume, and a server that started a minute ago holds sessions
+   * this one must not touch.
+   */
+  listAllSessions(): PublicSessionInfo[] {
+    const byId = new Map<string, PublicSessionInfo>();
+    for (const rec of this.scanDisk()) {
+      byId.set(rec.sessionId, publicInfoOfRecovered(rec));
+    }
+    for (const session of this.sessions.values()) {
+      // A session with a live client here is this server's, and memory is ahead
+      // of the file. One without a client was adopted or given up, and the
+      // directory carries whatever has happened to it since.
+      if (this.clients.has(session.sessionId) || !byId.has(session.sessionId)) {
+        byId.set(
+          session.sessionId,
+          toPublicInfo(session, this.ownershipOfSession(session.sessionId))
+        );
+      }
+    }
+    return Array.from(byId.values()).sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt));
+  }
+
+  /** Read the state directory, reporting a scan that failed rather than serving an empty one. */
+  private scanDisk(): RecoveredSession[] {
+    if (!this.persistence) return [];
+    try {
+      return this.persistence.recoverSessions();
+    } catch (err) {
+      console.error(`[codex-mcp] Failed to read the state directory: ${describeError(err)}`);
+      return [];
+    }
+  }
+
+  /** Who holds a session: this server while it drives it, else whatever owner.json says. */
+  private ownershipOfSession(sessionId: string): SessionOwnership | undefined {
+    if (this.clients.has(sessionId)) return { pid: process.pid, state: "self" };
+    if (!this.persistence) return undefined;
+    return ownershipOf(ownerState(readOwner(this.persistence.sessionDir(sessionId))));
   }
 
   /**
@@ -715,7 +799,8 @@ export class SessionManager {
     includeSensitive = false
   ): PublicSessionInfo | SensitiveSessionInfo {
     const session = this.getSessionOrThrow(sessionId);
-    return includeSensitive ? toSensitiveInfo(session) : toPublicInfo(session);
+    const owner = this.ownershipOfSession(sessionId);
+    return includeSensitive ? toSensitiveInfo(session, owner) : toPublicInfo(session, owner);
   }
 
   getLastResult(sessionId: string): TurnResult | undefined {
@@ -874,7 +959,7 @@ export class SessionManager {
   }
 
   async cleanSessions(options?: {
-    statuses?: Array<"idle" | "error" | "cancelled">;
+    statuses?: CleanableStatus[];
     olderThanMs?: number;
     dryRun?: boolean;
     includeDisk?: boolean;
@@ -887,7 +972,7 @@ export class SessionManager {
     /** Set when a session directory removal was asked for and failed; names the sessions. */
     message?: string;
   }> {
-    const statuses = new Set(options?.statuses ?? CLEANABLE_SESSION_STATUSES);
+    const statuses = new Set<string>(options?.statuses ?? DEFAULT_CLEANABLE_STATUSES);
     const olderThanMs = options?.olderThanMs;
     const dryRun = options?.dryRun ?? false;
     const includeDisk = options?.includeDisk ?? true;
@@ -895,7 +980,7 @@ export class SessionManager {
     const matchedSessionIds: string[] = [];
 
     for (const [sessionId, session] of Array.from(this.sessions.entries())) {
-      if (!statuses.has(session.status as "idle" | "error" | "cancelled")) continue;
+      if (!statuses.has(session.status)) continue;
       if (typeof olderThanMs === "number" && olderThanMs > 0) {
         const lastActive = new Date(session.lastActiveAt).getTime();
         if (!Number.isFinite(lastActive)) continue;
@@ -948,6 +1033,129 @@ export class SessionManager {
     };
   }
 
+  /**
+   * Pick a session nobody holds back up and drive it from here.
+   *
+   * `thread/resume` reads the thread out of Codex's own rollout log, so the
+   * model comes back knowing where it was cut off — including a turn that never
+   * finished, which arrives with `status: "interrupted"`. The session is then a
+   * normal idle session: `codex_reply` carries it on.
+   */
+  async resumeSession(sessionId: string): Promise<SessionStartResult> {
+    const session = this.adoptForResume(sessionId);
+    if (!session.threadId) {
+      throw new Error(
+        `Error [${ErrorCode.INTERNAL}]: Session '${sessionId}' records no threadId, so there is no thread to resume`
+      );
+    }
+    const threadId = session.threadId;
+    const previousStatus = session.status;
+
+    const client = this.createClient();
+    this.clients.set(sessionId, client);
+    this.attachEventSink(session);
+
+    try {
+      this.registerHandlers(sessionId, client, session.approvalTimeoutMs);
+      await client.start({
+        profile: session.profile,
+        model: session.model,
+        approvalPolicy: session.approvalPolicy,
+        sandbox: session.sandbox,
+        config: session.config,
+      });
+      await client.threadResume({
+        threadId,
+        developerInstructions: session.developerInstructions,
+      });
+      session.threadId = threadId;
+      session.status = "idle";
+      session.lastActiveAt = new Date().toISOString();
+      this.persistence?.claim(sessionId);
+      this.persistSessionIfChanged(session);
+      this.notifyWaiters(sessionId);
+
+      return {
+        sessionId,
+        threadId,
+        status: "idle" as const,
+        pollInterval: DEFAULT_POLL_INTERVAL,
+        progress: this.getProgress(sessionId),
+      };
+    } catch (err) {
+      session.status = previousStatus;
+      this.clients.delete(sessionId);
+      try {
+        await client.destroy();
+      } catch (destroyErr) {
+        console.error(
+          `[codex-mcp] Failed to destroy the client of a resume that did not take: session=${sessionId} error=${describeError(destroyErr)}`
+        );
+      }
+      throw new Error(
+        `Error [${ErrorCode.THREAD_FORK_RESUME_FAILED}]: Failed to resume thread '${threadId}' of session '${sessionId}': ${redactPaths(describeError(err))}`
+      );
+    }
+  }
+
+  /**
+   * The session `resume` is about to drive, taken into memory when it is only on disk.
+   *
+   * The owner is read from the directory at this moment rather than from what
+   * startup found: a server that started since then may hold the session now,
+   * and resuming it would put two servers on one thread.
+   */
+  private adoptForResume(sessionId: string): SessionInfo {
+    if (this.clients.has(sessionId)) {
+      throw new Error(
+        `Error [${ErrorCode.SESSION_BUSY}]: Session '${sessionId}' is already open on this server`
+      );
+    }
+    if (this.persistence) {
+      const state = ownerState(readOwner(this.persistence.sessionDir(sessionId)));
+      if (state.kind === "held") {
+        throw new Error(
+          `Error [${ErrorCode.SESSION_HELD_BY_OTHER_SERVER}]: Session '${sessionId}' is ${describeOwner(state)}`
+        );
+      }
+    }
+
+    const known = this.sessions.get(sessionId);
+    if (known) return known;
+
+    const found = this.scanDisk().find((rec) => rec.sessionId === sessionId);
+    if (!found) {
+      throw new Error(`Error [${ErrorCode.SESSION_NOT_FOUND}]: Session '${sessionId}' not found`);
+    }
+    this.ingestRecovered([found]);
+    const adopted = this.sessions.get(sessionId);
+    if (!adopted) {
+      throw new Error(
+        `Error [${ErrorCode.SESSION_NOT_FOUND}]: Session '${sessionId}' is on disk and could not be taken into memory`
+      );
+    }
+    return adopted;
+  }
+
+  /**
+   * Write down where the sessions of this server stand and give up its claims.
+   *
+   * It runs before anything a shutdown waits on: a turn that was running when
+   * the client went away is `abandoned`, which is what it is, and the claims are
+   * gone whether or not the rest of the shutdown gets to finish.
+   */
+  finalizeForShutdown(): void {
+    for (const session of this.sessions.values()) {
+      if (session.status === "running" || session.status === "waiting_approval") {
+        session.status = "abandoned";
+        session.lastActiveAt = new Date().toISOString();
+      }
+      this.persistSessionIfChanged(session);
+    }
+    this.persistence?.flushAll();
+    this.persistence?.releaseAll();
+  }
+
   async forkSession(sessionId: string): Promise<SessionStartResult> {
     const session = this.getSessionOrThrow(sessionId);
 
@@ -987,6 +1195,7 @@ export class SessionManager {
       profile: session.profile,
       approvalPolicy: session.approvalPolicy,
       sandbox: session.sandbox,
+      personality: session.personality,
       config: session.config,
       pendingRequests: new Map(),
       developerInstructions: session.developerInstructions,
@@ -996,6 +1205,7 @@ export class SessionManager {
     this.clients.set(newSessionId, newClient);
     this.attachEventSink(newSession);
     this.persistSessionIfChanged(newSession);
+    this.persistence?.claim(newSessionId);
 
     try {
       // Register handlers before start to prevent unhandled "error" events
@@ -1016,6 +1226,7 @@ export class SessionManager {
         developerInstructions: session.developerInstructions,
       });
       newSession.threadId = forkedThreadId;
+      this.persistSessionIfChanged(newSession);
 
       return {
         sessionId: newSessionId,
@@ -1497,6 +1708,7 @@ export class SessionManager {
             normalizeOptionalString(p.threadId) ?? normalizeOptionalString(thread?.id);
           if (notifiedThreadId && notifiedThreadId !== session.threadId) {
             session.threadId = notifiedThreadId;
+            this.persistSessionIfChanged(session);
           }
           // Thread.status is a ThreadStatus union object whose variant is named
           // by `type` — "notLoaded" | "idle" | "systemError" | "active"
@@ -2098,7 +2310,7 @@ export class SessionManager {
     // After the removal: a waiter is woken by the session being gone, which is a
     // change it acts on, and its next read reports the session as not found.
     this.notifyWaiters(sessionId);
-    this.lastPersistedStatus.delete(sessionId);
+    this.lastPersistedMeta.delete(sessionId);
     this.ttlWarningEmitted.delete(sessionId);
     this.sessionNotifiers.delete(sessionId);
     this.lastNotifiedSignal.delete(sessionId);
@@ -2115,8 +2327,10 @@ export class SessionManager {
           this.persistence.removeSession(sessionId);
           diskRemoved = true;
         } else {
-          // Flush what the session buffered and drop its log handle.
+          // Flush what the session buffered, drop its log handle, and give the
+          // session back: this server no longer drives it.
           this.persistence.destroySessionLog(sessionId);
+          this.persistence.release(sessionId);
         }
       }
     } catch (err) {
@@ -2136,6 +2350,73 @@ export class SessionManager {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
+
+/**
+ * Everything meta.json carries, as one string to compare two writes by.
+ *
+ * `lastActiveAt` is deliberately absent: every notification of a turn moves it,
+ * and writing meta.json for each would put a file write on the hot path without
+ * changing anything a reader acts on.
+ */
+function metaFingerprint(session: SessionInfo): string {
+  return JSON.stringify([
+    session.status,
+    session.threadId,
+    session.model,
+    session.cwd,
+    session.profile,
+    session.approvalPolicy,
+    session.sandbox,
+    session.personality,
+    session.developerInstructions,
+    session.approvalTimeoutMs,
+    session.cancelledAt,
+    session.cancelledReason,
+    session.config,
+  ]);
+}
+
+/**
+ * What a session on disk is now.
+ *
+ * A turn that was running when its owner died is `abandoned`. A session another
+ * server still holds is whatever that server last wrote. A status this build
+ * cannot read leaves the session unrestorable, which is an error.
+ */
+function statusOfRecovered(rec: RecoveredSession): SessionStatus {
+  const recorded = rec.meta.status;
+  const known = SESSION_STATUSES.includes(recorded as never)
+    ? (recorded as SessionStatus)
+    : undefined;
+  if (known === undefined) return "error";
+  const wasActive = known === "running" || known === "waiting_approval";
+  return wasActive && rec.owner.kind !== "held" ? "abandoned" : known;
+}
+
+/** How a listing names the server holding a session, or nothing when none does. */
+function ownershipOf(owner: OwnerState): SessionOwnership | undefined {
+  if (owner.kind === "self") return { pid: owner.owner.pid, state: "self" };
+  if (owner.kind === "held") return { pid: owner.owner.pid, state: "other" };
+  return undefined;
+}
+
+/** A session this server does not hold, as a listing reports it. */
+function publicInfoOfRecovered(rec: RecoveredSession): PublicSessionInfo {
+  return {
+    sessionId: rec.sessionId,
+    status: statusOfRecovered(rec),
+    createdAt: normalizeOptionalString(rec.meta.createdAt) ?? "",
+    lastActiveAt: normalizeOptionalString(rec.meta.lastActiveAt) ?? "",
+    cancelledAt: normalizeOptionalString(rec.meta.cancelledAt),
+    cancelledReason: normalizeOptionalString(rec.meta.cancelledReason),
+    model: normalizeOptionalString(rec.meta.model),
+    approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
+    sandbox: rec.meta.sandbox as SandboxMode | undefined,
+    pendingRequestCount: 0,
+    activity: rec.lastActivity,
+    owner: ownershipOf(rec.owner),
+  };
+}
 
 function pollIntervalForStatus(status: SessionStatus): number | undefined {
   if (status === "waiting_approval") return WAITING_APPROVAL_POLL_INTERVAL;
@@ -2595,7 +2876,7 @@ function signalOf(session: SessionInfo): string {
   return `${session.status}|${openRequests}|${session.lastResult?.completedAt ?? ""}`;
 }
 
-function toPublicInfo(session: SessionInfo): PublicSessionInfo {
+function toPublicInfo(session: SessionInfo, owner?: SessionOwnership): PublicSessionInfo {
   return {
     sessionId: session.sessionId,
     status: session.status,
@@ -2608,12 +2889,14 @@ function toPublicInfo(session: SessionInfo): PublicSessionInfo {
     sandbox: session.sandbox,
     pendingRequestCount: Array.from(session.pendingRequests.values()).filter((r) => !r.resolved)
       .length,
+    activity: session.progressState?.activity,
+    owner,
   };
 }
 
-function toSensitiveInfo(session: SessionInfo): SensitiveSessionInfo {
+function toSensitiveInfo(session: SessionInfo, owner?: SessionOwnership): SensitiveSessionInfo {
   return {
-    ...toPublicInfo(session),
+    ...toPublicInfo(session, owner),
     threadId: session.threadId,
     cwd: session.cwd,
     profile: session.profile,
