@@ -1,218 +1,157 @@
-# Repo Agent Instructions (codex-mcp)
+# Repo agent instructions (codex-mcp)
 
-This repository is a TypeScript (ESM) MCP server that wraps the OpenAI Codex CLI. It spawns `codex app-server` child processes (or falls back to `codex exec --json` for variants without app-server) and exposes their capabilities as MCP tools.
+A TypeScript (ESM) MCP server that wraps the OpenAI Codex CLI. It spawns
+`codex app-server` child processes — or falls back to `codex exec --json` for
+binaries without an app-server — and exposes their capability as five MCP tools.
 
-## Document Boundary (AGENTS vs DESIGN)
+## Where the truth lives
 
-- `AGENTS.md` is the **execution handbook** for contributors and coding agents.
-- `docs/DESIGN.md` is the **architecture/protocol source of truth**, including the full dependency-upgrade playbook.
-- To avoid drift and duplication, this file intentionally keeps architecture details brief and links to `docs/DESIGN.md` for full protocol semantics.
+- **[docs/DESIGN.md](docs/DESIGN.md)** — architecture, the protocol, persistence,
+  the error model. Read it before changing anything under `src/app-server/`,
+  `src/session/` or `src/persistence/`.
+- **[docs/CODEX-UPGRADE.md](docs/CODEX-UPGRADE.md)** — the procedure for a Codex
+  CLI, SDK or zod upgrade, and the audit record of the last one.
+- **[docs/TOOLS.md](docs/TOOLS.md)** and **[docs/SESSIONS.md](docs/SESSIONS.md)** —
+  the public surface. A change to a tool schema changes these.
+- **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** — running your build in a real
+  client, and what `npm run check` covers.
+- **[docs/GLOSSARY.md](docs/GLOSSARY.md)** — the terms. Use them; do not invent
+  synonyms.
 
-## Project Philosophy & Scope
+This file holds what none of those do: the guardrails a change has to keep.
 
-The core principle: **reuse the user's local Codex configuration, and expose the maximum of `codex app-server` capability through the fewest tools and the least configuration, while keeping execution non-blocking and permission handling complete.**
+## The principle
 
-> **Same-machine assumption**: the MCP client and the codex-mcp server run on one machine and talk over stdio (local IPC); child processes share the local filesystem and `~/.codex/config.toml`. The project supports no cross-machine deployment.
+Reuse the user's local Codex configuration, and expose the maximum of
+`codex app-server` capability through the fewest tools and the least
+configuration, while keeping execution non-blocking and permission handling
+complete.
 
-### Minimum Tools Snapshot
+| Tool | Responsibility | Blocking |
+| --- | --- | --- |
+| `codex` | start a session | waits for the thread only, or for `waitForResult` |
+| `codex_reply` | continue a session | returns at once, or waits for `waitForResult` |
+| `codex_setup` | report executable, auth and backend readiness | sync |
+| `codex_session` | list, get, resume, cancel, interrupt, fork, clean, clean background terminals | sync |
+| `codex_check` | report status and answer what the session waits for | sync, or long-poll on `waitMs` |
 
-| Tool            | Responsibility                                                  | Blocking                             |
-| --------------- | --------------------------------------------------------------- | ------------------------------------ |
-| `codex`         | start new session                                               | wait init only, or `waitForResult`   |
-| `codex_reply`   | continue session                                                | return immediately, or `waitForResult` |
-| `codex_setup`   | report codex executable, auth and app-server readiness          | sync                                 |
-| `codex_session` | list/get/cancel/interrupt/fork/clean/clean background terminals | sync                                 |
-| `codex_check`   | report status + respond to approvals/user input                 | sync, or long-poll via `waitMs`      |
-
-## Upgrade Execution Entry
-
-When updating interfaces, SDKs, or protocol behavior, follow the full handbook in:
-
-- `docs/DESIGN.md` → **Dependency And SDK Upgrade Handbook (Single Source Of Truth)**
-
-### One-Shot Update Commands
-
-For a single end-to-end update pass, run:
-
-1. `codex --version`
-2. `codex app-server generate-json-schema --experimental --out codex-schema`
-3. `git diff --name-only -- codex-schema`
-4. `git diff -- codex-schema/metadata.json`
-
-If step 3 shows changes, continue with the full checklist in `docs/DESIGN.md` and sync docs/tests in the same PR.
-
-### Codex CLI And Schema Maintenance Rules
-
-- The schema decides. `codex-schema/` records what actually arrives on the wire; `src/app-server/protocol.ts` is only this repo's model of it, and the model is the side that drifts.
-- Before branching on a field of a protocol message, open its definition in `codex-schema/` and read whether the field exists and whether `required` lists it. `AgentMessageThreadItem` requires `id`, `text`, `type` and carries no `status`, so a `status === "completed"` check there matched nothing and returned every foreground answer empty.
-- `tests/protocol-schema.test.ts` holds the two sides together: it reads method names and parameter shapes from `codex-schema/*.json` and the types from the TypeScript compiler, and fails on drift. Methods the schema does not carry are listed there with their reason. A new protocol field gets a check added to that file.
-- Codex CLI upgrades are protocol upgrades: `codex-mcp` spawns `codex app-server` and speaks its JSON-RPC wire format.
-- Any time `codex --version` changes (including pre-releases), re-run the One-Shot Update Commands to detect protocol/schema drift.
-- If `codex-schema/` has diffs, treat it as the source of truth and follow the full upgrade playbook in `docs/DESIGN.md`.
-- If there are no diffs, record the run (date + codex version + result) in `docs/DESIGN.md` so the repo stays auditable.
-
-### Maintenance Runbook (Step-by-step)
-
-This section is a practical execution checklist.
-`docs/DESIGN.md` remains the source of truth for protocol semantics and compatibility policy.
-
-1. Environment baseline
-   - `node -v` and `npm -v`
-   - `codex --version`
-2. Update Codex CLI (target version)
-   - Pick an explicit version for reproducibility (recommended), or use `@latest` only when intentionally upgrading.
-   - Example (pinned): `npm install -g @openai/codex@0.106.0`
-   - Example (moving): `npm install -g @openai/codex@latest`
-   - Verify: `codex --version`
-3. App-server schema baseline (Codex protocol)
-   - Regenerate vendored schema: `codex app-server generate-json-schema --experimental --out codex-schema`
-   - Inspect drift:
-     - `git diff --name-only -- codex-schema`
-     - `git diff -- codex-schema/metadata.json`
-   - Decision gate:
-     - If there are diffs: treat `codex-schema/` as the truth and follow the full upgrade playbook in `docs/DESIGN.md`.
-     - If there are no diffs: update "Latest Run Record" in `docs/DESIGN.md` (date + codex version + result).
-4. NPM dependency update check
-   - Direct deps/devDeps: `npm outdated`
-   - Full tree (incl. transitive): `npm outdated --all`
-   - If applying updates, prefer staying within current semver ranges unless a major bump is explicitly planned.
-5. Verification (required before merging interface/protocol changes)
-   - `npm run typecheck && npm test && npm run build`
-6. Closure
-   - Ensure docs/tests are updated when protocol/schema changes.
-   - Do not commit generated build output (`dist/`) or secrets.
-
-### Upgrade Gate (Execution View)
-
-- Use `docs/DESIGN.md` as the only full protocol/compatibility spec; do not duplicate detailed rules here.
-- Before merging an interface update, complete the DESIGN checklist sections for diff analysis, implementation sync, and docs/tests closure.
-- Enforce strict compatibility policy: do not introduce compatibility behavior outside the DESIGN whitelist.
-- Run `npm run typecheck && npm test && npm run build` in the same change.
+A session is driven by exactly one codex-mcp process, which records itself in
+the session's directory as `owner.json`. Several servers share one state
+directory; each acts only on what it owns, a session left behind by a dead
+server is `abandoned`, and `codex_session(action="resume")` picks it back up.
 
 ## Prerequisites
 
-- Node.js >= 18
-- `codex` CLI installed and available in PATH
-- Verify with `codex --version`
+Node.js >= 18, and a `codex` on PATH that answers `codex --version`.
 
-## Quick Commands
+## Commands
 
-- Install deps: `npm install`
-- Build: `npm run build`
-- Dev watch: `npm run dev`
-- Start server: `npm start`
-- Typecheck: `npm run typecheck`
-- Test: `npm test`
+`npm run check` is the gate — lint, format, types, tests, build, the two runtime
+scripts and the markdown lint. Run it before opening a pull request. `npm run`
+lists the rest.
 
-## Project Layout
+## Layout
 
 ```text
 src/
-├── index.ts
-├── server.ts
-├── types.ts
-├── app-server/
-│   ├── client.ts
-│   ├── client-interface.ts
-│   ├── exec-client.ts
-│   ├── detect.ts
-│   ├── codex-bin.ts
-│   ├── protocol.ts
+├── index.ts            startup, shutdown, the transport
+├── server.ts           tool registration and the zod schemas
+├── types.ts            shared constants, statuses, defaults
+├── app-server/         the two backends and the wire protocol
+│   ├── client.ts             app-server JSON-RPC over stdio
+│   ├── client-interface.ts   what a backend must implement
+│   ├── exec-client.ts        the codex exec --json fallback
+│   ├── detect.ts             which backend this binary carries
+│   ├── codex-bin.ts          how to spawn it on this platform
+│   ├── protocol.ts           method names and message types
 │   └── lifecycle.ts
-├── persistence/
+├── persistence/        the state directory
 │   ├── index.ts
 │   ├── atomic-writer.ts
-│   ├── session-owner.ts
-│   ├── process-identity.ts
+│   ├── session-owner.ts      owner.json and what a recorded owner is
+│   ├── process-identity.ts   pid liveness and start time
 │   ├── event-log.ts
 │   ├── recovery-scanner.ts
-│   └── retention.ts
+│   ├── retention.ts
+│   └── fs-errors.ts
 ├── session/
-│   ├── manager.ts
-│   ├── persistence.ts
+│   ├── manager.ts            the state machine
+│   ├── persistence.ts        the disk adapter
 │   ├── activity-marker.ts
 │   └── orphan-reaper.ts
-├── tools/
-│   ├── codex.ts
-│   ├── codex-reply.ts
-│   ├── codex-session.ts
-│   ├── codex-check.ts
-│   └── codex-setup.ts
+├── tools/              one file per tool
 ├── utils/
-│   ├── codex-executable.ts
-│   ├── config.ts
-│   ├── cwd.ts
-│   ├── execution.ts
-│   ├── files.ts
-│   ├── redact.ts
-│   ├── stdin-shutdown.ts
-│   ├── stdio-guard.ts
-│   └── turn-compat.ts
-└── resources/
-    └── register-resources.ts
+└── resources/register-resources.ts
 ```
 
-## Architecture Snapshot (Execution Context)
+## Conventions
 
-- Single MCP stdio server, per-session child process (`app-server` or `exec --json` fallback).
-- `codex` / `codex_reply` are non-blocking: they return early and rely on `codex_check(action="poll")`.
-- `codex_check` answers with the state of a session — status, progress, open actions, terminal result — and never with the events of its turn; those go to `events.jsonl` and to Codex's own rollout log.
-- Approval flow is asynchronous: app-server request -> buffered action -> client response via `codex_check`.
-- Exec fallback: auto-detected at startup; uses `codex exec --json` + `exec resume` for multi-turn. `CODEX_MCP_MODE` forces the mode; `CODEX_MCP_COMMAND` / `CODEX_MCP_PATH` select the binary.
-- Disk persistence writes session metadata, PID info, and results under `CODEX_MCP_STATE_DIR` (default `~/.codex-mcp/state`); startup recovers sessions, prunes old ones, and reaps orphan child processes.
-- `codex_check(action="poll")` supports long polling through `waitMs`, which returns on a status change, a new action or the end of the turn; `codex` / `codex_reply` support a foreground wait through `waitForResult`.
-- Full protocol behavior, event mapping, and lifecycle diagrams live in `docs/DESIGN.md`.
+- ESM and TypeScript. Local imports carry the `.js` suffix.
+- `unknown` plus narrowing, never `any`.
+- Validation lives in the zod schemas of `src/server.ts`.
+- Tool responses stay MCP-safe: `{ content, structuredContent?, isError }`.
+- Diagnostics go to `console.error`. stdout is the MCP channel and carries
+  nothing but JSON-RPC.
+- `approvalPolicy` and `sandbox` stay required on `codex`.
+- Sensitive fields stay redacted unless the caller passes
+  `includeSensitive: true`.
 
-## Code Style & Conventions
+## Guardrails
 
-- ESM + TypeScript (`"type": "module"`).
-- Local imports use `.js` suffix.
-- Prefer `unknown` + narrowing over `any`.
-- Keep validation in Zod schemas (`src/server.ts`).
-- Keep tool responses MCP-safe: `{ content, structuredContent?, isError }`.
-- Log with `console.error` only; do not write logs to stdout (reserved for MCP stdio).
+These are the patterns a change keeps, each of them written after it was broken:
 
-## Security Defaults
+- Register app-server handlers before `client.start()`, or an `error` event
+  crashes the process unhandled.
+- Wrap approval-timeout callbacks in try/catch — the client may already be
+  destroyed.
+- Keep `cancelSession` idempotent for an already-cancelled session.
+- On `TURN_COMPLETED`, capture `activeTurnId` before clearing it, or
+  `lastResult.turnId` comes out empty.
+- If `replyToSession` fails during `turnStart`, put the session back to `error`.
+- Serialize `-c key=value` by type: primitives through `String()`, objects and
+  arrays through `JSON.stringify()`.
+- `.unref()` every cleanup, shutdown and force-kill timer, or Node cannot exit.
+- Call `notifyWaiters(sessionId)` after any state change, or long-poll callers
+  block until their `waitMs` budget expires.
+- Verify a pid's recorded spawn time before signalling it; an unverified pid is
+  skipped, never killed.
+- **Carry through what a dependency answered.** An unreadable directory is not
+  an empty one, an `EPERM` from `process.kill(pid, 0)` means the process lives
+  under another user, and a turn that produced no recognized event did not
+  succeed. A fallback that manufactures a value turns a failure into plausible
+  data.
+- **Ask a path for the value, not for its existence.** `existsSync` answers
+  `false` on `EACCES` too, so the check hides the permission denial.
+- **Best-effort covers only what the caller cannot act on** — clearing a timer,
+  signalling a dead process, losing a race with a concurrent unlink. Keep every
+  persistence call in try/catch so a read-only state directory degrades
+  persistence instead of failing the tool call, and log what failed.
+- Read the schema before branching on a protocol field.
+  `AgentMessageThreadItem` requires `id`, `text` and `type` and carries no
+  `status`, so a `status === "completed"` check there matched nothing and
+  returned every foreground answer empty.
 
-- Preserve the "minimum tools, maximum capability" principle.
-- `approvalPolicy` and `sandbox` are required in `codex`.
-- Sensitive fields remain redacted by default; require explicit `includeSensitive=true`.
-- Never expose environment variables in public session output.
+## Tests
 
-## Key Implementation Patterns
+- Vitest, `describe`/`it`, a fresh `SessionManager` in `beforeEach` and
+  `manager.destroy()` in `afterEach`.
+- Deterministic, no network, the codex child process mocked.
+- A test asserts on a value the code under test produced.
+- `tests/protocol-schema.test.ts` holds `protocol.ts` against `codex-schema/`
+  and fails on drift. A new protocol field gets a check there.
+- `tests/server-lifecycle.e2e.test.ts` drives the built server as a child
+  process against `tests/helpers/fake-codex.mjs`, and skips itself on Windows —
+  the stand-in is a `.mjs` and Windows spawns by extension. What it measures
+  carries evidence from Linux and macOS only;
+  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#run-the-checks) lists it.
 
-These patterns are non-negotiable guardrails:
+## Git and pull requests
 
-- Register app-server handlers before `client.start()` to avoid unhandled `error` event crashes.
-- Wrap approval-timeout callbacks (`respondToServer`) in try-catch; client may already be destroyed.
-- Keep `cancelSession` idempotent for already-cancelled sessions.
-- On `TURN_COMPLETED`, capture `activeTurnId` before clearing it, or `lastResult.turnId` becomes empty.
-- If `replyToSession` fails during `turnStart`, restore session state to `error`.
-- Serialize `-c key=value` config values consistently: primitives via `String()`, objects/arrays via `JSON.stringify()`.
-- Call `.unref()` on cleanup/shutdown/force-kill timers to avoid blocking Node.js exit.
-- Pass through what a dependency answered. The failure surfaces at the point it happened instead of turning into a plausible value: an unreadable directory is not an empty one, an `EPERM` from `process.kill(pid, 0)` means the process lives under another user, and a turn that produced no recognized event did not succeed.
-- Ask a path for the value you need rather than for its existence: `existsSync` answers `false` on `EACCES` too, so the check itself hides the permission denial.
-- Best-effort covers work whose outcome the caller cannot act on: clearing a timer, signalling an already-dead process, losing a race with a concurrent unlink. A failure the caller would act on stays visible. Keep every persistence call in try/catch so a read-only or locked `STATE_DIR` degrades persistence instead of failing the tool call, and log what failed with `console.error`.
-- Call `notifyWaiters(sessionId)` after any state change, or long-poll callers block until their `waitMs` budget expires.
-- Verify a PID's recorded spawn time before signalling it in the orphan reaper; an unverified PID is skipped, never killed.
-
-## Testing Expectations
-
-- Add or update Vitest coverage for schema validation, session behavior, and error handling.
-- Keep tests deterministic and avoid real network calls.
-- Mock `codex app-server` subprocess communication.
-- Follow `describe/it` structure with fresh `SessionManager` in `beforeEach` and `manager.destroy()` in `afterEach`.
-- `tests/server-lifecycle.e2e.test.ts` drives the built server as a child process against `tests/helpers/fake-codex.mjs`, and skips itself on Windows: the stand-in is a `.mjs` handed to the server as `CODEX_MCP_PATH`, and Windows spawns an executable by its extension. The three lifetime fixes it measures — a startup that exited before it served MCP, a stdin EOF that never ended the process, and a shutdown that hung and left the state directory reading `running` — are therefore proven on Linux and macOS only; the pieces underneath them are covered per platform by the unit tests.
-
-## Git / PR Workflow
-
-- Branch names: `feat/<name>`, `fix/<name>`, `refactor/<name>`.
-- Use Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`).
-- Run `npm run build && npm test` before opening PR.
-- Do not commit generated or sensitive artifacts (`dist/`, `node_modules/`, `.env`).
-- Open every pull request against `kvokka/codex-mcp`. A fork such as
+- Branches: `feat/<name>`, `fix/<name>`, `refactor/<name>`, `docs/<name>`.
+- Conventional Commits.
+- Open every pull request against `kvokka/codex-mcp`; a fork such as
   `kvokka-agent/codex-mcp` only holds the branch:
   `gh pr create --repo kvokka/codex-mcp --base master --head <fork-owner>:<branch>`.
-- A `release:major`, `release:minor` or `release:patch` label on the pull request cuts
-  the release when it merges. `docs/RELEASING.md` states the path from the label to the
-  published package and names the six files that carry the version.
+- A `release:major`, `release:minor` or `release:patch` label cuts the release
+  when the pull request merges — [docs/RELEASING.md](docs/RELEASING.md).
+- Never commit `dist/`, `node_modules/` or `.env`.

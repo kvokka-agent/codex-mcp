@@ -96,7 +96,9 @@ The bump refuses to run when a file no longer carries the number of version
 references the list expects, so a half-updated tree never reaches a tag.
 
 Adding a place: give it an entry in `TARGETS` with a pattern matching exactly the
-text around the version, and the existing test covers it.
+text around the version, and add its path to the list `tests/release.test.ts`
+pins. The per-target checks then cover the new entry on their own; the list is
+an equality check and fails until it names the file.
 
 ## The CHANGELOG
 
