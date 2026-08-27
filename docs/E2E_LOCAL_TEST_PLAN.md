@@ -272,7 +272,7 @@ After `codex` or `codex_reply`:
 2. No check returns the events of the turn. Codex writes the whole run to its rollout log under `~/.codex/sessions/**/rollout-*.jsonl`, and codex-mcp writes its own view to `events.jsonl` in the state directory. Read either from disk; the tool reports state.
 3. Terminal statuses are `idle`, `error`, `cancelled`. `abandoned` also ends the turn, but the session is resumable rather than finished.
 4. `result` arrives with the first check that sees a terminal status and carries the turn's final answer. Later checks of the same turn report the status alone.
-5. `waitMs` long-polls: the call blocks until the status changes, a new action arrives, or the turn ends. Reasoning, command output and token counters do not end the wait. It is capped at `120000` ms, and a session accepts 4 concurrent long polls — the fifth returns immediately instead of waiting.
+5. `waitMs` long-polls: the call blocks until the status changes, a new action arrives, or the turn ends. Reasoning, command output and token counters do not end the wait. It is capped at `3600000` ms and cut further to what the MCP client sits through in one tool call, and a session accepts 4 concurrent long polls — the fifth returns immediately instead of waiting.
 6. `progress` reports `phase`, `lastEventAt`, `activeTurnId`, `pendingActionCount`, `tokens` when the backend reports them, and `activity` — one line in Codex's own words saying what it is doing, absent until the turn writes one. `interactionState` and `recommendedNextAction` tell you what to call next.
 7. Inputs the tool no longer takes — `cursor`, `nextCursor`, `maxEvents`, `responseMode`, `pollOptions` — are refused with a message naming what replaced them.
 
@@ -378,7 +378,7 @@ Then poll (wait at least 2 minutes after starting the session before first poll)
 {
   "action": "poll",
   "sessionId": "<sessionId>",
-  "waitMs": 120000
+  "waitMs": 3600000
 }
 ```
 
@@ -617,7 +617,7 @@ Checks:
 
 Checks:
 
-1. Start a long `running` session, then check with `waitMs: 120000`. The call sits through the model's reasoning and its command output, and returns when the status changes, an action arrives, or the turn ends.
+1. Start a long `running` session, then check with `waitMs: 3600000`. The call sits through the model's reasoning and its command output, and returns when the status changes, an action arrives, or the turn ends — or, if none of the three happens, just inside the client's own ceiling on one tool call.
 2. Check an `idle` session with `waitMs: 5000`. It returns at once with the terminal `result`; a second check returns the same status without the result.
 3. Issue 5 concurrent long polls on one session. Four wait; the fifth returns immediately instead of blocking.
 
