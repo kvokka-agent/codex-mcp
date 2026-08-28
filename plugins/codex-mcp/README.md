@@ -3,7 +3,7 @@
 Runs OpenAI Codex from Claude Code. One connection installs three parts that
 work together:
 
-- the **`codex-mcp` MCP server**, pinned to `@kvokka/codex-mcp@2.5.0`;
+- the **`codex-mcp` MCP server**, pinned to `@kvokka/codex-mcp@2.6.0`;
 - the **`codex` subagent**, a proxy: it hands the delegator's prompt to Codex
   unchanged, follows the turn in rounds of five minutes, and hands back what
   Codex answered together with the line-by-line progress of the run;
