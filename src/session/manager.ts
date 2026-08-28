@@ -1740,6 +1740,164 @@ export class SessionManager {
     return client;
   }
 
+  /** `thread/started` — the notification that carries the real thread id. */
+  private onThreadStarted(session: SessionInfo, method: string, p: Record<string, unknown>): void {
+    const thread = isRecord(p.thread) ? p.thread : undefined;
+    // Update session.threadId if the notification provides a real thread ID
+    // (e.g. ExecClient returns a synthetic ID from threadStart(), then the
+    // real ID arrives via the thread.started JSONL event).
+    const notifiedThreadId =
+      normalizeOptionalString(p.threadId) ?? normalizeOptionalString(thread?.id);
+    if (notifiedThreadId && notifiedThreadId !== session.threadId) {
+      session.threadId = notifiedThreadId;
+      this.persistSessionIfChanged(session);
+    }
+    // Thread.status is a ThreadStatus union object whose variant is named
+    // by `type` — "notLoaded" | "idle" | "systemError" | "active"
+    // (codex-schema/v2/ThreadStartedNotification.json → Thread.status →
+    // ThreadStatus), the same shape `thread/status/changed` carries.
+    const threadStatus = isRecord(thread?.status) ? thread.status : undefined;
+    recordEvent(session, "progress", {
+      method,
+      ...p,
+      threadId: notifiedThreadId,
+      status: normalizeOptionalString(threadStatus?.type),
+    });
+  }
+
+  /** `turn/completed` — the notification that writes `lastResult`. */
+  private onTurnCompleted(session: SessionInfo, method: string, p: Record<string, unknown>): void {
+    const turnObj = p.turn as Record<string, unknown> | undefined;
+    const knownTurnId = normalizeOptionalString(turnObj?.id) ?? session.activeTurnId;
+    if (knownTurnId === undefined) {
+      // `turn/completed` carries `turn.id`; an empty one here says the notification
+      // did not, and it is never used to route anything — a response goes back by
+      // its JSON-RPC id and a poll by `requestId`.
+      console.error(
+        `[codex-mcp] turn/completed carries no turn id: session=${session.sessionId} — reporting lastResult.turnId as ""`
+      );
+    }
+    const completedTurnId = knownTurnId ?? "";
+    // The protocol Turn carries `{error, id, items, status}` and no final
+    // text (codex-schema/ServerNotification.json → definitions.Turn), so
+    // app-server mode always answers from `lastAgentMessageText`. `output`
+    // is ExecClient's own addition, set from the last `item.completed`
+    // agentMessage of the turn (src/app-server/exec-client.ts).
+    // `output` comes straight off the exec turn and has seen no stripping yet;
+    // `lastAgentMessageText` was stripped when its item completed.
+    const sentTurnOutput = normalizeOptionalString(turnObj?.output);
+    const rawTurnOutput =
+      sentTurnOutput === undefined ? undefined : stripActivityMarkers(sentTurnOutput);
+    const finalText = rawTurnOutput ?? session.lastAgentMessageText;
+    const askedForSchema = this.schemaConstrainedTurns.delete(session.sessionId);
+    session.status = "idle";
+    session.activeTurnId = undefined;
+    session.lastResult = {
+      turnId: completedTurnId,
+      outcome: "completed",
+      text: finalText,
+      output: rawTurnOutput,
+      structuredOutput: askedForSchema ? parseStructuredOutput(finalText) : undefined,
+      // The turn record carries the assistant text a second time, in
+      // `output` or `items[].text`, and that copy has seen no stripping.
+      turn: stripActivityMarkersFromTurn(p.turn),
+      status: turnObj?.status as string | undefined,
+      turnError: turnObj?.error,
+      completedAt: new Date().toISOString(),
+    };
+    // Like `output`, `usage` is ExecClient's addition — it forwards the
+    // `usage` of the exec `turn.completed` record. App-server mode counts
+    // tokens through `thread/tokenUsage/updated` only, so this merge adds
+    // nothing there.
+    mergeProgressTokens(session, extractTokens(turnObj?.usage));
+    recordEvent(session, "result", {
+      method,
+      ...p,
+      turnId: completedTurnId,
+      status: normalizeOptionalString(turnObj?.status),
+    });
+    // Persist idle status + result to disk
+    this.persistSessionIfChanged(session);
+    this.persistResult(session);
+  }
+
+  /** `error` — a failure, or a reconnect when the server says it will retry. */
+  private onErrorNotification(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    const willRetry = p.willRetry as boolean;
+    if (!willRetry) {
+      session.status = "error";
+    }
+    const data: Record<string, unknown> = { method, ...p };
+    // The notification carries `[error, threadId, turnId, willRetry]` and
+    // no text of its own (codex-schema/v2/ErrorNotification.json).
+    // ErrorNotification.error is a TurnError object whose `message` carries the
+    // text; a bare string arrives from builds predating that shape.
+    if (typeof data.error === "string") {
+      data.error = redactPaths(data.error);
+    } else if (isRecord(data.error) && typeof data.error.message === "string") {
+      data.error = { ...data.error, message: redactPaths(data.error.message) };
+    }
+    if (willRetry) {
+      recordEvent(session, "progress", {
+        ...data,
+        method: "codex-mcp/reconnect",
+        sourceMethod: method,
+        phase: "retrying",
+      });
+      return;
+    }
+    recordEvent(session, "error", data);
+    // Persist error status to disk
+    this.persistSessionIfChanged(session);
+  }
+
+  /** `item/agentMessage/delta` — the stream the activity marker is lifted out of. */
+  private onAgentMessageDelta(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    if (typeof p.delta === "string") {
+      let lines = 0;
+      for (const line of scannerOf(session).push(p.delta)) {
+        recordActivity(session, line, normalizeOptionalString(p.itemId));
+        lines += 1;
+      }
+      // A new line is what the person waiting reads, so the poll holding
+      // this session answers with it rather than sitting out its window.
+      if (lines > 0) this.notifyWaiters(session.sessionId);
+    }
+    recordEvent(session, "output", { method, delta: p.delta, itemId: p.itemId });
+  }
+
+  /** `thread/status/changed` — the notification that moves the session status. */
+  private onThreadStatusChanged(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    const threadStatus = isRecord(p.status) ? p.status : undefined;
+    const statusType = normalizeOptionalString(threadStatus?.type);
+    const activeFlags = Array.isArray(threadStatus?.activeFlags)
+      ? (threadStatus.activeFlags as unknown[])
+      : undefined;
+    const nextStatus = sessionStatusForThreadStatus(session, statusType);
+    const statusChanged = nextStatus !== undefined && nextStatus !== session.status;
+    if (statusChanged) session.status = nextStatus;
+    const failed = session.status === "error" && statusChanged;
+    recordEvent(session, failed ? "error" : "progress", {
+      method,
+      ...p,
+      statusType,
+      activeFlags,
+    });
+    if (statusChanged) this.persistSessionIfChanged(session);
+  }
+
   /**
    * Put a pending request in the session and arm its timeout.
    *
@@ -1815,30 +1973,9 @@ export class SessionManager {
       recordProgressObservation(session, method, p);
 
       switch (method) {
-        case Methods.THREAD_STARTED: {
-          const thread = isRecord(p.thread) ? p.thread : undefined;
-          // Update session.threadId if the notification provides a real thread ID
-          // (e.g. ExecClient returns a synthetic ID from threadStart(), then the
-          // real ID arrives via the thread.started JSONL event).
-          const notifiedThreadId =
-            normalizeOptionalString(p.threadId) ?? normalizeOptionalString(thread?.id);
-          if (notifiedThreadId && notifiedThreadId !== session.threadId) {
-            session.threadId = notifiedThreadId;
-            this.persistSessionIfChanged(session);
-          }
-          // Thread.status is a ThreadStatus union object whose variant is named
-          // by `type` — "notLoaded" | "idle" | "systemError" | "active"
-          // (codex-schema/v2/ThreadStartedNotification.json → Thread.status →
-          // ThreadStatus), the same shape `thread/status/changed` carries.
-          const threadStatus = isRecord(thread?.status) ? thread.status : undefined;
-          recordEvent(session, "progress", {
-            method,
-            ...p,
-            threadId: notifiedThreadId,
-            status: normalizeOptionalString(threadStatus?.type),
-          });
+        case Methods.THREAD_STARTED:
+          this.onThreadStarted(session, method, p);
           break;
-        }
 
         case Methods.THREAD_ARCHIVED:
         case Methods.THREAD_UNARCHIVED:
@@ -1852,170 +1989,25 @@ export class SessionManager {
           break;
 
         case Methods.TURN_STARTED:
-          if (session.status === "cancelled") break;
-          {
-            const turnObj = p.turn as Record<string, unknown> | undefined;
-            const status = normalizeOptionalString(turnObj?.status);
-            session.activeTurnId = normalizeOptionalString(turnObj?.id);
-            // The new turn has not said what it is doing yet, and the line the
-            // previous one left would read as if it had.
-            scannerOf(session).reset();
-            if (session.progressState) {
-              session.progressState.activity = undefined;
-              session.progressState.activityAt = undefined;
-            }
-            recordEvent(session, "progress", {
-              method,
-              ...p,
-              turnId: session.activeTurnId,
-              status,
-            });
-          }
+          if (session.status !== "cancelled") onTurnStarted(session, method, p);
           break;
 
-        case Methods.TURN_COMPLETED: {
-          if (session.status === "cancelled") break;
-          const turnObj = p.turn as Record<string, unknown> | undefined;
-          const knownTurnId = normalizeOptionalString(turnObj?.id) ?? session.activeTurnId;
-          if (knownTurnId === undefined) {
-            // `turn/completed` carries `turn.id`; an empty one here says the notification
-            // did not, and it is never used to route anything — a response goes back by
-            // its JSON-RPC id and a poll by `requestId`.
-            console.error(
-              `[codex-mcp] turn/completed carries no turn id: session=${sessionId} — reporting lastResult.turnId as ""`
-            );
-          }
-          const completedTurnId = knownTurnId ?? "";
-          // The protocol Turn carries `{error, id, items, status}` and no final
-          // text (codex-schema/ServerNotification.json → definitions.Turn), so
-          // app-server mode always answers from `lastAgentMessageText`. `output`
-          // is ExecClient's own addition, set from the last `item.completed`
-          // agentMessage of the turn (src/app-server/exec-client.ts).
-          // `output` comes straight off the exec turn and has seen no stripping yet;
-          // `lastAgentMessageText` was stripped when its item completed.
-          const sentTurnOutput = normalizeOptionalString(turnObj?.output);
-          const rawTurnOutput =
-            sentTurnOutput === undefined ? undefined : stripActivityMarkers(sentTurnOutput);
-          const finalText = rawTurnOutput ?? session.lastAgentMessageText;
-          const askedForSchema = this.schemaConstrainedTurns.delete(sessionId);
-          session.status = "idle";
-          session.activeTurnId = undefined;
-          session.lastResult = {
-            turnId: completedTurnId,
-            outcome: "completed",
-            text: finalText,
-            output: rawTurnOutput,
-            structuredOutput: askedForSchema ? parseStructuredOutput(finalText) : undefined,
-            // The turn record carries the assistant text a second time, in
-            // `output` or `items[].text`, and that copy has seen no stripping.
-            turn: stripActivityMarkersFromTurn(p.turn),
-            status: turnObj?.status as string | undefined,
-            turnError: turnObj?.error,
-            completedAt: new Date().toISOString(),
-          };
-          // Like `output`, `usage` is ExecClient's addition — it forwards the
-          // `usage` of the exec `turn.completed` record. App-server mode counts
-          // tokens through `thread/tokenUsage/updated` only, so this merge adds
-          // nothing there.
-          mergeProgressTokens(session, extractTokens(turnObj?.usage));
-          recordEvent(session, "result", {
-            method,
-            ...p,
-            turnId: completedTurnId,
-            status: normalizeOptionalString(turnObj?.status),
-          });
-          // Persist idle status + result to disk
-          this.persistSessionIfChanged(session);
-          this.persistResult(session);
+        case Methods.TURN_COMPLETED:
+          if (session.status !== "cancelled") this.onTurnCompleted(session, method, p);
           break;
-        }
 
-        case Methods.ERROR: {
-          if (session.status === "cancelled") break;
-          const willRetry = p.willRetry as boolean;
-          if (!willRetry) {
-            session.status = "error";
-          }
-          {
-            const data: Record<string, unknown> = { method, ...p };
-            // The notification carries `[error, threadId, turnId, willRetry]` and
-            // no text of its own (codex-schema/v2/ErrorNotification.json).
-            // ErrorNotification.error is a TurnError object whose `message` carries the
-            // text; a bare string arrives from builds predating that shape.
-            if (typeof data.error === "string") {
-              data.error = redactPaths(data.error);
-            } else if (isRecord(data.error) && typeof data.error.message === "string") {
-              data.error = { ...data.error, message: redactPaths(data.error.message) };
-            }
-            if (willRetry) {
-              recordEvent(session, "progress", {
-                ...data,
-                method: "codex-mcp/reconnect",
-                sourceMethod: method,
-                phase: "retrying",
-              });
-            } else {
-              recordEvent(session, "error", data);
-              // Persist error status to disk
-              this.persistSessionIfChanged(session);
-            }
-          }
+        case Methods.ERROR:
+          if (session.status !== "cancelled") this.onErrorNotification(session, method, p);
           break;
-        }
 
         case Methods.AGENT_MESSAGE_DELTA:
-          if (typeof p.delta === "string") {
-            let lines = 0;
-            for (const line of scannerOf(session).push(p.delta)) {
-              recordActivity(session, line, normalizeOptionalString(p.itemId));
-              lines += 1;
-            }
-            // A new line is what the person waiting reads, so the poll holding
-            // this session answers with it rather than sitting out its window.
-            if (lines > 0) this.notifyWaiters(session.sessionId);
-          }
-          recordEvent(session, "output", { method, delta: p.delta, itemId: p.itemId });
+          this.onAgentMessageDelta(session, method, p);
           break;
 
         case Methods.ITEM_STARTED:
         case Methods.ITEM_COMPLETED:
         case Methods.RAW_RESPONSE_ITEM_COMPLETED:
-          {
-            const item = p.item as Record<string, unknown> | undefined;
-            const itemType = item && typeof item.type === "string" ? item.type : undefined;
-            const status = normalizeOptionalString(item?.status);
-            // Only `item/completed` carries a ThreadItem. `rawResponseItem/completed`
-            // carries a ResponseItem — `message` (text in `content[].text`),
-            // `reasoning`, `function_call` and so on
-            // (codex-schema/v2/RawResponseItemCompletedNotification.json → ResponseItem)
-            // — a second, lower-level view of the same turn, so the final answer is
-            // read from the ThreadItem stream alone.
-            const completedItem = method === Methods.ITEM_COMPLETED;
-            // AgentMessageThreadItem carries `id`, `text` and an optional `phase`
-            // and no status (codex-schema/v2/ItemCompletedNotification.json), so
-            // the notification method is what marks the message finished. `phase`
-            // is not required either: providers emit it inconsistently, and the
-            // last completed message of a turn is its answer.
-            if (itemType === "agentMessage" && completedItem && typeof item?.text === "string") {
-              // The markers were lifted out of the deltas that built this text; what
-              // stays is the answer the caller reads.
-              session.lastAgentMessageText = stripActivityMarkers(item.text);
-              scannerOf(session).reset();
-            }
-            // Keep user/agent message-like items as output; everything else is
-            // progress. A PlanThreadItem (`type: "plan"`, EXPERIMENTAL, reaching
-            // this server now that the client asks for `experimentalApi`) states
-            // what the agent means to do rather than what it answers, and it
-            // stays progress like the `item/plan/delta` that builds it.
-            const eventType: SessionEventType =
-              itemType === "agentMessage" || itemType === "userMessage" ? "output" : "progress";
-            recordEvent(session, eventType, {
-              method,
-              ...p,
-              item: p.item,
-              status,
-            });
-          }
+          onItemNotification(session, method, p);
           break;
 
         case Methods.COMMAND_OUTPUT_DELTA: {
@@ -2042,25 +2034,9 @@ export class SessionManager {
           recordEvent(session, "progress", { method, ...p });
           break;
 
-        case Methods.THREAD_STATUS_CHANGED: {
-          const threadStatus = isRecord(p.status) ? p.status : undefined;
-          const statusType = normalizeOptionalString(threadStatus?.type);
-          const activeFlags = Array.isArray(threadStatus?.activeFlags)
-            ? (threadStatus.activeFlags as unknown[])
-            : undefined;
-          const nextStatus = sessionStatusForThreadStatus(session, statusType);
-          const statusChanged = nextStatus !== undefined && nextStatus !== session.status;
-          if (statusChanged) session.status = nextStatus;
-          const failed = session.status === "error" && statusChanged;
-          recordEvent(session, failed ? "error" : "progress", {
-            method,
-            ...p,
-            statusType,
-            activeFlags,
-          });
-          if (statusChanged) this.persistSessionIfChanged(session);
+        case Methods.THREAD_STATUS_CHANGED:
+          this.onThreadStatusChanged(session, method, p);
           break;
-        }
 
         case Methods.THREAD_CLOSED:
         case Methods.THREAD_COMPACTED:
@@ -2931,6 +2907,68 @@ function scannerOf(session: SessionInfo): ActivityMarkerScanner {
  * so a poll answers with each new heading and the person waiting reads the work
  * as it happens. One line per heading is what travels, not the turn's stream.
  */
+/** `turn/started` — the notification that opens a turn and clears the last activity. */
+function onTurnStarted(session: SessionInfo, method: string, p: Record<string, unknown>): void {
+  const turnObj = p.turn as Record<string, unknown> | undefined;
+  const status = normalizeOptionalString(turnObj?.status);
+  session.activeTurnId = normalizeOptionalString(turnObj?.id);
+  // The new turn has not said what it is doing yet, and the line the
+  // previous one left would read as if it had.
+  scannerOf(session).reset();
+  if (session.progressState) {
+    session.progressState.activity = undefined;
+    session.progressState.activityAt = undefined;
+  }
+  recordEvent(session, "progress", {
+    method,
+    ...p,
+    turnId: session.activeTurnId,
+    status,
+  });
+}
+
+/** `item/started`, `item/completed` and `rawResponseItem/completed`. */
+function onItemNotification(
+  session: SessionInfo,
+  method: string,
+  p: Record<string, unknown>
+): void {
+  const item = p.item as Record<string, unknown> | undefined;
+  const itemType = item && typeof item.type === "string" ? item.type : undefined;
+  const status = normalizeOptionalString(item?.status);
+  // Only `item/completed` carries a ThreadItem. `rawResponseItem/completed`
+  // carries a ResponseItem — `message` (text in `content[].text`),
+  // `reasoning`, `function_call` and so on
+  // (codex-schema/v2/RawResponseItemCompletedNotification.json → ResponseItem)
+  // — a second, lower-level view of the same turn, so the final answer is
+  // read from the ThreadItem stream alone.
+  const completedItem = method === Methods.ITEM_COMPLETED;
+  // AgentMessageThreadItem carries `id`, `text` and an optional `phase`
+  // and no status (codex-schema/v2/ItemCompletedNotification.json), so
+  // the notification method is what marks the message finished. `phase`
+  // is not required either: providers emit it inconsistently, and the
+  // last completed message of a turn is its answer.
+  if (itemType === "agentMessage" && completedItem && typeof item?.text === "string") {
+    // The markers were lifted out of the deltas that built this text; what
+    // stays is the answer the caller reads.
+    session.lastAgentMessageText = stripActivityMarkers(item.text);
+    scannerOf(session).reset();
+  }
+  // Keep user/agent message-like items as output; everything else is
+  // progress. A PlanThreadItem (`type: "plan"`, EXPERIMENTAL, reaching
+  // this server now that the client asks for `experimentalApi`) states
+  // what the agent means to do rather than what it answers, and it
+  // stays progress like the `item/plan/delta` that builds it.
+  const eventType: SessionEventType =
+    itemType === "agentMessage" || itemType === "userMessage" ? "output" : "progress";
+  recordEvent(session, eventType, {
+    method,
+    ...p,
+    item: p.item,
+    status,
+  });
+}
+
 function recordActivity(session: SessionInfo, activity: string, itemId?: string): void {
   const next = session.progressState ?? { lastEventAt: new Date().toISOString() };
   next.activity = activity;
