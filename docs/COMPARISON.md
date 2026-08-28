@@ -199,7 +199,7 @@ delegation decision away from the agent making it.
   only. The pieces underneath them are covered per platform by the unit tests.
 - **It has no hooks, no slash commands and cannot ask the person a question.**
   Those belong to the client. For Claude Code, the plugin in this repository
-  supplies the `codex` skill that drives the loop.
+  supplies the subagent and the hook.
 - **The client and the server run on one machine.** Everything travels over
   stdio, child processes share the local filesystem and `~/.codex/config.toml`,
   and every `cwd` is a local path.

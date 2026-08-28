@@ -48,9 +48,11 @@ Three things about that file:
 
 - The path is absolute. Claude Code spawns the server with the project
   directory as its cwd, not the repository's.
-- The server name is `codex-mcp`. The plugin's skill names the tools by that
-  prefix, so a server registered under another name leaves the skill naming
-  tools the session does not have.
+- The server name is `codex-mcp`. The plugin's hook matches tools named
+  `mcp__codex-mcp__*` or `mcp__plugin_codex-mcp_codex-mcp__*`, so a server under
+  a different name is outside the hook's reach — the head agent can call it
+  directly and the `codex` subagent's instructions no longer name the tools it
+  gets.
 - `CODEX_MCP_STATE_DIR` keeps the run out of `~/.codex-mcp/state`, where an
   installed `@kvokka/codex-mcp` keeps its sessions. A development server pointed
   at that directory would leave the installed server's live sessions alone, but
@@ -132,8 +134,8 @@ measured them. The pieces underneath are covered per platform by the unit tests.
 
 ## The plugin from the working tree
 
-`plugins/codex-mcp/` ships the `codex` skill alongside the server. Load it from
-the working tree for one session:
+`plugins/codex-mcp/` ships the `codex` subagent and the `PreToolUse` hook
+alongside the server. Load them from the working tree for one session:
 
 ```bash
 claude --plugin-dir /absolute/path/to/codex-mcp/plugins/codex-mcp \
@@ -142,12 +144,13 @@ claude --plugin-dir /absolute/path/to/codex-mcp/plugins/codex-mcp \
 
 `--strict-mcp-config` is what makes this a test of the local build. The
 plugin's own `.mcp.json` pins the published `bunx @kvokka/codex-mcp@X.Y.Z`;
-strict mode drops every server the flags did not name, leaving the skill from
-the working tree wired to the `codex-mcp` of your `.mcp.json`.
+strict mode drops every server the flags did not name, leaving the agent and
+the hook from the working tree wired to the `codex-mcp` of your `.mcp.json`.
 
-What that session should show: `codex` among the skills, the five
-`mcp__codex-mcp__*` tools, and a Codex turn whose activity lines appear in the
-thread between the polls that carried them.
+What that session should show: `codex-mcp:codex` among the agent types, the
+five `mcp__codex-mcp__*` tools, a direct call to any of them from the main
+thread refused with "codex-mcp is reachable only through the codex subagent",
+and a subagent report whose `progress` block lists what the turn worked on.
 
 Two more commands, neither of which needs a release:
 

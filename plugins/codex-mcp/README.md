@@ -1,11 +1,14 @@
 # codex-mcp — Claude Code plugin
 
-Runs OpenAI Codex from Claude Code. One connection installs two parts:
+Runs OpenAI Codex from Claude Code. One connection installs three parts that
+work together:
 
 - the **`codex-mcp` MCP server**, pinned to `@kvokka/codex-mcp@2.5.0`;
-- the **`codex` skill**, which starts a Codex turn, follows it in rounds of five
-  minutes, writes out what Codex is working on between them, and hands back what
-  Codex answered.
+- the **`codex` subagent**, a proxy: it hands the delegator's prompt to Codex
+  unchanged, follows the turn in rounds of five minutes, and hands back what
+  Codex answered together with the line-by-line progress of the run;
+- a **`PreToolUse` hook**, which lets the Codex tools through for that subagent
+  and denies them to everyone else.
 
 ## Install
 
@@ -29,39 +32,101 @@ To enable it for a whole project without typing the commands, put this in
 ```
 
 The server needs `bun`, which starts it, the Codex CLI on `PATH`, and an OpenAI
-login. Where a session will not start, the skill runs `codex_setup` and reports
-what it said.
+login. Where a session will not start, the subagent runs `codex_setup` and
+reports what it said.
 
 ## Use
 
-Ask for the work. "Have Codex do X" loads the skill, and `/codex` loads it
-outright. It starts one session per task — three tasks are three Codex agents
-running at once — and follows them all in the same rounds.
-
-## What the person watching sees
-
-A start returns at once. The turn is followed with
-`codex_check(action="poll", waitMs=300000)`, which comes back the moment Codex
-says it is working on something new, an action arrives, the status changes or the
-turn ends — and at the end of the five minutes otherwise. After each round the
-skill writes one line:
+Spawn the subagent and hand it the work:
 
 ```text
-codex: reading src/session/manager.ts
-codex: running the test suite — 5 min
-codex: running the test suite — 10 min
+Agent(subagent_type="codex-mcp:codex", prompt="<what Codex should do>")
 ```
 
-`progress.activityStandingMs` is where the number comes from: the server measures
-it from when the line arrived, so the count is right however the rounds fell.
+Spawn one per task. Two of them started in the same message run at once, each on
+its own Codex session, and the head agent carries on with its own work while
+they do — which is what the subagent is for: the turn's polling, its approval
+answers and its transcript stay out of the head agent's context, and only the
+report comes back.
 
-The server also sends each line to the MCP client as `notifications/progress`
-while a poll is held, with a heartbeat every 30 seconds
-(`CODEX_MCP_PROGRESS_HEARTBEAT_MS`), and a client renders those under the call
-that asked for them. That path ends at the caller: a notification sent under a
-subagent's tool call reaches nobody watching the subagent. So the loop runs in
-the thread the person is reading, and the line the skill writes is what puts the
-work in front of them.
+## What the subagent will not do
+
+It is a proxy with no discretion. Whatever the delegator sent goes to Codex as
+the prompt, verbatim: `1 + 1`, a line of gibberish, a page of shell commands
+with hard instructions, a question it could answer in a second. It writes no
+answer of its own, runs no command, reads no file, and rephrases nothing. The
+only thing it decides is how Codex is started — model, effort, approval policy,
+sandbox, cwd, approval timeout.
+
+An answer written by the subagent is shaped exactly like Codex's own, so the
+delegator cannot tell them apart. That is why the rule is absolute rather than a
+preference.
+
+## What comes back
+
+One block, and nothing around it: the `outcome` of the turn, the `sessionId`,
+the `model` Codex ran on, whether the `session` is closed, anything it
+`declined`, the `progress` of the run, and last the `result` — what Codex
+answered, verbatim and whole.
+
+`progress` is every line the subagent wrote while the turn ran, in order:
+
+```text
+progress:
+codex: reading src/session/manager.ts
+codex: running the test suite — 5 min
+codex: running the test suite — 15 min
+```
+
+The number comes from `progress.activityStandingMs`, which the server measures
+from when the line arrived, so it is right however the rounds fell. Put that
+block in front of the person waiting: nothing the subagent writes mid-run is
+rendered anywhere, so its report is the only path those lines travel.
+
+`outcome` is the turn's, read from `lastTurn` and untouched by the close, so a
+finished turn reads `completed` even though the closed session's own status is
+`cancelled`. Where the subagent holds no result it writes
+`result: unavailable — <what the tools answered>`; it never writes an account of
+the work in place of the answer.
+
+## How a turn is followed
+
+`codex` returns as soon as the thread is up — no start blocks for a result — and
+the subagent polls with `codex_check(action="poll", waitMs=300000)`. That call
+comes back the moment Codex says it is working on something new, an action
+arrives, the status changes or the turn ends, and at the end of the five minutes
+otherwise, so each round either reports a change or says the same work is still
+running.
+
+The server also sends each activity line to the MCP client as
+`notifications/progress` while a poll is held, with a heartbeat every 30 seconds
+(`CODEX_MCP_PROGRESS_HEARTBEAT_MS`). A client renders those under the call it
+made itself, so they are for a client driving the tools directly; under a
+subagent's call they reach nobody, which is why the subagent keeps the lines and
+reports them.
+
+## Why the hook
+
+The Codex tools belong to the subagent. The head agent that spawns it must not
+call them itself — a Codex turn is long, it holds a session, and a head agent
+that polls it burns the context the delegation was meant to save.
+
+`permissions.deny` does not express that. A deny rule is inherited by every
+subagent the session spawns, so denying `mcp__…codex-mcp__*` in the head agent
+denies it in the `codex` subagent too, and kills the one caller that needs it.
+Measured, not assumed.
+
+A `PreToolUse` hook draws the line where the deny rule cannot. Claude Code sends
+`agent_type` in the hook payload only when the hook fires inside a subagent (or
+on the main thread of a `--agent` session), so its absence identifies the head
+agent. `hooks/codex-subagent-only.mjs` exits 0 — allow — for `codex-mcp:codex`
+and for a bare `codex`, which is what a copy of the agent placed in a project's
+own `.claude/agents/` is called. Everything else, unreadable input included,
+gets `permissionDecision: deny` and a line telling the caller to spawn the
+subagent.
+
+The hook finds itself through `${CLAUDE_PLUGIN_ROOT}`, so it runs from wherever
+the plugin is installed.
 
 ## Picking work back up after the server went away
 
@@ -70,16 +135,28 @@ client quit, `/mcp` reconnected it, the machine rebooted — the turn it was run
 is left as `abandoned`: nothing failed, nobody holds the session, and Codex still
 carries the thread in its rollout log.
 
-`codex_session(action="list")` answers with every session of the state directory.
-The entries carrying no `owner` are the free ones:
+"Continue what was interrupted" runs as two spawns:
 
-```text
-1. sess_abc123 — Counting the TypeScript files in src — 2026-08-26T11:04:18Z
-2. sess_def456 — Running the test suite — 2026-08-26T09:51:02Z
-```
+1. Spawn the subagent with the question and no `sessionId`. It calls
+   `codex_session(action="list")`, keeps the entries carrying no `owner` — those
+   are the free ones — and answers with a numbered list, one line each, and
+   nothing else:
 
-`codex_session(action="resume", sessionId)` starts a codex process and restores
-the thread, the cut-off turn included; `codex_reply` then carries it on.
+   ```text
+   1. sess_abc123 — Counting the TypeScript files in src — 2026-08-26T11:04:18Z
+   2. sess_def456 — Running the test suite — 2026-08-26T09:51:02Z
+   ```
+
+2. The user picks a number. Spawn a fresh subagent with that `sessionId` and what
+   Codex should do next. It reads the session with `codex_session(action="get")`,
+   sees `abandoned`, calls `codex_session(action="resume", sessionId)` — which
+   starts a codex process and restores the thread, the cut-off turn included —
+   and then continues with `codex_reply`.
+
+The head agent cannot do step 1 itself: the hook denies it the Codex tools, and
+that denial is the whole design. The subagent is the only path the list travels
+to the person asking, which is why it answers the list alone — no session
+started, nothing polled, no context spent.
 
 Two things this cannot do:
 
@@ -96,7 +173,10 @@ Two things this cannot do:
 plugins/codex-mcp/
 ├── .claude-plugin/plugin.json          the manifest
 ├── .mcp.json                           the codex-mcp server, at its pinned version
-└── skills/codex/SKILL.md               start, follow, report
+├── agents/codex.md                     the subagent
+└── hooks/
+    ├── hooks.json                      registers the hook on the Codex tools
+    └── codex-subagent-only.mjs         allow the subagent, deny the rest
 ```
 
 The MCP server is pinned to the exact published version rather than `latest`, so

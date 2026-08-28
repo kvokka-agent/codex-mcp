@@ -17,9 +17,10 @@ check the protocol, not enough to run a turn.
 /plugin install codex-mcp@codex-mcp
 ```
 
-This is the shortest path and the one that brings the `codex` skill with it.
-[../plugins/codex-mcp/README.md](../plugins/codex-mcp/README.md) describes both
-pieces and how to enable them for a whole project from `.claude/settings.json`.
+This is the shortest path and the one that brings the `codex` subagent and the
+hook with it. [../plugins/codex-mcp/README.md](../plugins/codex-mcp/README.md)
+describes the three pieces and how to enable them for a whole project from
+`.claude/settings.json`.
 
 ## Any MCP client, through bunx
 

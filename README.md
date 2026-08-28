@@ -47,8 +47,9 @@ not part of it.
 /plugin install codex-mcp@codex-mcp
 ```
 
-The plugin installs the server and a `codex` skill that starts a turn, follows it
-in rounds of five minutes and writes out what Codex is working on between them.
+The plugin installs the server, a `codex` subagent that proxies one prompt to
+Codex and reports the turn's progress and answer, and a hook that keeps the Codex
+tools inside that subagent.
 [plugins/codex-mcp/README.md](plugins/codex-mcp/README.md) says what each piece
 does.
 

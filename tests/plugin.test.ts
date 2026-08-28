@@ -24,26 +24,44 @@ describe("the server the plugin starts", () => {
   });
 });
 
+describe("the hook the plugin installs", () => {
+  const hooks = JSON.parse(read("plugins/codex-mcp/hooks/hooks.json"));
+  const command = hooks.hooks.PreToolUse[0].hooks[0].command;
+
+  it("runs under bun, the one runtime the plugin already asks for", () => {
+    expect(command).toStartWith("bun ");
+  });
+});
+
 describe("the driver the plugin ships", () => {
-  const skill = read("plugins/codex-mcp/skills/codex/SKILL.md");
+  const agent = read("plugins/codex-mcp/agents/codex.md");
 
   it("polls in rounds short enough to say something between them", () => {
-    expect(skill).toContain('codex_check(action="poll", sessionId, waitMs: 300000)');
+    expect(agent).toContain('codex_check(action="poll", sessionId, waitMs: 300000)');
     // A round of the maximum says nothing to the person waiting for an hour.
-    expect(skill).not.toContain("3600000");
+    expect(agent).not.toContain("3600000");
   });
 
   it("writes the activity line out itself, and says how long it has stood", () => {
-    expect(skill).toContain("codex: <progress.activity>");
-    expect(skill).toContain("codex: <progress.activity> — 15 min");
-    expect(skill).toContain("progress.activityStandingMs");
+    expect(agent).toContain("codex: <progress.activity>");
+    expect(agent).toContain("codex: <progress.activity> — 15 min");
+    expect(agent).toContain("progress.activityStandingMs");
   });
 
-  it("keeps the loop where the person waiting reads it", () => {
-    expect(skill).toContain("A poll made inside a subagent shows them nothing");
+  it("carries those lines back in the report, which is the only path they travel", () => {
+    expect(agent).toContain("progress:");
+    expect(agent).toContain("nothing you write mid-run is rendered anywhere");
   });
 
-  it("hands every request to Codex rather than answering one", () => {
-    expect(skill).toContain("Codex does the work.");
+  it("proxies every prompt to Codex rather than answering one", () => {
+    expect(agent).toContain("You are a proxy.");
+    // The three the driver kept answering itself instead of forwarding.
+    expect(agent).toContain("1 + 1");
+    expect(agent).toContain("прпгшукрпагкышщп");
+    expect(agent).toContain("A page of shell commands");
+  });
+
+  it("keeps its own decisions to how Codex is started", () => {
+    expect(agent).toContain("**What you decide is only how Codex is started**");
   });
 });

@@ -28,8 +28,9 @@ resume, and no activity marker. [DESIGN.md](DESIGN.md) states what each
 mode reaches.
 
 **the plugin** — the Claude Code plugin published from this repository: the MCP
-server, and a `codex` skill that starts a turn, follows it in rounds of five
-minutes and writes out what Codex is working on between them.
+server, a `codex` subagent that proxies one prompt to Codex and reports the
+turn's progress and answer, and a `PreToolUse` hook that keeps the Codex tools
+inside that subagent.
 [plugins/codex-mcp/README.md](../plugins/codex-mcp/README.md) describes it.
 
 ## The work
