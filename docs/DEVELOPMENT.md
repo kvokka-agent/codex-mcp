@@ -150,7 +150,8 @@ the hook from the working tree wired to the `codex-mcp` of your `.mcp.json`.
 What that session should show: `codex-mcp:codex` among the agent types, the
 five `mcp__codex-mcp__*` tools, a direct call to any of them from the main
 thread refused with "codex-mcp is reachable only through the codex subagent",
-and a subagent report whose `progress` block lists what the turn worked on.
+and a subagent writing a `**Progress summary**` line per round while the turn
+runs.
 
 Two more commands, neither of which needs a release:
 

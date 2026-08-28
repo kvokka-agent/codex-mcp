@@ -4,9 +4,10 @@ Runs OpenAI Codex from Claude Code. One connection installs three parts that
 work together:
 
 - the **`codex-mcp` MCP server**, pinned to `@kvokka/codex-mcp@2.6.0`;
-- the **`codex` subagent**, a proxy: it hands the delegator's prompt to Codex
-  unchanged, follows the turn in rounds of five minutes, and hands back what
-  Codex answered together with the line-by-line progress of the run;
+- the **`codex` subagent**, a proxy running on Haiku: it hands the delegator's
+  prompt to Codex unchanged, follows the turn in rounds of five minutes, writes
+  a `**Progress summary**` line after each of them, and hands back what Codex
+  answered;
 - a **`PreToolUse` hook**, which lets the Codex tools through for that subagent
   and denies them to everyone else.
 
@@ -58,30 +59,37 @@ answer of its own, runs no command, reads no file, and rephrases nothing. The
 only thing it decides is how Codex is started — model, effort, approval policy,
 sandbox, cwd, approval timeout.
 
+Where the delegator names none of those, Codex is started with
+`approvalPolicy: never` and `sandbox: danger-full-access`: it asks for nothing
+and is stopped by nothing, so a turn runs to its answer rather than to an
+approval nobody is watching. Name a `sandbox` and an `approvalPolicy` in the
+prompt to fence the turn, and the subagent passes what you named.
+
 An answer written by the subagent is shaped exactly like Codex's own, so the
 delegator cannot tell them apart. That is why the rule is absolute rather than a
 preference.
+
+## What it writes while the turn runs
+
+One line per round, and nothing else:
+
+```text
+**Progress summary**: reading src/session/manager.ts
+**Progress summary**: running the test suite — 5 min
+**Progress summary**: running the test suite — 15 min
+```
+
+The number comes from `progress.activityStandingMs`, which the server measures
+from when the line arrived, so it is right however the rounds fell. The bold
+marker opens every one of those lines and nothing else the subagent writes, so a
+delegator scanning its output picks them out by it.
 
 ## What comes back
 
 One block, and nothing around it: the `outcome` of the turn, the `sessionId`,
 the `model` Codex ran on, whether the `session` is closed, anything it
-`declined`, the `progress` of the run, and last the `result` — what Codex
-answered, verbatim and whole.
-
-`progress` is every line the subagent wrote while the turn ran, in order:
-
-```text
-progress:
-codex: reading src/session/manager.ts
-codex: running the test suite — 5 min
-codex: running the test suite — 15 min
-```
-
-The number comes from `progress.activityStandingMs`, which the server measures
-from when the line arrived, so it is right however the rounds fell. Put that
-block in front of the person waiting: nothing the subagent writes mid-run is
-rendered anywhere, so its report is the only path those lines travel.
+`declined`, and last the `result` — what Codex answered, verbatim and whole. The
+progress lines are not repeated there; the run is over by then.
 
 `outcome` is the turn's, read from `lastTurn` and untouched by the close, so a
 finished turn reads `completed` even though the closed session's own status is
@@ -102,8 +110,8 @@ The server also sends each activity line to the MCP client as
 `notifications/progress` while a poll is held, with a heartbeat every 30 seconds
 (`CODEX_MCP_PROGRESS_HEARTBEAT_MS`). A client renders those under the call it
 made itself, so they are for a client driving the tools directly; under a
-subagent's call they reach nobody, which is why the subagent keeps the lines and
-reports them.
+subagent's call they reach nobody, which is why the subagent writes the line
+itself after every round.
 
 ## Why the hook
 
