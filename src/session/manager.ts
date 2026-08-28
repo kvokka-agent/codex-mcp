@@ -563,37 +563,11 @@ export class SessionManager {
   async replyToSession(
     sessionId: string,
     prompt: string,
-    overrides?: {
-      model?: string;
-      approvalPolicy?: ApprovalPolicy;
-      effort?: EffortLevel;
-      summary?: SummaryMode;
-      personality?: Personality;
-      sandbox?: SandboxMode;
-      cwd?: string;
-      outputSchema?: Record<string, unknown>;
-    }
+    overrides?: TurnOverrides
   ): Promise<SessionStartResult> {
     const session = this.getSessionOrThrow(sessionId);
 
-    // Status first: cancelSession drops the client, so a client lookup ahead of this
-    // reports a cancelled session as SESSION_NOT_FOUND.
-    if (session.status === "cancelled") {
-      throw new Error(
-        `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be resumed`
-      );
-    }
-    if (session.status === "abandoned") {
-      throw new Error(
-        `Error [${ErrorCode.SESSION_NOT_RUNNING}]: Session '${sessionId}' was abandoned by the server that held it — ` +
-          `call codex_session(action="resume") to pick its thread back up`
-      );
-    }
-    if (session.status !== "idle" && session.status !== "error") {
-      throw new Error(
-        `Error [${ErrorCode.SESSION_BUSY}]: Session '${sessionId}' is ${session.status}, expected idle or error`
-      );
-    }
+    assertSessionAcceptsTurn(session, sessionId);
     if (!session.threadId) {
       throw new Error(
         `Error [${ErrorCode.INTERNAL}]: Session '${sessionId}' has no threadId, cannot reply`
@@ -611,8 +585,6 @@ export class SessionManager {
     session.lastActiveAt = new Date().toISOString();
     this.persistSessionIfChanged(session);
 
-    const input: UserInput[] = [{ type: "text", text: prompt }];
-
     // A recovered session whose meta.json recorded no cwd has no base to resolve a
     // relative override against, and the server's own cwd is not that base.
     if (overrides?.cwd !== undefined && session.cwd === undefined && !isAbsolute(overrides.cwd)) {
@@ -624,25 +596,7 @@ export class SessionManager {
       ? resolveAndValidateCwd(overrides.cwd, session.cwd ?? overrides.cwd)
       : undefined;
 
-    const turnParams: TurnStartParams = {
-      threadId: session.threadId,
-      input,
-      model: overrides?.model,
-      approvalPolicy: overrides?.approvalPolicy,
-      // `turn/start` carries these on every turn; the thread holds none of them, so a
-      // turn that omits one takes the value from ~/.codex/config.toml rather than the
-      // one the session was started with.
-      effort: overrides?.effort ?? session.effort,
-      summary: overrides?.summary ?? session.summary,
-      personality: overrides?.personality ?? session.personality,
-      cwd: resolvedCwd,
-      outputSchema: overrides?.outputSchema,
-    };
-
-    // Map sandbox string to protocol object
-    if (overrides?.sandbox) {
-      turnParams.sandboxPolicy = toSandboxPolicy(overrides.sandbox);
-    }
+    const turnParams = buildTurnParams(session, session.threadId, prompt, overrides, resolvedCwd);
 
     let compatWarnings: string[] | undefined;
     this.markTurnOutputSchema(sessionId, overrides?.outputSchema);
@@ -653,66 +607,8 @@ export class SessionManager {
       const startedTurnId = extractTurnId(turnStartResult);
       if (startedTurnId) session.activeTurnId = startedTurnId;
 
-      // What the client did with the overrides this turn asked for, read after
-      // `turnStart` because that is the call the answer describes.
-      // `unappliedTurnOverrides` is the client naming what its command line could not
-      // carry; a client that reports none still says through `supportsTurnOverrides`
-      // that cwd and sandbox do not reach a turn past the first.
-      const canOverride = client.supportsTurnOverrides;
-      const requestedValue: Record<string, string | undefined> = {
-        sandbox: overrides?.sandbox,
-        cwd: resolvedCwd,
-      };
-      const requestedNames = Object.entries(requestedValue)
-        .filter(([, value]) => value !== undefined)
-        .map(([name]) => name);
-      const unapplied = client.unappliedTurnOverrides ?? (canOverride ? [] : requestedNames);
-      const applied = (name: string): boolean => !unapplied.includes(name);
-
-      if (resolvedCwd && canOverride && applied("cwd")) session.cwd = resolvedCwd;
-      if (overrides?.model) session.model = overrides.model;
-      if (overrides?.approvalPolicy) {
-        session.approvalPolicy = overrides.approvalPolicy as ApprovalPolicy;
-      }
-      // The turn parameters travel with the turn, so the newest one is what the next
-      // turn of this session — and a turn of the session after a resume — runs with.
-      if (overrides?.effort) session.effort = overrides.effort;
-      if (overrides?.summary) session.summary = overrides.summary;
-      if (overrides?.personality) session.personality = overrides.personality;
-      if (overrides?.sandbox && canOverride && applied("sandbox")) {
-        session.sandbox = overrides.sandbox as SandboxMode;
-      }
-      // The turn runs for minutes and the server can die inside it; what the session
-      // now runs with reaches meta.json here rather than at the next status change.
-      this.persistSessionIfChanged(session);
-
-      if (unapplied.length > 0) {
-        if (unapplied.includes("outputSchema")) {
-          // The turn output is not schema-constrained, so reading its text as structured
-          // output would hand the caller a shape the model was never asked for.
-          this.schemaConstrainedTurns.delete(sessionId);
-        }
-        // A caller narrowing the sandbox and reading `status: "running"` would otherwise
-        // take the narrower permissions for granted while codex keeps writing under the
-        // wider ones.
-        const effectiveValue: Record<string, string | undefined> = {
-          sandbox: session.sandbox,
-          cwd: session.cwd,
-        };
-        const named = unapplied.map((name) => {
-          const asked = requestedValue[name];
-          const kept = effectiveValue[name];
-          if (asked !== undefined && kept !== undefined) {
-            return `${name} '${asked}' (the turn keeps '${kept}')`;
-          }
-          return asked !== undefined ? `${name} '${asked}'` : name;
-        });
-        compatWarnings = [
-          ...(compatWarnings ?? []),
-          `This turn did not apply ${named.join(", ")}. Start a new session to change ` +
-            `${unapplied.length === 1 ? "it" : "them"}.`,
-        ];
-      }
+      const unappliedWarning = this.recordTurnOverrides(session, client, overrides, resolvedCwd);
+      if (unappliedWarning) compatWarnings = [...(compatWarnings ?? []), unappliedWarning];
     } catch (err) {
       session.status = "error";
       recordEvent(session, "error", {
@@ -1738,6 +1634,58 @@ export class SessionManager {
       );
     }
     return client;
+  }
+
+  /**
+   * Record what the turn actually ran with, and name what it could not apply.
+   *
+   * Read after `turnStart` because that is the call the answer describes.
+   * `unappliedTurnOverrides` is the client naming what its command line could
+   * not carry; a client that reports none still says through
+   * `supportsTurnOverrides` that cwd and sandbox do not reach a turn past the
+   * first. The return is the sentence for `compatWarnings`, or nothing when the
+   * turn applied everything it was asked for.
+   */
+  private recordTurnOverrides(
+    session: SessionInfo,
+    client: ICodexClient,
+    overrides: TurnOverrides | undefined,
+    resolvedCwd: string | undefined
+  ): string | undefined {
+    const canOverride = client.supportsTurnOverrides;
+    const requestedValue: Record<string, string | undefined> = {
+      sandbox: overrides?.sandbox,
+      cwd: resolvedCwd,
+    };
+    const requestedNames = Object.entries(requestedValue)
+      .filter(([, value]) => value !== undefined)
+      .map(([name]) => name);
+    const unapplied = client.unappliedTurnOverrides ?? (canOverride ? [] : requestedNames);
+
+    applyTurnOverrides(
+      session,
+      overrides,
+      resolvedCwd,
+      (name) => canOverride && !unapplied.includes(name)
+    );
+    // The turn runs for minutes and the server can die inside it; what the session
+    // now runs with reaches meta.json here rather than at the next status change.
+    this.persistSessionIfChanged(session);
+
+    if (unapplied.length === 0) return undefined;
+
+    if (unapplied.includes("outputSchema")) {
+      // The turn output is not schema-constrained, so reading its text as structured
+      // output would hand the caller a shape the model was never asked for.
+      this.schemaConstrainedTurns.delete(session.sessionId);
+    }
+    // A caller narrowing the sandbox and reading `status: "running"` would otherwise
+    // take the narrower permissions for granted while codex keeps writing under the
+    // wider ones.
+    return unappliedTurnWarning(unapplied, requestedValue, {
+      sandbox: session.sandbox,
+      cwd: session.cwd,
+    });
   }
 
   /** `thread/started` — the notification that carries the real thread id. */
@@ -2907,6 +2855,114 @@ function scannerOf(session: SessionInfo): ActivityMarkerScanner {
  * so a poll answers with each new heading and the person waiting reads the work
  * as it happens. One line per heading is what travels, not the turn's stream.
  */
+/** What a turn may override for the session it continues. */
+interface TurnOverrides {
+  model?: string;
+  approvalPolicy?: ApprovalPolicy;
+  effort?: EffortLevel;
+  summary?: SummaryMode;
+  personality?: Personality;
+  sandbox?: SandboxMode;
+  cwd?: string;
+  outputSchema?: Record<string, unknown>;
+}
+
+/** Throw unless the session is in a state a new turn can start from. */
+function assertSessionAcceptsTurn(session: SessionInfo, sessionId: string): void {
+  // Status first: cancelSession drops the client, so a client lookup ahead of this
+  // reports a cancelled session as SESSION_NOT_FOUND.
+  if (session.status === "cancelled") {
+    throw new Error(
+      `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be resumed`
+    );
+  }
+  if (session.status === "abandoned") {
+    throw new Error(
+      `Error [${ErrorCode.SESSION_NOT_RUNNING}]: Session '${sessionId}' was abandoned by the server that held it — ` +
+        `call codex_session(action="resume") to pick its thread back up`
+    );
+  }
+  if (session.status !== "idle" && session.status !== "error") {
+    throw new Error(
+      `Error [${ErrorCode.SESSION_BUSY}]: Session '${sessionId}' is ${session.status}, expected idle or error`
+    );
+  }
+}
+
+/**
+ * Put on the session what the turn runs with, so the next turn — and a turn
+ * after a resume — starts from it. `reaches` answers whether the client carried
+ * that override to this turn at all.
+ */
+function applyTurnOverrides(
+  session: SessionInfo,
+  overrides: TurnOverrides | undefined,
+  resolvedCwd: string | undefined,
+  reaches: (name: string) => boolean
+): void {
+  if (resolvedCwd && reaches("cwd")) session.cwd = resolvedCwd;
+  if (overrides?.model) session.model = overrides.model;
+  if (overrides?.approvalPolicy) {
+    session.approvalPolicy = overrides.approvalPolicy as ApprovalPolicy;
+  }
+  if (overrides?.effort) session.effort = overrides.effort;
+  if (overrides?.summary) session.summary = overrides.summary;
+  if (overrides?.personality) session.personality = overrides.personality;
+  if (overrides?.sandbox && reaches("sandbox")) {
+    session.sandbox = overrides.sandbox as SandboxMode;
+  }
+}
+
+/** The `compatWarnings` sentence naming what the turn was asked for and did not apply. */
+function unappliedTurnWarning(
+  unapplied: readonly string[],
+  requested: Record<string, string | undefined>,
+  effective: Record<string, string | undefined>
+): string {
+  const named = unapplied.map((name) => {
+    const asked = requested[name];
+    const kept = effective[name];
+    if (asked !== undefined && kept !== undefined) {
+      return `${name} '${asked}' (the turn keeps '${kept}')`;
+    }
+    return asked !== undefined ? `${name} '${asked}'` : name;
+  });
+  return (
+    `This turn did not apply ${named.join(", ")}. Start a new session to change ` +
+    `${unapplied.length === 1 ? "it" : "them"}.`
+  );
+}
+
+/** The `turn/start` parameters of a reply: the overrides it names, over what the session runs with. */
+function buildTurnParams(
+  session: SessionInfo,
+  threadId: string,
+  prompt: string,
+  overrides: TurnOverrides | undefined,
+  resolvedCwd: string | undefined
+): TurnStartParams {
+  const input: UserInput[] = [{ type: "text", text: prompt }];
+  const turnParams: TurnStartParams = {
+    threadId,
+    input,
+    model: overrides?.model,
+    approvalPolicy: overrides?.approvalPolicy,
+    // `turn/start` carries these on every turn; the thread holds none of them, so a
+    // turn that omits one takes the value from ~/.codex/config.toml rather than the
+    // one the session was started with.
+    effort: overrides?.effort ?? session.effort,
+    summary: overrides?.summary ?? session.summary,
+    personality: overrides?.personality ?? session.personality,
+    cwd: resolvedCwd,
+    outputSchema: overrides?.outputSchema,
+  };
+  // Map sandbox string to protocol object
+  if (overrides?.sandbox) {
+    turnParams.sandboxPolicy = toSandboxPolicy(overrides.sandbox);
+  }
+  return turnParams;
+}
+
 /** `turn/started` — the notification that opens a turn and clears the last activity. */
 function onTurnStarted(session: SessionInfo, method: string, p: Record<string, unknown>): void {
   const turnObj = p.turn as Record<string, unknown> | undefined;
