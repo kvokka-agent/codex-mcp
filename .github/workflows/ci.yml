@@ -27,12 +27,19 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
+      # The end-to-end tests spawn the built server the way the package ships
+      # it, which is under node.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - run: bun install --frozen-lockfile
       - run: bun run lint
       - run: bun run format:check
       - run: bun run typecheck
-      - run: bun test
+      # Before the tests: the end-to-end ones spawn the bundle, and a build
+      # inside a test spends that test's own window on it.
       - run: bun run build
+      - run: bun test
       - run: bun run lint:md
 
   # What the published server does on the Node versions and the platforms it
