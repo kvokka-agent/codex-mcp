@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -9,13 +9,13 @@ function usage(exitCode = 0) {
   console.error(
     [
       "Usage:",
-      "  node scripts/check-stdio.mjs [--bunx] [--mode <auto|strict|off>] [--cwd <path>] [--timeout-ms <n>] [--report-json <path>] [-- <command> <...args>]",
+      "  bun scripts/check-stdio.mjs [--bunx] [--mode <auto|strict|off>] [--cwd <path>] [--timeout-ms <n>] [--report-json <path>] [-- <command> <...args>]",
       "",
       "Checks that the MCP server does NOT write anything to stdout before a client connects.",
       "Any non-empty stdout output is treated as a failure (stdio transport requires stdout to be JSON-RPC only).",
       "",
       "Defaults:",
-      "  (no args) -> spawns: node dist/index.js",
+      "  (no args) -> spawns: bun dist/index.js",
       "  --bunx    -> spawns: bunx @kvokka/codex-mcp",
       "  --mode    -> sets CODEX_MCP_STDIO_MODE for child process (default: auto)",
       "",
@@ -110,7 +110,7 @@ function getFixHints(platform) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
-  const command = args.overrideCommand ? args.overrideCommand : args.useBunx ? "bunx" : "node";
+  const command = args.overrideCommand ? args.overrideCommand : args.useBunx ? "bunx" : "bun";
   const cmdArgs = args.overrideCommand
     ? args.overrideArgs
     : args.useBunx

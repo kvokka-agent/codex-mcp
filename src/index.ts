@@ -123,7 +123,7 @@ async function main(): Promise<void> {
    *
    * It runs after the transport is connected, for two reasons. Nothing holds
    * this process's event loop until then, so an await here that resolves on a
-   * timer alone lets Node exit before a client ever sees the server. And a
+   * timer alone lets the process exit before a client ever sees the server. And a
    * confirmed orphan is given five seconds to exit gracefully, which is five
    * seconds a client would spend waiting for a server that is already able to
    * answer.

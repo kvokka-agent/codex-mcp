@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Denies the codex-mcp tools to every caller but the codex subagent.
 //
 // Claude Code sends `agent_type` only when the hook fires inside a subagent, or

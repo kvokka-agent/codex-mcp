@@ -10,7 +10,7 @@ to drive them in [SESSIONS.md](SESSIONS.md), and the terms in
 MCP client
     │  MCP over stdio, same machine
     ▼
-codex-mcp server (Node.js)
+codex-mcp server (bun)
     │  JSON-RPC over stdio, one child process per session
     ▼
 codex app-server        ── or ──  codex exec --json
@@ -75,9 +75,9 @@ A child that exits while its session was running moves that session to `error`.
    directory retention removed from coming back as a recovered session.
 4. The recovered sessions are ingested, and the transport is connected.
 5. **Then** the orphan reaper runs. Nothing holds the event loop before the
-   transport is connected, so an await there could let Node exit before a client
-   ever sees the server — and a confirmed orphan costs five seconds a client
-   would otherwise spend waiting for a server already able to answer.
+   transport is connected, so an await there could let the process exit before
+   a client ever sees the server — and a confirmed orphan costs five seconds a
+   client would otherwise spend waiting for a server already able to answer.
 
 ### Shutdown
 

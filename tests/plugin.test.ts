@@ -24,6 +24,15 @@ describe("the server the plugin starts", () => {
   });
 });
 
+describe("the hook the plugin installs", () => {
+  const hooks = JSON.parse(read("plugins/codex-mcp/hooks/hooks.json"));
+  const command = hooks.hooks.PreToolUse[0].hooks[0].command;
+
+  it("runs under bun, the one runtime the plugin already asks for", () => {
+    expect(command).toStartWith("bun ");
+  });
+});
+
 describe("the driver the plugin ships", () => {
   const agent = read("plugins/codex-mcp/agents/codex.md");
 

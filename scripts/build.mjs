@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-// Builds what the package ships: one bundled ESM entry point that Node runs,
-// and the declarations beside it.
+// Builds what the package ships: one bundled ESM entry point that bun runs, and
+// the declarations beside it.
 //
 // `bun build` writes no declarations, so `tsc --emitDeclarationOnly` writes
 // those; `package.json` runs the two in order.
@@ -18,13 +18,16 @@ rmSync(outdir, { recursive: true, force: true });
 const built = await Bun.build({
   entrypoints: [join(root, "src/index.ts")],
   outdir,
+  // `node` rather than `bun`: the target picks which builtins the bundle may
+  // lean on, and node's are the ones bun also implements. Nothing bun-only is
+  // inlined, so the same file starts under either runtime.
   target: "node",
   format: "esm",
   sourcemap: "linked",
   // `src/server.ts` and `src/app-server/client.ts` read this to tell the MCP
   // client and the app-server which version is speaking to them.
   define: { __PKG_VERSION__: JSON.stringify(version) },
-  banner: "#!/usr/bin/env node",
+  banner: "#!/usr/bin/env bun",
 });
 
 if (!built.success) {

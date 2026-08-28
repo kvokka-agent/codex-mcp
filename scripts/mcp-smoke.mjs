@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,10 +13,10 @@ import {
 function usage(exitCode = 0) {
   const msg = [
     "Usage:",
-    "  node scripts/mcp-smoke.mjs [--bunx] [--cwd <path>] [--verbose] [-- <command> <...args>]",
+    "  bun scripts/mcp-smoke.mjs [--bunx] [--cwd <path>] [--verbose] [-- <command> <...args>]",
     "",
     "Defaults:",
-    "  (no args) -> spawns: node dist/index.js",
+    "  (no args) -> spawns: bun dist/index.js",
     "  --bunx    -> spawns: bunx @kvokka/codex-mcp",
     "  --        -> overrides command/args explicitly",
     "",
@@ -79,7 +79,7 @@ async function main() {
     ? args.overrideCommand
     : args.useBunx
       ? "bunx"
-      : "node";
+      : "bun";
   const cmdArgs = args.overrideCommand
     ? args.overrideArgs
     : args.useBunx

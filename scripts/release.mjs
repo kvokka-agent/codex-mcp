@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // The rules of the label-driven release: which version follows the current one,
 // which label asks for it, and which files carry it. `.github/workflows/release.yml`
 // calls this file; `tests/release.test.ts` measures it against the files themselves.

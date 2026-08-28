@@ -10,7 +10,7 @@ on one machine, and carries the conditions it was taken under.
 ## `openai/codex-plugin-cc`
 
 OpenAI's own Claude Code plugin, version 1.0.6. Not an MCP server: seven slash
-commands, a subagent, three skills, three hooks and a Node script that speaks
+commands, a subagent, three skills, three hooks and a Node.js script that speaks
 JSON-RPC to `codex app-server`, optionally through a per-workspace broker.
 
 ### Where codex-mcp reaches further

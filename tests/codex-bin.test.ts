@@ -7,7 +7,7 @@ describe("resolveCodexInvocation", () => {
     expect(out).toEqual({ cmd: "codex", args: ["app-server"], spawnedViaCmd: false });
   });
 
-  it("uses node + resolved npm shim script on Windows when available", () => {
+  it("uses the running runtime + the npm shim's script on Windows when available", () => {
     const shim = "C:\\bin\\codex.cmd";
     const script = "C:\\node_modules\\@openai\\codex\\bin\\codex.js";
 

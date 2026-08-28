@@ -187,7 +187,7 @@ describe("resources", () => {
     expect(payload.name).toBe("codex-mcp");
     expect(payload.version).toBe("9.9.9-test");
     expect(payload.clientMode).toBe("exec");
-    expect(payload.node).toBe(process.version);
+    expect(payload.runtime).toBe(`bun v${process.versions.bun}`);
     expect(payload.platform).toBe(process.platform);
     expect(payload.arch).toBe(process.arch);
     expect(payload.stdioMode).toBe("strict");

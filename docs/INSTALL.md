@@ -3,9 +3,10 @@
 The server runs on the same machine as the MCP client and talks to it over
 stdio. Terms are defined in [GLOSSARY.md](GLOSSARY.md).
 
-Before anything else: `bun`, which starts the server, Node.js >= 18, which runs
-it, and a Codex CLI that answers `codex --version` and has had `codex login`
-run. Without a login the server
+Before anything else: `bun` >= 1.4, which starts and runs the server, and a
+Codex CLI that answers `codex --version` and has had `codex login` run. The
+package ships behind a `#!/usr/bin/env bun` line and asks for no Node.js.
+Without a login the server
 still starts and `codex_setup` reports `auth.state: unauthenticated` — enough to
 check the protocol, not enough to run a turn.
 
@@ -45,7 +46,8 @@ carries `@kvokka/codex-mcp` — the server's own checkout, or a project dependin
 on it. npm exec answers the request from that tree, finds the package there,
 skips the fetch and runs the bare name `codex-mcp`, which `PATH` answers to only
 after a global install: the server exits 127 before writing a frame and the
-client reports `CONNECTION_CLOSED`. bunx fetches the package it was asked for.
+client reports `CONNECTION_CLOSED`. bunx fetches the package it was asked for,
+and it is bun that the `#!/usr/bin/env bun` line of the bundle asks for anyway.
 
 ## A global install
 

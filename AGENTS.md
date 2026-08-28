@@ -42,8 +42,8 @@ server is `abandoned`, and `codex_session(action="resume")` picks it back up.
 
 ## Prerequisites
 
-`bun`, a Node.js >= 18 for the runtime checks, and a `codex` on PATH that
-answers `codex --version`.
+`bun` >= 1.4, which is the whole toolchain and the runtime, and a `codex` on
+PATH that answers `codex --version`.
 
 ## Commands
 
@@ -111,7 +111,8 @@ These are the patterns a change keeps, each of them written after it was broken:
 - If `replyToSession` fails during `turnStart`, put the session back to `error`.
 - Serialize `-c key=value` by type: primitives through `String()`, objects and
   arrays through `JSON.stringify()`.
-- `.unref()` every cleanup, shutdown and force-kill timer, or Node cannot exit.
+- `.unref()` every cleanup, shutdown and force-kill timer, or the process cannot
+  exit.
 - Call `notifyWaiters(sessionId)` after any state change, or long-poll callers
   block until their `waitMs` budget expires.
 - Verify a pid's recorded spawn time before signalling it; an unverified pid is
