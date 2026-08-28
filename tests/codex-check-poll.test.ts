@@ -16,6 +16,7 @@ import { executeCodexCheck } from "../src/tools/codex-check.js";
 import { POLL_WINDOW_MARGIN_MS, PollWindow } from "../src/utils/poll-window.js";
 import { DEFAULT_APPROVAL_TIMEOUT_MS, MAX_LONG_POLL_WAIT_MS } from "../src/types.js";
 import { useFakeClock } from "./helpers/clock.js";
+import { ProgressReporter, type ProgressNotification } from "../src/utils/progress-notifier.js";
 import type { CheckResult } from "../src/types.js";
 
 class MockClient extends EventEmitter {
@@ -258,18 +259,18 @@ describe("executeCodexCheck", () => {
       expect(res.progress).not.toHaveProperty("lastMethod");
     });
 
-    it("hands the finished turn's answer over exactly once", () => {
+    it("carries the finished turn's answer on every check of the terminal session", () => {
       completeTurn("the answer");
 
       const first = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
       const second = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
       const third = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
 
-      expect(first.result?.text).toBe("the answer");
-      expect(second.result).toBeUndefined();
-      expect(third.result).toBeUndefined();
-      // The status stays readable after the answer was handed over.
+      // A caller that checks again reads the answer back. Handing it over once
+      // left the second check empty, and the caller wrote a summary of its own
+      // in place of what Codex said.
       for (const res of [first, second, third]) {
+        expect(res.result?.text).toBe("the answer");
         expect(res.status).toBe("idle");
         expect(res.recommendedNextAction).toBe("none");
       }
@@ -290,6 +291,118 @@ describe("executeCodexCheck", () => {
       expect(
         expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager)).result?.text
       ).toBe("second answer");
+    });
+
+    it("cuts the activity marker out of the turn record the result carries", () => {
+      // `TurnResult.turn` holds the assistant text a second time. Leaving that
+      // copy unstripped put a raw marker back into the answer a caller reported.
+      const withMarker = "%%%ACTIVITY: считаю файлы%%%\nсемь";
+      client.emitNotification(Methods.TURN_COMPLETED, {
+        turn: {
+          id: "turn_mock",
+          status: "completed",
+          output: withMarker,
+          items: [{ id: "item_1", type: "agentMessage", text: withMarker }],
+        },
+      });
+
+      const res = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
+      const turn = res.result?.turn as { output: string; items: Array<{ text: string }> };
+      expect(res.result?.text).toBe("семь");
+      expect(turn.output).toBe("семь");
+      expect(turn.items[0]!.text).toBe("семь");
+    });
+
+    it("keeps the finished turn's outcome after the session is closed", async () => {
+      completeTurn("the answer");
+      await manager.cancelSession(sessionId);
+
+      const info = manager.getSession(sessionId);
+      // The status says what the session is now; lastTurn says what the work
+      // came to, and closing a session that answered does not rewrite it.
+      expect(info.status).toBe("cancelled");
+      expect(info.lastTurn?.outcome).toBe("completed");
+      expect(info.lastTurn?.turnId).toBe("turn_mock");
+    });
+
+    it("reports a cancelled outcome for a session closed before it answered", async () => {
+      await manager.cancelSession(sessionId);
+
+      const info = manager.getSession(sessionId);
+      expect(info.lastTurn?.outcome).toBe("cancelled");
+      expect(info.lastTurn?.error).toBe("Cancelled by user");
+    });
+
+    it("reports each activity line to the client while it holds the call", async () => {
+      const sent: ProgressNotification[] = [];
+      const reporter = new ProgressReporter("tok-1", async (n) => {
+        sent.push(n);
+      });
+
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 5000 },
+        manager,
+        undefined,
+        pinnedWindow(),
+        reporter
+      );
+
+      emitOutput("%%%ACTIVITY: Читаю тест%%%\n");
+      emitOutput("%%%ACTIVITY: Правлю манифест%%%\n");
+      // Neither line ended the wait: an activity is not something the caller answers.
+      expect(sent.map((n) => n.params.message)).toEqual(["Читаю тест", "Правлю манифест"]);
+
+      completeTurn("the answer");
+      const res = expectCheck(await pending);
+
+      expect(res.status).toBe("idle");
+      expect(res.result?.text).toBe("the answer");
+      expect(sent.map((n) => n.params.progress)).toEqual([1, 2]);
+      expect(sent.every((n) => n.params.progressToken === "tok-1")).toBe(true);
+    });
+
+    it("reports the line the session is already on when the poll starts", async () => {
+      emitOutput("%%%ACTIVITY: Читаю тест%%%\n");
+
+      const sent: ProgressNotification[] = [];
+      const reporter = new ProgressReporter("tok-2", async (n) => {
+        sent.push(n);
+      });
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 5000 },
+        manager,
+        undefined,
+        pinnedWindow(),
+        reporter
+      );
+
+      // A caller that starts polling mid-turn reads what is happening now
+      // rather than waiting for the next change.
+      expect(sent.map((n) => n.params.message)).toEqual(["Читаю тест"]);
+
+      completeTurn("the answer");
+      await pending;
+    });
+
+    it("stops reporting once the call it belonged to has returned", async () => {
+      const sent: ProgressNotification[] = [];
+      const reporter = new ProgressReporter("tok-3", async (n) => {
+        sent.push(n);
+      });
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 5000 },
+        manager,
+        undefined,
+        pinnedWindow(),
+        reporter
+      );
+      completeTurn("the answer");
+      await pending;
+
+      await manager.replyToSession(sessionId, "and now?");
+      emitOutput("%%%ACTIVITY: Правлю манифест%%%\n");
+
+      expect(sent).toHaveLength(0);
     });
 
     it("carries an approval through to the app-server and back to running", () => {
@@ -573,7 +686,7 @@ describe("executeCodexCheck", () => {
       expect(observed[0]).toBeGreaterThan(2_000);
     });
 
-    it("leaves the finished turn's answer undelivered when the client cut the call", async () => {
+    it("keeps the finished turn's answer readable when the client cut the call", async () => {
       const controller = new AbortController();
       const pending = executeCodexCheck(
         { action: "poll", sessionId, waitMs: 5000 },
@@ -581,16 +694,16 @@ describe("executeCodexCheck", () => {
         controller.signal,
         pinnedWindow()
       );
-      // The turn ends and the client's clock runs out in the same instant.
+      // The turn ends and the client's clock runs out in the same instant, so
+      // the SDK drops the response this call returns.
       setTimeout(() => {
         completeTurn("the answer");
         controller.abort("SdkError: Request timed out");
       }, 20);
 
-      const cut = expectCheck(await pending);
-      expect(cut.result).toBeUndefined();
+      await pending;
 
-      // The response the SDK dropped took nothing with it: the next call has it.
+      // The dropped response took nothing with it: the next call has the answer.
       const next = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
       expect(next.status).toBe("idle");
       expect(next.result?.text).toBe("the answer");

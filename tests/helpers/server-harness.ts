@@ -66,6 +66,12 @@ interface PendingCall {
 }
 
 /** A running codex-mcp process and the MCP calls a test makes on it. */
+/** A JSON-RPC message the server sent with no id of its own. */
+export interface ServerNotification {
+  method: string;
+  params: Record<string, unknown>;
+}
+
 export class ServerProcess {
   readonly child: ChildProcessWithoutNullStreams;
   readonly stateDir: string;
@@ -74,6 +80,8 @@ export class ServerProcess {
   private pending = new Map<number, PendingCall>();
   private stderrText = "";
   private exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+  private notifications: ServerNotification[] = [];
+  private notificationWaiters = new Set<(notification: ServerNotification) => void>();
 
   constructor(opts: ServerOptions = {}) {
     ensureServerBuilt();
@@ -118,10 +126,20 @@ export class ServerProcess {
       if (!line) continue;
       const msg = JSON.parse(line) as {
         id?: number;
+        method?: string;
+        params?: Record<string, unknown>;
         result?: unknown;
         error?: { message: string };
       };
-      if (typeof msg.id !== "number") continue;
+      if (typeof msg.id !== "number") {
+        // A message with no id is a notification the server sent on its own.
+        if (typeof msg.method === "string") {
+          const notification = { method: msg.method, params: msg.params ?? {} };
+          this.notifications.push(notification);
+          for (const waiter of this.notificationWaiters) waiter(notification);
+        }
+        continue;
+      }
       const call = this.pending.get(msg.id);
       if (!call) continue;
       this.pending.delete(msg.id);
@@ -172,6 +190,45 @@ export class ServerProcess {
       content?: Array<{ text?: string }>;
     };
     return result.structuredContent ?? JSON.parse(result.content?.[0]?.text ?? "{}");
+  }
+
+  /**
+   * Call a tool asking for progress, and do not wait for it to answer.
+   *
+   * A held call is the only place a progress notification comes from, so the
+   * test reads the notification while the call is still open. The answer, when
+   * it comes, has nowhere to go and is dropped.
+   */
+  startToolCallWithProgress(
+    name: string,
+    args: Record<string, unknown>,
+    progressToken: string
+  ): void {
+    this.send({
+      jsonrpc: "2.0",
+      id: this.nextId++,
+      method: "tools/call",
+      params: { name, arguments: args, _meta: { progressToken } },
+    });
+  }
+
+  /** The first notification of this method the server sends, or a rejection. */
+  waitForNotification(method: string, timeoutMs = 10_000): Promise<ServerNotification> {
+    const seen = this.notifications.find((n) => n.method === method);
+    if (seen) return Promise.resolve(seen);
+    return new Promise((resolveWait, rejectWait) => {
+      const timer = setTimeout(() => {
+        this.notificationWaiters.delete(waiter);
+        rejectWait(new Error(`no ${method} notification within ${timeoutMs}ms`));
+      }, timeoutMs);
+      const waiter = (notification: ServerNotification): void => {
+        if (notification.method !== method) return;
+        clearTimeout(timer);
+        this.notificationWaiters.delete(waiter);
+        resolveWait(notification);
+      };
+      this.notificationWaiters.add(waiter);
+    });
   }
 
   /** Close the client end of stdin, as a client that exits does. */

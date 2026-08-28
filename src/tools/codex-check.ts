@@ -3,6 +3,7 @@
  */
 import type { SessionManager } from "../session/manager.js";
 import { PollWindow } from "../utils/poll-window.js";
+import type { ProgressReporter } from "../utils/progress-notifier.js";
 import {
   ALL_DECISIONS,
   ErrorCode,
@@ -37,7 +38,8 @@ export function executeCodexCheck(
   args: CodexCheckParams,
   sessionManager: SessionManager,
   requestSignal?: AbortSignal,
-  pollWindow: PollWindow = new PollWindow()
+  pollWindow: PollWindow = new PollWindow(),
+  progress?: ProgressReporter
 ): CodexCheckReturn {
   switch (args.action) {
     case "poll": {
@@ -63,7 +65,8 @@ export function executeCodexCheck(
           args.sessionId,
           Math.min(waitMs, MAX_LONG_POLL_WAIT_MS, budgetMs),
           requestSignal,
-          pollWindow
+          pollWindow,
+          progress
         );
       }
 
@@ -186,56 +189,71 @@ export function executeCodexCheck(
  * once; the delta and token-counter traffic in between returns nothing, and a
  * window in which none of the three happened returns the status it started
  * with, because the client will not hold the call any longer.
+ *
+ * What the turn says it is doing travels out of the held call as it happens, as
+ * `notifications/progress`. It does not end the wait: the caller answers
+ * statuses and actions, and an activity line is neither.
  */
 async function pollWithWait(
   sessionManager: SessionManager,
   sessionId: string,
   waitMs: number,
   signal: AbortSignal | undefined,
-  pollWindow: PollWindow
+  pollWindow: PollWindow,
+  progress?: ProgressReporter
 ): Promise<CheckResult> {
   const startedAt = Date.now();
   const deadline = startedAt + waitMs;
   let state = sessionManager.getSessionSignal(sessionId);
   const baseline = state.key;
 
-  while (!state.awaitsCaller && state.key === baseline && !signal?.aborted) {
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) break;
+  let stopReporting: (() => void) | undefined;
+  if (progress) {
+    // The line the session is already on, so a caller that starts polling
+    // mid-turn reads what is happening now rather than waiting for the change.
+    const current = sessionManager.getProgress(sessionId).activity;
+    if (current !== undefined) progress.report(current);
+    stopReporting = sessionManager.onActivity(sessionId, (activity) => progress.report(activity));
+  }
+  try {
+    while (!state.awaitsCaller && state.key === baseline && !signal?.aborted) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
 
-    // waitForChange registers its notifier synchronously, so no state change can
-    // land between the read above and the registration: a notification either
-    // preceded the read (and is in `state`) or wakes this waiter.
-    try {
-      await sessionManager.waitForChange(sessionId, remainingMs, signal);
-    } catch (err: unknown) {
-      // Timeout, abort and notification all resolve; the only rejection is a
-      // session whose waiter slots are full. Looping on that re-rejects with no
-      // delay and burns the rest of the wait window, so the long poll degrades
-      // to one immediate read and lets the caller retry later.
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[codex-mcp] Long-poll wait refused for session '${sessionId}': ${message}`);
-      break;
+      // waitForChange registers its notifier synchronously, so no state change can
+      // land between the read above and the registration: a notification either
+      // preceded the read (and is in `state`) or wakes this waiter.
+      try {
+        await sessionManager.waitForChange(sessionId, remainingMs, signal);
+      } catch (err: unknown) {
+        // Timeout, abort and notification all resolve; the only rejection is a
+        // session whose waiter slots are full. Looping on that re-rejects with no
+        // delay and burns the rest of the wait window, so the long poll degrades
+        // to one immediate read and lets the caller retry later.
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[codex-mcp] Long-poll wait refused for session '${sessionId}': ${message}`);
+        break;
+      }
+
+      state = sessionManager.getSessionSignal(sessionId);
     }
 
-    state = sessionManager.getSessionSignal(sessionId);
-  }
-
-  if (signal?.aborted) {
-    // The client cut this call, so the SDK drops whatever the handler returns
-    // rather than sending it. Reading the status the usual way would hand the
-    // finished turn's answer to a response that never leaves this process, and
-    // the next poll would report a terminal session with no answer in it.
-    const heldMs = Date.now() - startedAt;
-    const ceilingBefore = pollWindow.ceilingMs();
-    pollWindow.recordCut(heldMs, signal.reason);
-    if (pollWindow.ceilingMs() !== ceilingBefore) {
-      console.error(
-        `[codex-mcp] The MCP client cut a long poll after ${heldMs}ms; polls now answer within ${pollWindow.budgetMs()}ms.`
-      );
+    if (signal?.aborted) {
+      // The client cut this call, so the SDK drops whatever the handler returns
+      // rather than sending it. The answer is not lost with it: every later check
+      // of a terminal session carries the result again.
+      const heldMs = Date.now() - startedAt;
+      const ceilingBefore = pollWindow.ceilingMs();
+      pollWindow.recordCut(heldMs, signal.reason);
+      if (pollWindow.ceilingMs() !== ceilingBefore) {
+        console.error(
+          `[codex-mcp] The MCP client cut a long poll after ${heldMs}ms; polls now answer within ${pollWindow.budgetMs()}ms.`
+        );
+      }
     }
-    return sessionManager.pollStatus(sessionId, { consumeResult: false });
-  }
 
-  return sessionManager.pollStatus(sessionId);
+    return sessionManager.pollStatus(sessionId);
+  } finally {
+    stopReporting?.();
+  }
 }

@@ -27,6 +27,7 @@ import {
   ErrorCode,
 } from "./types.js";
 import { PollWindow } from "./utils/poll-window.js";
+import { progressReporterFor } from "./utils/progress-notifier.js";
 import { redactPaths } from "./utils/redact.js";
 import { classifyTurnCompatibilityError, compatibilityErrorMessage } from "./utils/turn-compat.js";
 
@@ -91,6 +92,18 @@ export function createServer(
     diskPersistence: options?.persistence !== undefined,
   });
 
+  const lastTurnSchema = z
+    .object({
+      turnId: z.string(),
+      outcome: z.enum(["completed", "error", "cancelled"]).optional(),
+      status: z.string().optional(),
+      completedAt: z.string(),
+      error: z.string().optional(),
+    })
+    .describe(
+      "How the last turn ended. `status` says what the session is now, and a session closed after it answered reads `cancelled`; this says what the work came to, and closing the session does not touch it."
+    );
+
   const publicSessionInfoSchema = z.object({
     sessionId: z.string(),
     status: z.enum(SESSION_STATUSES),
@@ -112,6 +125,7 @@ export function createServer(
       .describe(
         "The codex-mcp process holding the session. Absent means nobody holds it, which is what makes it resumable."
       ),
+    lastTurn: lastTurnSchema.optional(),
   });
 
   const errorOutputShape = {
@@ -463,7 +477,13 @@ export function createServer(
     },
     async (args, extra) => {
       try {
-        const result = await executeCodex(args, sessionManager, serverCwd, extra.signal);
+        const result = await executeCodex(
+          args,
+          sessionManager,
+          serverCwd,
+          extra.signal,
+          progressReporterFor(extra._meta, extra.sendNotification)
+        );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
           structuredContent: toStructuredContent(result),
@@ -523,7 +543,12 @@ export function createServer(
     },
     async (args, extra) => {
       try {
-        const result = await executeCodexReply(args, sessionManager, extra.signal);
+        const result = await executeCodexReply(
+          args,
+          sessionManager,
+          extra.signal,
+          progressReporterFor(extra._meta, extra.sendNotification)
+        );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
           structuredContent: toStructuredContent(result),
@@ -627,6 +652,7 @@ export function createServer(
         sandbox: z.enum(SANDBOX_MODES).optional(),
         pendingRequestCount: z.number().int().optional(),
         activity: z.string().optional(),
+        lastTurn: lastTurnSchema.optional(),
         owner: z.object({ pid: z.number().int(), state: z.enum(["self", "other"]) }).optional(),
         threadId: z.string().optional(),
         cwd: z.string().optional(),
@@ -685,9 +711,9 @@ export function createServer(
     "codex_check",
     {
       title: "Poll & Respond",
-      description: `Report where a session stands and answer what it waits for. Every action returns the same payload: { sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }. The turn's own events are never returned — Codex writes the full transcript to its rollout log under ~/.codex/sessions/. Answer every entry of actions[]; stop checking on terminal status (idle/error/cancelled), where result carries the final answer once. WARNING: without waitMs you are polling on a timer, and approvalTimeoutMs defaults to ${DEFAULT_APPROVAL_TIMEOUT_MS}ms, so approvals expire between checks unless you raise the timeout, use non-interactive policies, or pass waitMs — which answers the moment an approval arrives. See codex-mcp:///quickstart and codex-mcp:///gotchas.
+      description: `Report where a session stands and answer what it waits for. Every action returns the same payload: { sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }. The turn's own events are never returned — Codex writes the full transcript to its rollout log under ~/.codex/sessions/. Answer every entry of actions[]; stop checking on terminal status (idle/error/cancelled), where result carries the final answer and keeps carrying it while the session stands there. WARNING: without waitMs you are polling on a timer, and approvalTimeoutMs defaults to ${DEFAULT_APPROVAL_TIMEOUT_MS}ms, so approvals expire between checks unless you raise the timeout, use non-interactive policies, or pass waitMs — which answers the moment an approval arrives. See codex-mcp:///quickstart and codex-mcp:///gotchas.
 
-poll: current status; with waitMs it blocks until the status changes, an action arrives or the turn ends, and answers with the state it found only when the client will hold the call no longer.
+poll: current status; with waitMs it blocks until the status changes, an action arrives or the turn ends, and answers with the state it found only when the client will hold the call no longer. Send _meta.progressToken with the call and each activity line of the turn arrives as notifications/progress while it is still held.
 respond_permission: answer an approval action.
 respond_user_input: answer a user-input action.`,
       inputSchema: codexCheckInputSchema,
@@ -728,6 +754,7 @@ respond_user_input: answer a user-input action.`,
         result: z
           .object({
             turnId: z.string(),
+            outcome: z.enum(["completed", "error", "cancelled"]).optional(),
             text: z.string().optional(),
             output: z.string().optional(),
             structuredOutput: z.unknown().optional(),
@@ -738,7 +765,9 @@ respond_user_input: answer a user-input action.`,
             completedAt: z.string(),
           })
           .optional()
-          .describe("The finished turn's answer, carried by the first check that sees it."),
+          .describe(
+            "The finished turn's answer. Every check of a terminal session carries it, so a caller that lost it reads it back rather than filling it in from memory."
+          ),
         ...errorOutputShape,
       },
       annotations: {
@@ -751,7 +780,13 @@ respond_user_input: answer a user-input action.`,
     },
     async (args, extra) => {
       try {
-        const result = await executeCodexCheck(args, sessionManager, extra.signal, pollWindow);
+        const result = await executeCodexCheck(
+          args,
+          sessionManager,
+          extra.signal,
+          pollWindow,
+          progressReporterFor(extra._meta, extra.sendNotification)
+        );
         const isError =
           typeof (result as { isError?: boolean }).isError === "boolean"
             ? (result as { isError: boolean }).isError

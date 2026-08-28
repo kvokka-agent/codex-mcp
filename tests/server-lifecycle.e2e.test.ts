@@ -156,6 +156,29 @@ describe.skipIf(!HARNESS_RUNS_HERE)("session metadata", () => {
     expect(meta.threadId).toBe(threadId);
     expect(meta.status).toBe("running");
   }, 40_000);
+
+  it("sends the turn's activity to the client while the poll is still held", async () => {
+    const server = startServer();
+    await server.initialize();
+    const started = await server.callTool("codex", {
+      prompt: "ACTIVITY=Counting-the-files HANG",
+      cwd: process.cwd(),
+      approvalPolicy: "never",
+      sandbox: "read-only",
+    });
+
+    // The turn hangs, so this call is still open when the notification arrives.
+    server.startToolCallWithProgress(
+      "codex_check",
+      { action: "poll", sessionId: started.sessionId, waitMs: 10_000 },
+      "tok-e2e"
+    );
+
+    const notification = await server.waitForNotification("notifications/progress");
+    expect(notification.params.progressToken).toBe("tok-e2e");
+    expect(notification.params.message).toBe("Counting-the-files");
+    expect(notification.params.progress).toBe(1);
+  }, 40_000);
 });
 
 describe.skipIf(!HARNESS_RUNS_HERE)("two servers on one state directory", () => {

@@ -47,9 +47,9 @@ result, an error, a cancellation, or the death of the process driving it. Only
 one turn of a session runs at a time; different sessions run at once.
 
 **result** — what a finished turn answers with: the final assistant text,
-structured output when the caller asked for a schema, and the turn's status.
-The first `codex_check` that sees a terminal status carries it; later checks of
-the same turn report the status alone.
+structured output when the caller asked for a schema, the turn's status and its
+outcome. Every `codex_check` of a terminal session carries it, so a caller that
+lost it reads it back.
 
 **rollout log** — Codex's own transcript of a thread, written by the Codex CLI
 under `~/.codex/sessions/`. Every reasoning step, command and message of a turn
@@ -62,8 +62,14 @@ from it.
 `error`, `cancelled` or `abandoned`. `idle`, `error` and `cancelled` are
 terminal for the turn — stop checking there.
 
-**terminal status** — `idle`, `error` or `cancelled`: the turn is over and the
-result, if there is one, has been handed out.
+**terminal status** — `idle`, `error` or `cancelled`: the turn is over and every
+check of the session carries its result.
+
+**outcome** — how a turn ended, as the server saw it end: `completed`, `error`
+or `cancelled`. It is carried by `result.outcome` and by `lastTurn.outcome` of
+`codex_session(action="get")`, and closing a session that answered does not
+rewrite it — `status` says what the session is now, `outcome` says what the work
+came to.
 
 **abandoned** — the status of a session whose server went away mid-turn. Nothing
 failed and nobody asked it to stop: the work was cut off, no process holds the
@@ -76,6 +82,11 @@ backend reported, and the activity.
 **activity** — one line in Codex's own words saying what it is doing right now,
 carried as `progress.activity`. It is a heading, not a percentage: the newest
 line overwrites the one before it, and nothing accumulates.
+
+**progress notification** — `notifications/progress`, sent to a client that put
+`_meta.progressToken` on its call, while that call is still being held. It
+carries one activity line as its `message`, which is what the client shows under
+the running tool call. A call with no token is sent none.
 
 **activity marker** — the `%%%ACTIVITY: …%%%` line Codex writes because the
 server puts a standing developer instruction on the thread. The server lifts

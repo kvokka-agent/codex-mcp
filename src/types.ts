@@ -223,8 +223,6 @@ export interface SessionInfo {
   config?: Record<string, unknown>;
   pendingRequests: Map<string, PendingRequest>;
   lastResult?: TurnResult;
-  /** Set once `lastResult` has been handed to a caller, so no poll repeats it. */
-  resultDelivered?: boolean;
   progressState?: {
     lastEventAt: string;
     lastMethod?: string;
@@ -260,8 +258,28 @@ export interface PublicSessionInfo {
    * what the work was cut off in the middle of.
    */
   activity?: string;
+  /**
+   * How the last turn of this session ended.
+   *
+   * `status` says what the session is now, and closing a session that answered
+   * leaves it `cancelled`; this says what the work came to, and no later close
+   * touches it. Absent until a turn ends.
+   */
+  lastTurn?: LastTurnInfo;
   /** Absent when no server holds the session, which is what makes it resumable. */
   owner?: SessionOwnership;
+}
+
+/** The end of a turn, as the session reports it after the fact. */
+export interface LastTurnInfo {
+  turnId: string;
+  /** Absent on a result restored from a server that recorded no outcome. */
+  outcome?: TurnOutcome;
+  /** The backend's own turn status, where it sent one. */
+  status?: string;
+  completedAt: string;
+  /** What failed, on an outcome of `error` or `cancelled`. */
+  error?: string;
 }
 
 /** Sensitive session info */
@@ -274,8 +292,17 @@ export interface SensitiveSessionInfo extends PublicSessionInfo {
 
 // ── Result Types ───────────────────────────────────────────────────
 
+/** How a turn ended, as the server saw it end. */
+export type TurnOutcome = "completed" | "error" | "cancelled";
+
 export interface TurnResult {
   turnId: string;
+  /**
+   * How the turn ended, recorded where the server saw it end rather than read
+   * back out of the turn record. Absent on a result restored from a server
+   * that did not record one.
+   */
+  outcome?: TurnOutcome;
   /** Stable final assistant text for this turn: `output` when the backend sent one, else the last completed agent message. */
   text?: string;
   /** `turn.output` as sent. Only `codex exec` sends one; the app-server Turn has no such field. */

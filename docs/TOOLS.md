@@ -99,7 +99,7 @@ Every action answers with the same payload:
 }
 ```
 
-`result` is absent until the check that first sees a terminal status.
+`result` is absent until the status is terminal, and then every check carries it.
 
 | Parameter | Type | Used with |
 | --- | --- | --- |
@@ -134,8 +134,10 @@ The payload's parts:
 - `actions[]` — what the caller must answer, each with its `requestId`, `kind`
   (`command`, `fileChange`, `user_input`), the backend's raw `params`, and the
   amendment context a command approval offers.
-- `result` — the finished turn's answer, carried by the first check that sees a
-  terminal status and never repeated.
+- `result` — the finished turn's answer, carried by every check that sees a
+  terminal status. `result.outcome` says how the turn ended — `completed`,
+  `error` or `cancelled` — as the server saw it end. A caller that lost the
+  answer reads it back here instead of writing one of its own.
 - `interactionState` — `working`, `waiting_input` or `finished`.
 - `recommendedNextAction` — `poll`, `respond_permission`, `respond_user_input`
   or `none`.
@@ -182,8 +184,14 @@ only when asked for), `olderThanMs`, `dryRun`, and `includeDisk` (default
 
 Each listed session carries `status`, `createdAt`, `lastActiveAt`,
 `pendingRequestCount`, the `model`, `approvalPolicy` and `sandbox` it runs with,
-`activity`, and `owner` — `{ pid, state: "self" | "other" }` for a session a
-running server holds, and nothing at all for a free one.
+`activity`, `lastTurn`, and `owner` — `{ pid, state: "self" | "other" }` for a
+session a running server holds, and nothing at all for a free one.
+
+`lastTurn` is `{ turnId, outcome, status, completedAt, error }` for the last turn
+that ended, absent until one does. `status` says what the session is now and
+`cancel` rewrites it; `lastTurn` says what the work came to and `cancel` leaves
+it alone, so a session closed after it answered reads `status: "cancelled"` with
+`lastTurn.outcome: "completed"`.
 
 `resume` and `fork` need app-server mode. In `exec` mode both fail with
 `THREAD_FORK_RESUME_FAILED` carrying `EXEC_NOT_SUPPORTED`.

@@ -22,6 +22,7 @@ import {
   recommendedNextActionForStatus,
   waitForCodexSessionForegroundResult,
 } from "../utils/execution.js";
+import type { ProgressReporter } from "../utils/progress-notifier.js";
 
 function safeGetProgress(
   sessionManager: SessionManager,
@@ -53,7 +54,8 @@ export async function executeCodex(
   args: CodexToolParams,
   sessionManager: SessionManager,
   serverCwd: string,
-  requestSignal?: AbortSignal
+  requestSignal?: AbortSignal,
+  progress?: ProgressReporter
 ): Promise<SessionStartResult | CodexCompletedResult> {
   const cwd = resolveAndValidateCwd(args.cwd, serverCwd);
   const spawnOpts = extractSpawnOptions(args);
@@ -89,7 +91,8 @@ export async function executeCodex(
     sessionManager,
     startResult.sessionId,
     waitMs,
-    requestSignal
+    requestSignal,
+    progress
   );
   return {
     sessionId: startResult.sessionId,

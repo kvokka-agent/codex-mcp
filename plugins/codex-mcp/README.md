@@ -41,8 +41,25 @@ Spawn the subagent and hand it the work:
 Agent(subagent_type="codex-mcp:codex", prompt="<what Codex should do>")
 ```
 
-It answers with one block: `status`, `sessionId`, `model`, whether it closed the
-session, anything it declined, and Codex's result verbatim.
+It answers with one block and nothing around it: the `outcome` of the turn, the
+`sessionId`, the `model` Codex ran on, the last `activity` line, whether the
+`session` is closed, anything it `declined`, and last the `result` — what Codex
+answered, verbatim and whole.
+
+`outcome` is the turn's, read from `lastTurn` and untouched by the close, so a
+finished turn reads `completed` even though the closed session's own status is
+`cancelled`. Where the subagent holds no result it writes
+`result: unavailable — <what the tools answered>`; it never writes an account of
+the work in place of the answer.
+
+## Watching a turn that has not finished
+
+The subagent holds one `codex_check` call open for as long as the client allows,
+so a turn of any length is a handful of calls rather than a poll on a timer. The
+server does not leave that call silent: each activity line Codex writes goes to
+the client as an MCP `notifications/progress` while the call is still held, and
+the client shows it under the running tool call. Nothing has to be asked for
+beyond the `_meta.progressToken` an MCP client already sends.
 
 ## Why the hook
 

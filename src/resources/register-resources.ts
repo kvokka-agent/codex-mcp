@@ -257,7 +257,7 @@ function buildGotchasText(): string {
     "",
     "- `status` is one of `running`, `waiting_approval`, `idle`, `error`, `cancelled`.",
     "- `actions[]` holds what the caller must answer: approval requests and questions. Answer each by its `requestId`.",
-    "- `result` arrives with the first check that sees a terminal status and carries the turn's final answer; later checks of the same turn report the status alone.",
+    "- `result` arrives with the first check that sees a terminal status and carries the turn's final answer; every later check of that terminal session carries it again, so a lost answer is read back rather than written from memory.",
     "- Terminal `result.text` is the turn's final assistant message.",
     "- `result.output` is exec-mode only, where the exec client fills it with that same message. The app-server `Turn` has no text field: `result.turn` carries `turn.status` and `turn.error`, and the answer stays in `result.text`.",
     "- `progress` normalizes the current phase, the pending action count, the time of the last event, the active turn id and the token totals the backend has reported.",
