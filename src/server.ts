@@ -133,15 +133,6 @@ export function createServer(
     isError: z.boolean().optional(),
   };
 
-  const executionInfoSchema = z.object({
-    requested: z.enum(["background", "foreground"]),
-    effective: z.enum(["background", "foreground"]),
-    waitForResultMs: z.number().int().positive().optional(),
-    fallbackReason: z
-      .enum(["wait_for_result_timeout", "interactive_poll_required", "wait_refused"])
-      .optional(),
-  });
-
   const interactionStateSchema = z.enum(["working", "waiting_input", "finished"]);
   const nextActionSchema = z.enum(["poll", "respond_permission", "respond_user_input", "none"]);
   const progressSchema = z.object({
@@ -169,6 +160,14 @@ export function createServer(
       .string()
       .optional()
       .describe("One line in Codex's own words saying what it is doing right now."),
+    activitySince: z.string().optional().describe("ISO instant that line arrived."),
+    activityStandingMs: z
+      .number()
+      .int()
+      .optional()
+      .describe(
+        "How long the session has been on that line (ms). Report it as it stands — 'writing the migration — 15 min' — rather than counting your own polls."
+      ),
   });
 
   const setupResultShape = {
@@ -210,17 +209,8 @@ export function createServer(
       .describe(
         "Recommended minimum delay before next poll (ms): running >=120000, waiting_approval ~=1000."
       ),
-    result: z
-      .unknown()
-      .optional()
-      .describe("Final result when waitForResult is set and session completed."),
-    completedAt: z
-      .string()
-      .optional()
-      .describe("ISO timestamp when the session completed (only when waitForResult succeeded)."),
     compatWarnings: z.array(z.string()).optional(),
     progress: progressSchema.optional(),
-    execution: executionInfoSchema.optional(),
     interactionState: interactionStateSchema.optional(),
     recommendedNextAction: nextActionSchema.optional(),
     ...errorOutputShape,
@@ -408,7 +398,7 @@ export function createServer(
     {
       title: "Start Codex Session",
       description:
-        "Start a Codex session asynchronously and return `{ sessionId, threadId, status, pollInterval }`. Poll with `codex_check(action='poll')` until terminal status, and treat `pollInterval` as a minimum hint: `running` >=120000ms, `waiting_approval` ~=1000ms. See `codex-mcp:///quickstart` for the main loop, `codex-mcp:///config` for parameter guidance, and `codex-mcp:///delegation-guide` for approval/sandbox presets.",
+        "Start a Codex session and return `{ sessionId, threadId, status, progress }` at once — the turn runs on. Follow it with `codex_check(action='poll', waitMs=300000)` in a loop until the status is terminal: that call answers the moment Codex says it is working on something new, so write its `progress.activity` out where the person waiting reads it, then call again. See `codex-mcp:///quickstart` for the loop, `codex-mcp:///config` for parameter guidance, and `codex-mcp:///delegation-guide` for approval/sandbox presets.",
       inputSchema: {
         prompt: z.string().describe("Task or question"),
         approvalPolicy: z
@@ -453,15 +443,6 @@ export function createServer(
               .default(DEFAULT_APPROVAL_TIMEOUT_MS)
               .optional()
               .describe(`Auto-decline timeout in ms (default: ${DEFAULT_APPROVAL_TIMEOUT_MS})`),
-            waitForResult: z
-              .number()
-              .int()
-              .positive()
-              .max(300000)
-              .optional()
-              .describe(
-                "Block up to this many ms for session completion (max 300000). Falls back to sessionId for polling if not done in time. Only use with approvalPolicy on-failure/never."
-              ),
           })
           .optional()
           .describe("Advanced settings."),
@@ -475,15 +456,9 @@ export function createServer(
         openWorldHint: true,
       },
     },
-    async (args, extra) => {
+    async (args) => {
       try {
-        const result = await executeCodex(
-          args,
-          sessionManager,
-          serverCwd,
-          extra.signal,
-          progressReporterFor(extra._meta, extra.sendNotification)
-        );
+        const result = await executeCodex(args, sessionManager, serverCwd);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
           structuredContent: toStructuredContent(result),
@@ -507,7 +482,7 @@ export function createServer(
     {
       title: "Continue Codex Session",
       description:
-        "Continue existing session. Allowed in `idle`/`error`; otherwise `SESSION_BUSY`. Returns immediately. Use `pollInterval` as a minimum hint: `running` >=120000ms, `waiting_approval` ~=1000ms.",
+        "Continue existing session. Allowed in `idle`/`error`; otherwise `SESSION_BUSY`. Returns at once and the turn runs on; follow it with the same `codex_check(action='poll', waitMs=300000)` loop as `codex`.",
       inputSchema: {
         sessionId: z.string().describe("Session ID from codex tool"),
         prompt: z.string().describe("Follow-up message"),
@@ -522,15 +497,6 @@ export function createServer(
           .record(z.string(), z.unknown())
           .optional()
           .describe("Structured output schema override (top-level in codex_reply)."),
-        waitForResult: z
-          .number()
-          .int()
-          .positive()
-          .max(300000)
-          .optional()
-          .describe(
-            "Wait up to this many ms for the reply turn to complete and return the result directly. Max 300000 (5 min). If the turn does not finish in time or enters interactive approval/user-input flow, returns session metadata for polling."
-          ),
       },
       outputSchema: sessionStartOutputShape,
       annotations: {
@@ -541,14 +507,9 @@ export function createServer(
         openWorldHint: true,
       },
     },
-    async (args, extra) => {
+    async (args) => {
       try {
-        const result = await executeCodexReply(
-          args,
-          sessionManager,
-          extra.signal,
-          progressReporterFor(extra._meta, extra.sendNotification)
-        );
+        const result = await executeCodexReply(args, sessionManager);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
           structuredContent: toStructuredContent(result),
@@ -713,7 +674,7 @@ export function createServer(
       title: "Poll & Respond",
       description: `Report where a session stands and answer what it waits for. Every action returns the same payload: { sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }. The turn's own events are never returned — Codex writes the full transcript to its rollout log under ~/.codex/sessions/. Answer every entry of actions[]; stop checking on terminal status (idle/error/cancelled), where result carries the final answer and keeps carrying it while the session stands there. WARNING: without waitMs you are polling on a timer, and approvalTimeoutMs defaults to ${DEFAULT_APPROVAL_TIMEOUT_MS}ms, so approvals expire between checks unless you raise the timeout, use non-interactive policies, or pass waitMs — which answers the moment an approval arrives. See codex-mcp:///quickstart and codex-mcp:///gotchas.
 
-poll: current status; with waitMs it blocks until the status changes, an action arrives or the turn ends, and answers with the state it found only when the client will hold the call no longer. Send _meta.progressToken with the call and each activity line of the turn arrives as notifications/progress while it is still held.
+poll: current status; with waitMs it holds the call until the status changes, an action arrives, the turn ends, or Codex says it is working on something new — and answers with the state it found when the window runs out instead. Loop it: write progress.activity out where the person waiting reads it, then call again. progress.activityStandingMs says how long that same line has stood, so a turn that is still on it reads "compiling — 15 min" rather than repeating itself. waitedMs says how long the call was held. Send _meta.progressToken and the same lines also arrive as notifications/progress while the call is still open, with a heartbeat every 30s.
 respond_permission: answer an approval action.
 respond_user_input: answer a user-input action.`,
       inputSchema: codexCheckInputSchema,
@@ -767,6 +728,13 @@ respond_user_input: answer a user-input action.`,
           .optional()
           .describe(
             "The finished turn's answer. Every check of a terminal session carries it, so a caller that lost it reads it back rather than filling it in from memory."
+          ),
+        waitedMs: z
+          .number()
+          .int()
+          .optional()
+          .describe(
+            "How long this poll held the call before answering (ms). Present on poll with waitMs."
           ),
         ...errorOutputShape,
       },

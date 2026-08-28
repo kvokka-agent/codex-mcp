@@ -91,7 +91,6 @@ describe("extractSpawnOptions", () => {
         summary: "concise",
         ephemeral: true,
         approvalTimeoutMs: 300000,
-        waitForResult: 120000,
         images: ["/tmp/shot.png"],
         outputSchema: { type: "object" },
         config: { model_reasoning_effort: "high" },

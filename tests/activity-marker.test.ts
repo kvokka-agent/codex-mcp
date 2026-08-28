@@ -412,9 +412,23 @@ describe("SessionManager and the activity marker", () => {
     expect(activities[1].data.itemId).toBe("msg_2");
   });
 
-  it("does not wake a long poll on a marker", async () => {
+  it("wakes a long poll on a marker", async () => {
     const before = manager.getSessionSignal(sessionId);
+    let woke = false;
+    const waiting = manager.waitForChange(sessionId, 60_000).then(() => {
+      woke = true;
+    });
+
     streamMessage("%%%ACTIVITY: Читаю тест%%%\nтекст", "msg_1");
+    await waiting;
+
+    expect(woke).toBe(true);
+    expect(manager.getSessionSignal(sessionId).key).not.toBe(before.key);
+  });
+
+  it("sleeps through a delta that carries no marker", () => {
+    const before = manager.getSessionSignal(sessionId);
+    streamMessage("обычный текст без единого маркера", "msg_1");
     expect(manager.getSessionSignal(sessionId).key).toBe(before.key);
   });
 });

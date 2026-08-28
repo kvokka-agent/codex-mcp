@@ -43,20 +43,13 @@ its own permission level rather than inheriting one.
 | `outputSchema` | object | — | JSON Schema for structured output |
 | `images` | string[] | — | Local image paths added to the first message |
 | `approvalTimeoutMs` | number | `60000` | How long an unanswered approval waits before the server declines it |
-| `waitForResult` | number | — | Block up to this many ms for the result, at most `300000` |
 
-Returns `{ sessionId, threadId, status, pollInterval, progress, execution,
+Returns `{ sessionId, threadId, status, pollInterval, progress,
 interactionState, recommendedNextAction }`, plus `compatWarnings` when the
-backend refused something and the server carried on. With `waitForResult` and a
-turn that finished in time it also returns `result` and `completedAt`.
+backend refused something and the server carried on.
 
-`execution` says what happened to a foreground wait: `requested` and `effective`
-are `background` or `foreground`, and `fallbackReason` is
-`wait_for_result_timeout`, `interactive_poll_required` — the turn asked for an
-approval — or `wait_refused`.
-
-Use `waitForResult` only with `approvalPolicy` `on-failure` or `never`. An
-approval request ends the wait early and hands back a session to poll.
+It returns as soon as the thread is up, and the turn runs on. Follow it with
+`codex_check(action="poll", waitMs=300000)`.
 
 ## `codex_reply` — continue a session
 
@@ -70,7 +63,6 @@ Allowed while the session is `idle` or `error`. Anything else answers
 | `prompt` | string | yes |
 | `model`, `approvalPolicy`, `effort`, `summary`, `personality`, `sandbox`, `cwd` | as in `codex` | no |
 | `outputSchema` | object | no |
-| `waitForResult` | number, at most `300000` | no |
 
 Returns what `codex` returns.
 
@@ -130,7 +122,11 @@ The payload's parts:
 - `progress.phase` — `starting`, `running`, `reasoning`, `acting`,
   `waiting_approval`, `finished`, `error` or `cancelled`.
 - `progress.activity` — the last activity line, absent until the turn writes
-  one.
+  one. `progress.activitySince` is when it arrived and
+  `progress.activityStandingMs` how long the session has been on it, so a caller
+  reports "compiling — 15 min" without counting its own polls.
+- `waitedMs` — how long a `poll` with `waitMs` held the call. A round that
+  answers with nothing new held it for the whole window.
 - `actions[]` — what the caller must answer, each with its `requestId`, `kind`
   (`command`, `fileChange`, `user_input`), the backend's raw `params`, and the
   amendment context a command approval offers.
@@ -145,9 +141,18 @@ The payload's parts:
   absent otherwise.
 
 `waitMs` long-polls: the call returns when the status changes, an action
-arrives, or the turn ends. Reasoning, command output, message deltas and token
-counters do not end the wait. Nothing else returns either, so ask for more than
-the task can take — `3600000` is this server's own maximum.
+arrives, the turn ends, or Codex says it is working on something new. Reasoning,
+command output, message deltas and token counters do not end the wait.
+
+A round of `300000` is what the driver is written for: the caller writes
+`progress.activity` out after each round and calls again, so the person waiting
+reads the work as it happens. `3600000` is this server's own maximum, and a
+round that long says nothing for an hour when the turn stays on one line.
+
+A poll that carries `_meta.progressToken` also gets `notifications/progress`
+while it is held — the standing line, each new line, and the standing line again
+every 30 s (`CODEX_MCP_PROGRESS_HEARTBEAT_MS`) with how long it has stood. Those
+reach the client that made the call and nobody else.
 
 What ends an otherwise silent wait is the MCP client, which cuts a tool call
 that runs too long. The server returns 5 seconds inside that ceiling with the

@@ -3,7 +3,11 @@
  */
 import type { SessionManager } from "../session/manager.js";
 import { PollWindow } from "../utils/poll-window.js";
-import type { ProgressReporter } from "../utils/progress-notifier.js";
+import {
+  activityLine,
+  heartbeatIntervalMs,
+  type ProgressReporter,
+} from "../utils/progress-notifier.js";
 import {
   ALL_DECISIONS,
   ErrorCode,
@@ -39,7 +43,8 @@ export function executeCodexCheck(
   sessionManager: SessionManager,
   requestSignal?: AbortSignal,
   pollWindow: PollWindow = new PollWindow(),
-  progress?: ProgressReporter
+  progress?: ProgressReporter,
+  heartbeatMs: number = heartbeatIntervalMs()
 ): CodexCheckReturn {
   switch (args.action) {
     case "poll": {
@@ -66,7 +71,8 @@ export function executeCodexCheck(
           Math.min(waitMs, MAX_LONG_POLL_WAIT_MS, budgetMs),
           requestSignal,
           pollWindow,
-          progress
+          progress,
+          heartbeatMs
         );
       }
 
@@ -183,16 +189,17 @@ export function executeCodexCheck(
 }
 
 /**
- * Hold the call until the session state the caller acts on moves.
+ * Hold the call until the session moves, and answer with where it stands.
  *
- * A status change, a new action to answer and the end of the turn return at
- * once; the delta and token-counter traffic in between returns nothing, and a
- * window in which none of the three happened returns the status it started
- * with, because the client will not hold the call any longer.
+ * A status change, a new action to answer, the end of the turn and a new line
+ * saying what Codex is doing each return at once; the delta and token-counter
+ * traffic in between returns nothing, and a window in which none of them
+ * happened returns the status it started with, because the client will not hold
+ * the call any longer. `waitedMs` on the answer says which of the two it was.
  *
- * What the turn says it is doing travels out of the held call as it happens, as
- * `notifications/progress`. It does not end the wait: the caller answers
- * statuses and actions, and an activity line is neither.
+ * The same lines also travel out of the call while it is still held, as
+ * `notifications/progress`, together with a heartbeat repeating the standing
+ * line and how long it has stood.
  */
 async function pollWithWait(
   sessionManager: SessionManager,
@@ -200,21 +207,15 @@ async function pollWithWait(
   waitMs: number,
   signal: AbortSignal | undefined,
   pollWindow: PollWindow,
-  progress?: ProgressReporter
+  progress?: ProgressReporter,
+  heartbeatMs = 0
 ): Promise<CheckResult> {
   const startedAt = Date.now();
   const deadline = startedAt + waitMs;
   let state = sessionManager.getSessionSignal(sessionId);
   const baseline = state.key;
 
-  let stopReporting: (() => void) | undefined;
-  if (progress) {
-    // The line the session is already on, so a caller that starts polling
-    // mid-turn reads what is happening now rather than waiting for the change.
-    const current = sessionManager.getProgress(sessionId).activity;
-    if (current !== undefined) progress.report(current);
-    stopReporting = sessionManager.onActivity(sessionId, (activity) => progress.report(activity));
-  }
+  const stopReporting = startReporting(sessionManager, sessionId, startedAt, heartbeatMs, progress);
   try {
     while (!state.awaitsCaller && state.key === baseline && !signal?.aborted) {
       const remainingMs = deadline - Date.now();
@@ -252,8 +253,55 @@ async function pollWithWait(
       }
     }
 
-    return sessionManager.pollStatus(sessionId);
+    return { ...sessionManager.pollStatus(sessionId), waitedMs: Date.now() - startedAt };
   } finally {
-    stopReporting?.();
+    stopReporting();
   }
+}
+
+/**
+ * Tell the client what the turn is doing for as long as the call is held: the
+ * line it is on now, each new line as it arrives, and that line again every
+ * `heartbeatMs` with how long it has stood.
+ *
+ * The heartbeat is what a person watching a long turn reads, and it is also
+ * what keeps a client's idle watchdog from ending a call that has said nothing.
+ * A caller that sent no progress token is told nothing and needs no timer.
+ */
+function startReporting(
+  sessionManager: SessionManager,
+  sessionId: string,
+  startedAt: number,
+  heartbeatMs: number,
+  progress?: ProgressReporter
+): () => void {
+  if (!progress) return () => {};
+
+  const reportStanding = (): void => {
+    try {
+      progress.report(activityLine(sessionManager.getProgress(sessionId), Date.now() - startedAt));
+    } catch (err: unknown) {
+      // The session went out from under the held call. The poll itself reports
+      // that, and a line invented here would say the turn is still alive.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[codex-mcp] Progress heartbeat stopped for session '${sessionId}': ${message}`
+      );
+    }
+  };
+
+  // The line the session is already on, so a caller that starts polling
+  // mid-turn reads what is happening now rather than waiting for the change.
+  reportStanding();
+  const stopListening = sessionManager.onActivity(sessionId, (activity) =>
+    progress.report(activity)
+  );
+  if (heartbeatMs <= 0) return stopListening;
+
+  const timer = setInterval(reportStanding, heartbeatMs);
+  timer.unref?.();
+  return () => {
+    clearInterval(timer);
+    stopListening();
+  };
 }

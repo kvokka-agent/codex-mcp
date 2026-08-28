@@ -27,9 +27,9 @@ thread with `codex exec resume`. No approvals, no user input, no fork, no
 resume, and no activity marker. [DESIGN.md](DESIGN.md) states what each
 mode reaches.
 
-**the plugin** — the Claude Code plugin published from this repository:
-the MCP server, a `codex` subagent that drives one Codex turn to its result, and
-a `PreToolUse` hook that keeps the Codex tools inside that subagent.
+**the plugin** — the Claude Code plugin published from this repository: the MCP
+server, and a `codex` skill that starts a turn, follows it in rounds of five
+minutes and writes out what Codex is working on between them.
 [plugins/codex-mcp/README.md](../plugins/codex-mcp/README.md) describes it.
 
 ## The work
@@ -94,12 +94,17 @@ each marker out of the agent-message stream and cuts every one of them out of
 the result text. [SESSIONS.md](SESSIONS.md) states the bounds.
 
 **long poll** — `codex_check(action="poll", waitMs=…)`: the call blocks until
-the status changes, an action arrives or the turn ends. One wait is capped;
-a turn longer than the cap is carried by repeating the call.
+the status changes, an action arrives, the turn ends, or Codex says it is working
+on something new. One wait is capped; a turn longer than the cap is carried by
+repeating the call.
 
-**foreground wait** — `waitForResult` on `codex` or `codex_reply`: the call
-blocks for the turn's result instead of returning a session to poll. It falls
-back to polling when the turn outruns the budget or needs an answer.
+**round** — one long poll and the line the caller writes after it. The driver
+polls in rounds of 300000 ms, so a turn of any length reads as a list of what the
+work was on.
+
+**heartbeat** — the `notifications/progress` a held poll repeats every
+`CODEX_MCP_PROGRESS_HEARTBEAT_MS` (30000), carrying the standing activity line
+and how long it has stood.
 
 **poll interval** — the minimum delay the server recommends before the next
 check, in `pollInterval`. It is a floor, not a schedule.

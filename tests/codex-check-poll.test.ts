@@ -333,6 +333,74 @@ describe("executeCodexCheck", () => {
       expect(info.lastTurn?.error).toBe("Cancelled by user");
     });
 
+    it("holds the call until the finished turn's answer is on the session", async () => {
+      const { advance } = useFakeClock();
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 5000 },
+        manager,
+        undefined,
+        pinnedWindow()
+      ) as Promise<CheckResult>;
+      let answered = false;
+      void pending.then(() => {
+        answered = true;
+      });
+
+      // The thread reports idle one notification ahead of turn/completed, and
+      // turn/completed is what carries the answer.
+      client.emitNotification(Methods.THREAD_STATUS_CHANGED, {
+        threadId: "thread_mock",
+        status: { type: "idle" },
+      });
+      await advance(1000);
+
+      // Answering here would hand the caller a finished turn with no result.
+      expect(answered).toBe(false);
+
+      completeTurn("the answer");
+      const res = expectCheck(await pending);
+
+      expect(res.status).toBe("idle");
+      expect(res.result?.text).toBe("the answer");
+    });
+
+    it("answers the held call with the line the turn just wrote", async () => {
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 5000 },
+        manager,
+        undefined,
+        pinnedWindow()
+      );
+
+      emitOutput("%%%ACTIVITY: Читаю тест%%%\n");
+      const res = expectCheck(await pending);
+
+      // The turn is still running: what ended the wait is the new heading, which
+      // is what the caller writes out before it polls again.
+      expect(res.status).toBe("running");
+      expect(res.progress.activity).toBe("Читаю тест");
+      expect(res.waitedMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it("holds the call through a delta that says nothing new", async () => {
+      const { advance } = useFakeClock();
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 5000 },
+        manager,
+        undefined,
+        pinnedWindow()
+      );
+
+      emitOutput("обычный текст без маркера");
+      await advance(5000);
+      const res = expectCheck(await pending);
+
+      // The window ran out rather than something happening in it.
+      expect(res.status).toBe("running");
+      expect(res.progress.activity).toBeUndefined();
+      expect(res.waitedMs).toBe(5000);
+    });
+
     it("reports each activity line to the client while it holds the call", async () => {
       const sent: ProgressNotification[] = [];
       const reporter = new ProgressReporter("tok-1", async (n) => {
@@ -349,15 +417,17 @@ describe("executeCodexCheck", () => {
 
       emitOutput("%%%ACTIVITY: Читаю тест%%%\n");
       emitOutput("%%%ACTIVITY: Правлю манифест%%%\n");
-      // Neither line ended the wait: an activity is not something the caller answers.
-      expect(sent.map((n) => n.params.message)).toEqual(["Читаю тест", "Правлю манифест"]);
-
       completeTurn("the answer");
       const res = expectCheck(await pending);
 
-      expect(res.status).toBe("idle");
+      // The standing line first, then each new one as it arrived.
+      expect(sent.map((n) => n.params.message)).toEqual([
+        "running — 0s",
+        "Читаю тест",
+        "Правлю манифест",
+      ]);
       expect(res.result?.text).toBe("the answer");
-      expect(sent.map((n) => n.params.progress)).toEqual([1, 2]);
+      expect(sent.map((n) => n.params.progress)).toEqual([1, 2, 3]);
       expect(sent.every((n) => n.params.progressToken === "tok-1")).toBe(true);
     });
 
@@ -376,12 +446,46 @@ describe("executeCodexCheck", () => {
         reporter
       );
 
-      // A caller that starts polling mid-turn reads what is happening now
-      // rather than waiting for the next change.
-      expect(sent.map((n) => n.params.message)).toEqual(["Читаю тест"]);
+      // A caller that starts polling mid-turn reads what is happening now, and
+      // how long it has been happening, rather than waiting for the next change.
+      expect(sent.map((n) => n.params.message)).toEqual(["Читаю тест — 0s"]);
 
       completeTurn("the answer");
       await pending;
+    });
+
+    it("repeats the standing line with how long it has stood", async () => {
+      const { advance } = useFakeClock();
+      emitOutput("%%%ACTIVITY: Собираю проект%%%\n");
+
+      const sent: ProgressNotification[] = [];
+      const reporter = new ProgressReporter("tok-hb", async (n) => {
+        sent.push(n);
+      });
+      const pending = executeCodexCheck(
+        { action: "poll", sessionId, waitMs: 300_000 },
+        manager,
+        undefined,
+        pinnedWindow(),
+        reporter,
+        10_000
+      );
+
+      // The window is the client's, not the 300000 asked for: an unconfigured
+      // client is held to the SDK's 60000 less the 5000 margin.
+      await advance(60_000);
+      await pending;
+
+      // One line when the poll started and one every ten seconds after it, each
+      // saying how long the same work has been running.
+      expect(sent.map((n) => n.params.message)).toEqual([
+        "Собираю проект — 0s",
+        "Собираю проект — 10s",
+        "Собираю проект — 20s",
+        "Собираю проект — 30s",
+        "Собираю проект — 40s",
+        "Собираю проект — 50s",
+      ]);
     });
 
     it("stops reporting once the call it belonged to has returned", async () => {
@@ -398,11 +502,12 @@ describe("executeCodexCheck", () => {
       );
       completeTurn("the answer");
       await pending;
+      const afterTheCall = sent.length;
 
       await manager.replyToSession(sessionId, "and now?");
       emitOutput("%%%ACTIVITY: Правлю манифест%%%\n");
 
-      expect(sent).toHaveLength(0);
+      expect(sent).toHaveLength(afterTheCall);
     });
 
     it("carries an approval through to the app-server and back to running", () => {

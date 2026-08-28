@@ -1,28 +1,21 @@
 /**
  * codex tool — start a new Codex agent session.
+ *
+ * It returns as soon as the thread is up. What the turn then does reaches the
+ * caller through `codex_check(action="poll", waitMs=…)`, which answers each time
+ * Codex says it is working on something new.
  */
 import type { SessionManager } from "../session/manager.js";
-import type {
-  ExecutionInfo,
-  InteractionState,
-  ProgressInfo,
-  RecommendedNextAction,
-  SessionStatus,
-  SessionStartResult,
-  TurnResult,
-} from "../types.js";
-import { DEFAULT_EFFORT_LEVEL, WAITING_APPROVAL_POLL_INTERVAL } from "../types.js";
+import type { ProgressInfo, SessionStartResult } from "../types.js";
+import { DEFAULT_EFFORT_LEVEL } from "../types.js";
 import type { CodexToolParams } from "../utils/config.js";
 import { extractSpawnOptions } from "../utils/config.js";
 import { resolveAndValidateCwd } from "../utils/cwd.js";
 import {
-  buildExecutionInfo,
   coerceProgressForStatus,
   interactionStateForStatus,
   recommendedNextActionForStatus,
-  waitForCodexSessionForegroundResult,
 } from "../utils/execution.js";
-import type { ProgressReporter } from "../utils/progress-notifier.js";
 
 function safeGetProgress(
   sessionManager: SessionManager,
@@ -36,27 +29,11 @@ function safeGetProgress(
     : undefined;
 }
 
-export type CodexCompletedResult = {
-  sessionId: string;
-  threadId: string;
-  result: TurnResult | undefined;
-  status: SessionStatus;
-  completedAt?: string;
-  pollInterval?: number;
-  compatWarnings?: string[];
-  progress?: ProgressInfo;
-  execution?: ExecutionInfo;
-  interactionState?: InteractionState;
-  recommendedNextAction?: RecommendedNextAction;
-};
-
 export async function executeCodex(
   args: CodexToolParams,
   sessionManager: SessionManager,
-  serverCwd: string,
-  requestSignal?: AbortSignal,
-  progress?: ProgressReporter
-): Promise<SessionStartResult | CodexCompletedResult> {
+  serverCwd: string
+): Promise<SessionStartResult> {
   const cwd = resolveAndValidateCwd(args.cwd, serverCwd);
   const spawnOpts = extractSpawnOptions(args);
   const effort = args.effort ?? DEFAULT_EFFORT_LEVEL;
@@ -69,57 +46,13 @@ export async function executeCodex(
     args.advanced
   );
 
-  const waitMs = args.advanced?.waitForResult;
-  const baseResult: SessionStartResult & {
-    execution?: ExecutionInfo;
-    interactionState?: InteractionState;
-    recommendedNextAction?: RecommendedNextAction;
-  } = {
+  return {
     ...startResult,
     progress: coerceProgressForStatus(
       "running",
       safeGetProgress(sessionManager, startResult.sessionId) ?? startResult.progress
     ),
-    execution: buildExecutionInfo(waitMs, "running"),
     interactionState: interactionStateForStatus("running"),
     recommendedNextAction: recommendedNextActionForStatus("running"),
-  };
-
-  if (!waitMs || waitMs <= 0) return baseResult;
-
-  const foreground = await waitForCodexSessionForegroundResult(
-    sessionManager,
-    startResult.sessionId,
-    waitMs,
-    requestSignal,
-    progress
-  );
-  return {
-    sessionId: startResult.sessionId,
-    threadId: startResult.threadId,
-    result: foreground.result,
-    status: foreground.status,
-    completedAt: foreground.completedAt,
-    compatWarnings: startResult.compatWarnings,
-    progress: coerceProgressForStatus(
-      foreground.status,
-      safeGetProgress(sessionManager, startResult.sessionId) ?? startResult.progress,
-      {
-        completedAt: foreground.completedAt,
-        pendingActionCount: foreground.pendingActionTypes?.length ?? 0,
-      }
-    ),
-    pollInterval:
-      foreground.status === "waiting_approval"
-        ? WAITING_APPROVAL_POLL_INTERVAL
-        : foreground.status === "running"
-          ? startResult.pollInterval
-          : undefined,
-    execution: buildExecutionInfo(waitMs, foreground.status, foreground.fallbackReason),
-    interactionState: interactionStateForStatus(foreground.status),
-    recommendedNextAction: recommendedNextActionForStatus(
-      foreground.status,
-      foreground.pendingActionTypes ?? []
-    ),
   };
 }

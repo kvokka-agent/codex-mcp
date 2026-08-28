@@ -118,6 +118,7 @@ seconds, 15 on Windows.
 | `pendingActionCount` | Unresolved pending requests |
 | `tokens` | Merged from `thread/tokenUsage/updated`, the exec turn's `usage`, and a recovered result, accepting camelCase and snake_case alike |
 | `activity` | The last activity marker of the turn, cleared when a turn starts |
+| `activitySince`, `activityStandingMs` | When that marker arrived, and how long the session has been on it |
 
 `reasoning` covers `item/reasoning/textDelta`,
 `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded` and
@@ -144,9 +145,13 @@ delivered the closing sentinel as `"%%"` then `"%\n"`. The scanner decides on
 the concatenation of the deltas and holds at most eleven characters between
 markers, or 480 inside one.
 
-**Why it does not wake a long poll.** A marker does not move `signalOf`. An
-activity line is a heading the caller reads on its next check, not something it
-answers, and waking a two-minute wait for one would undo what the wait is for.
+**Why it wakes a long poll.** `signalOf` carries the instant the line arrived, so
+each new heading ends the wait and the poll answers with it. That is what the
+person waiting reads: the caller writes the line out and polls again, and a turn
+of an hour reads as a list of what the work was on rather than as an hour of
+silence. A turn writes a handful of headings, so the round trips stay in the
+handful too — the deltas, the reasoning and the token counters underneath them
+move `signalOf` not at all.
 
 ## The event log
 
@@ -246,22 +251,29 @@ Measured against Claude Code 2.1.247: it puts a `progressToken` in `_meta` of
 every `tools/call`, `MCP_TOOL_TIMEOUT` reaches the spawned server's environment
 and bounds the call to the millisecond, `notifications/progress` does not push
 that bound out, and with nothing configured a call held 1500 s and was not cut.
-The server therefore sends no progress notifications: against this client they
-buy no time, and they never reach the caller's context.
 
-## Foreground execution
+### What the held call says while it waits
 
-`advanced.waitForResult` on `codex`, and `waitForResult` on `codex_reply`, turn
-the background start into a wait of at most 300,000 ms over the same
-`waitForChange` slices. It returns:
+A poll carrying a `progressToken` gets `notifications/progress`: the line the
+session stands on when the poll starts, each new line as it arrives, and that
+same line again every `PROGRESS_HEARTBEAT_MS` (30,000, overridden by
+`CODEX_MCP_PROGRESS_HEARTBEAT_MS`) with how long it has stood — `compiling — 5m`.
 
-- the `result` and `completedAt` when the status becomes `idle`, `error`,
-  `cancelled` or `abandoned`;
-- at once with `execution.fallbackReason: "interactive_poll_required"` when the
-  status becomes `waiting_approval`, because answering needs another tool call;
-- session metadata with `"wait_for_result_timeout"` when the budget runs out;
-- session metadata with `"wait_refused"` when the session already holds its four
-  waiters.
+The heartbeat is not decoration. Claude Code 2.1.250 arms a watchdog per call and
+ends one that has neither answered nor sent progress: 1,800,000 ms for a stdio
+server, bounded by that call's own timeout, `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`.
+Every notification resets it.
+
+Where those notifications are rendered is the client's business, and they reach
+the caller that made the call — never a person watching a subagent make it. The
+answer carries the same line, and writing it out is the caller's job.
+
+## Starting a turn
+
+`codex` returns when the thread is up; `codex_reply` returns when the turn is
+under way. Neither waits for the result, and there is no parameter that makes
+them: a call that blocks for an hour reports nothing while it blocks, which is
+the failure the poll loop exists to fix.
 
 ## Approval arbitration
 

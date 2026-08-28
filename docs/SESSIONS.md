@@ -7,26 +7,30 @@ How the five tools are used together. Each tool's inputs are in
 
 ```text
 1. codex(prompt=…, approvalPolicy=…, sandbox=…)   → { sessionId, status: "running" }
-2. codex_check(action="poll", waitMs=3600000)     → status, progress, actions[]
-3. answer every entry of actions[]                → respond_permission / respond_user_input
-4. repeat 2 until status is idle, error or cancelled
-5. read result from the check that first saw the terminal status
-6. codex_reply(prompt=…) to carry the same thread on
+2. codex_check(action="poll", waitMs=300000)      → status, progress, actions[]
+3. write progress.activity out where the person waiting reads it
+4. answer every entry of actions[]                → respond_permission / respond_user_input
+5. repeat 2 until status is idle, error or cancelled
+6. read result from the check that first saw the terminal status
+7. codex_reply(prompt=…) to carry the same thread on
 ```
 
-Two things end the loop early and are worth knowing about before starting.
-`advanced.waitForResult` on `codex` or `codex_reply` blocks for the result
-instead of returning a session to poll, for at most five minutes, and only makes
-sense with `approvalPolicy` `on-failure` or `never`. And `codex_session(action=
-"interrupt")` stops the current turn without ending the session.
+A start never blocks for the result, so step 2 is the only place the caller
+waits. `codex_session(action="interrupt")` stops the current turn without ending
+the session.
 
 ## Checking
 
 `codex_check(action="poll")` answers at once. With `waitMs` it holds the call
-until the status changes, an action arrives or the turn ends — one call covering
-a stretch that would otherwise be dozens of round trips. Message deltas,
-reasoning, command output and token counters move nothing the caller acts on and
-do not end the wait.
+until the status changes, an action arrives, the turn ends, or Codex says it is
+working on something new — one call covering a stretch that would otherwise be
+dozens of round trips. Message deltas, reasoning, command output and token
+counters move nothing the caller reports and do not end the wait.
+
+`waitedMs` says how long the call was held, and `progress.activityStandingMs` how
+long the session has been on the line it answers with. A caller that polls in
+rounds of 300000 writes one line per round — the new heading, or the standing one
+with the minutes it has stood — and needs to remember nothing between them.
 
 One wait is capped at 3,600,000 ms, and cut further to what the MCP client will
 hold a tool call open for. A turn that runs longer is carried by calling again:
@@ -88,17 +92,19 @@ a session was doing without reading the raw stream around it.
 
 ### While the call is still held
 
-A caller that put `_meta.progressToken` on its `tools/call` is sent each new
-activity line as `notifications/progress`, with the line as the notification's
-`message`, for as long as that call is held — a long poll of `codex_check`, or
-the foreground wait of `codex` and `codex_reply`. An MCP client renders that
-message under the running tool call, so a turn that takes an hour shows what it
-is doing instead of one silent call.
+A caller that put `_meta.progressToken` on its `tools/call` is sent, for as long
+as a `codex_check` long poll is held: the line the session stands on when the
+poll starts, each new line as it arrives, and that same line again every 30 s
+(`CODEX_MCP_PROGRESS_HEARTBEAT_MS`) with how long it has stood. An MCP client
+renders those under the running tool call.
 
-It travels alongside the wait and never ends it: the caller answers statuses and
-actions, and an activity line is neither. A call that carried no progress token
-is sent nothing — the client did not ask, and the protocol has no other place to
-put the line.
+The heartbeat also keeps a client watchdog from ending a call that has said
+nothing — Claude Code 2.1.250 ends a silent stdio call at 1,800,000 ms.
+
+A call that carried no progress token is sent nothing: the client did not ask,
+and the protocol has no other place to put the line. Whichever way, the
+notification reaches the caller that made the call and nobody else, so the line
+the caller writes out itself is what a person watching reads.
 
 ## Approvals and questions
 

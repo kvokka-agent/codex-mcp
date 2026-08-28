@@ -215,8 +215,12 @@ export class ServerProcess {
   }
 
   /** The first notification of this method the server sends, or a rejection. */
-  waitForNotification(method: string, timeoutMs = 10_000): Promise<ServerNotification> {
-    const seen = this.notifications.find((n) => n.method === method);
+  waitForNotification(
+    method: string,
+    timeoutMs = 10_000,
+    matches: (notification: ServerNotification) => boolean = () => true
+  ): Promise<ServerNotification> {
+    const seen = this.notifications.find((n) => n.method === method && matches(n));
     if (seen) return Promise.resolve(seen);
     return new Promise((resolveWait, rejectWait) => {
       const timer = setTimeout(() => {
@@ -224,7 +228,7 @@ export class ServerProcess {
         rejectWait(new Error(`no ${method} notification within ${timeoutMs}ms`));
       }, timeoutMs);
       const waiter = (notification: ServerNotification): void => {
-        if (notification.method !== method) return;
+        if (notification.method !== method || !matches(notification)) return;
         clearTimeout(timer);
         this.notificationWaiters.delete(waiter);
         resolveWait(notification);

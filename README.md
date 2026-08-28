@@ -20,6 +20,10 @@ paying for the transcript.
 - **The caller reads status, not events.** Where the session stands, what it
   waits for, one line in Codex's own words saying what it is doing, and the
   result when the turn ends. Codex's own rollout log keeps the transcript.
+- **The wait reports.** A poll answers the moment Codex says it is working on
+  something new, carrying that line and how long it has stood, so the person
+  waiting reads the work rather than a spinner. A held poll also sends the line
+  as `notifications/progress`, and repeats it every 30 seconds.
 - **Sessions run at once.** One child process per session and no lock above
   them.
 - **A session outlives the process driving it.** When the server goes away
@@ -43,8 +47,8 @@ not part of it.
 /plugin install codex-mcp@codex-mcp
 ```
 
-The plugin installs the server, a `codex` subagent that drives one turn to its
-result, and a hook that keeps the Codex tools inside that subagent.
+The plugin installs the server and a `codex` skill that starts a turn, follows it
+in rounds of five minutes and writes out what Codex is working on between them.
 [plugins/codex-mcp/README.md](plugins/codex-mcp/README.md) says what each piece
 does.
 

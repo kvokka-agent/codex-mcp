@@ -24,32 +24,26 @@ describe("the server the plugin starts", () => {
   });
 });
 
-describe("the hook the plugin installs", () => {
-  const hooks = JSON.parse(read("plugins/codex-mcp/hooks/hooks.json"));
-  const command = hooks.hooks.PreToolUse[0].hooks[0].command;
-
-  it("runs under bun, the one runtime the plugin already asks for", () => {
-    expect(command).toStartWith("bun ");
-  });
-});
-
 describe("the driver the plugin ships", () => {
-  const agent = read("plugins/codex-mcp/agents/codex.md");
+  const skill = read("plugins/codex-mcp/skills/codex/SKILL.md");
 
   it("polls in rounds short enough to say something between them", () => {
-    expect(agent).toContain('codex_check(action="poll", sessionId: <id>, waitMs: 300000)');
-    // A poll held for the maximum reports nothing to the person watching a
-    // subagent: its progress notifications reach the client and stop there.
-    expect(agent).not.toContain("3600000");
+    expect(skill).toContain('codex_check(action="poll", sessionId, waitMs: 300000)');
+    // A round of the maximum says nothing to the person waiting for an hour.
+    expect(skill).not.toContain("3600000");
   });
 
   it("writes the activity line out itself, and says how long it has stood", () => {
-    expect(agent).toContain("codex: <progress.activity>");
-    expect(agent).toContain("codex: <progress.activity> — 5+ min");
-    expect(agent).toContain("codex: <progress.activity> — 10+ min");
+    expect(skill).toContain("codex: <progress.activity>");
+    expect(skill).toContain("codex: <progress.activity> — 15 min");
+    expect(skill).toContain("progress.activityStandingMs");
+  });
+
+  it("keeps the loop where the person waiting reads it", () => {
+    expect(skill).toContain("A poll made inside a subagent shows them nothing");
   });
 
   it("hands every request to Codex rather than answering one", () => {
-    expect(agent).toContain("You do none of the work yourself.");
+    expect(skill).toContain("Codex does the work.");
   });
 });
