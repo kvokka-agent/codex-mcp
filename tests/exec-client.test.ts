@@ -1,7 +1,8 @@
+import { mockModule, mocked } from "./helpers/mock.js";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 
 import { EXEC_EVENT_TO_METHOD, ExecClient } from "../src/app-server/exec-client.js";
 import { Methods } from "../src/app-server/protocol.js";
@@ -26,10 +27,11 @@ const TURN_STATUSES: string[] = (
   }
 ).TurnStatus.enum;
 
-const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
+const { spawnMock } = { spawnMock: jest.fn() };
 
-vi.mock("child_process", async () => {
-  const actual = await vi.importActual<typeof import("child_process")>("child_process");
+const realModule1 = { ...(await import("child_process")) };
+mockModule("child_process", realModule1, () => {
+  const actual = realModule1;
   return { ...actual, spawn: spawnMock };
 });
 
@@ -58,7 +60,7 @@ function newProc(pid: number): FakeProc {
   const proc = new EventEmitter() as FakeProc;
   proc.stdout = new EventEmitter();
   proc.stderr = new EventEmitter();
-  proc.stdin = { end: vi.fn() };
+  proc.stdin = { end: jest.fn() };
   proc.pid = pid;
   proc.killed = false;
   proc.exitCode = null;
@@ -108,11 +110,11 @@ beforeEach(() => {
     procs.push(proc);
     return proc;
   });
-  vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+  jest.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
     killCalls.push([pid, signal]);
     return true;
   }) as typeof process.kill);
-  vi.spyOn(console, "error").mockImplementation(() => {});
+  jest.spyOn(console, "error").mockImplementation(() => {});
   process.env.PATH = "";
   delete process.env.CODEX_MCP_PATH;
   delete process.env.CODEX_MCP_COMMAND;
@@ -126,7 +128,7 @@ afterEach(() => {
   }
   Object.assign(process.env, envBackup);
   _resetForTesting();
-  vi.restoreAllMocks();
+  jest.restoreAllMocks();
 });
 
 describe("ExecClient lifecycle", () => {
@@ -680,7 +682,7 @@ describe("ExecClient event translation", () => {
   });
 
   it("carries the answer of the v1 agent_message event into the turn output", async () => {
-    const errorSpy = vi.mocked(console.error);
+    const errorSpy = mocked(console.error);
     const { notifications, proc } = await runningTurn();
     emitLine(proc, { type: "task_started", turn_id: "legacy_turn" });
     emitLine(proc, { type: "agent_message", message: "the v1 answer" });
@@ -787,7 +789,7 @@ describe("ExecClient event translation", () => {
   });
 
   it("republishes the compaction and deprecation events of the schema", async () => {
-    const errorSpy = vi.mocked(console.error);
+    const errorSpy = mocked(console.error);
     const { notifications, proc, turnId } = await runningTurn();
     emitLine(proc, { type: "context_compacted" });
     emitLine(proc, { type: "deprecation_notice", summary: "model retired", details: "use gpt-6" });
@@ -819,7 +821,7 @@ describe("ExecClient event translation", () => {
   });
 
   it("logs unparsable and unmapped events without emitting", async () => {
-    const errorSpy = vi.mocked(console.error);
+    const errorSpy = mocked(console.error);
     const { notifications, proc } = await runningTurn();
     const before = notifications.length;
 
@@ -834,7 +836,7 @@ describe("ExecClient event translation", () => {
   });
 
   it("logs child stderr", async () => {
-    const errorSpy = vi.mocked(console.error);
+    const errorSpy = mocked(console.error);
     const { proc } = await runningTurn();
     proc.stderr.emit("data", Buffer.from("boom\n"));
 

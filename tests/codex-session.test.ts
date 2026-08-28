@@ -1,10 +1,10 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, expect, it, jest } from "bun:test";
 import type { SessionManager } from "../src/session/manager.js";
 import { executeCodexSession } from "../src/tools/codex-session.js";
 
 describe("executeCodexSession", () => {
   it("lists every session of the state directory, not only the ones in memory", async () => {
-    const listAllSessions = vi.fn(() => [
+    const listAllSessions = jest.fn(() => [
       { sessionId: "sess_1", status: "idle", owner: { pid: 1, state: "self" } },
       { sessionId: "sess_2", status: "abandoned", activity: "Reading src/index.ts" },
     ]);
@@ -20,7 +20,7 @@ describe("executeCodexSession", () => {
   });
 
   it("resumes a session by id and refuses the action without one", async () => {
-    const resumeSession = vi.fn(async () => ({
+    const resumeSession = jest.fn(async () => ({
       sessionId: "sess_1",
       threadId: "thr_1",
       status: "idle" as const,
@@ -66,16 +66,16 @@ describe("executeCodexSession", () => {
   });
 
   it("delegates get/cancel/interrupt/fork/clean_background_terminals actions to SessionManager", async () => {
-    const getSession = vi.fn(() => ({ sessionId: "sess_2", status: "running" }));
-    const cancelSession = vi.fn(async () => {});
-    const interruptSession = vi.fn(async () => {});
-    const forkSession = vi.fn(async () => ({
+    const getSession = jest.fn(() => ({ sessionId: "sess_2", status: "running" }));
+    const cancelSession = jest.fn(async () => {});
+    const interruptSession = jest.fn(async () => {});
+    const forkSession = jest.fn(async () => ({
       sessionId: "sess_fork",
       threadId: "thread_fork",
       status: "idle" as const,
       pollInterval: 120000,
     }));
-    const cleanBackgroundTerminals = vi.fn(async () => {});
+    const cleanBackgroundTerminals = jest.fn(async () => {});
     const sessionManager = {
       getSession,
       cancelSession,

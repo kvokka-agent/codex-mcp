@@ -128,7 +128,6 @@ rather than the release.
 | File                                          | What carries the version                       |
 | --------------------------------------------- | ---------------------------------------------- |
 | `package.json`                                | the npm package                                |
-| `package-lock.json`                           | the package's own two records in the lock file |
 | `plugins/codex-mcp/.claude-plugin/plugin.json` | the Claude Code plugin manifest                |
 | `.claude-plugin/marketplace.json`             | the plugin's entry in the marketplace          |
 | `plugins/codex-mcp/.mcp.json`                 | the `@kvokka/codex-mcp@X.Y.Z` pin the plugin installs |

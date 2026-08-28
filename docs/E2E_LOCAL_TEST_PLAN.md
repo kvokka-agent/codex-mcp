@@ -77,7 +77,7 @@ codex-mcp
 
 ```bash
 npm install
-npm run build
+bun run build
 node dist/index.js
 ```
 
@@ -88,9 +88,9 @@ Source-only verification (skip if you installed via npm/npx):
 If you are testing from a local repository checkout (option 3 above), these scripts can verify stdout cleanliness before connecting an MCP client. They are **not available** when using the published npm package.
 
 ```bash
-npm run check:stdio        # basic stdout cleanliness check
-npm run check:stdio:strict # strict mode (fails on any stdout contamination)
-npm run smoke:mcp          # lightweight MCP handshake smoke test
+bun run check:stdio        # basic stdout cleanliness check
+bun run check:stdio:strict # strict mode (fails on any stdout contamination)
+bun run smoke:mcp          # lightweight MCP handshake smoke test
 ```
 
 ## 3. Capability Gate (5-Minute Smoke)
@@ -127,7 +127,7 @@ The server registers 7 resources:
 
 Expected:
 
-1. `resources/list` returns 7 entries. A smaller count means an older build; run `npm run build` when testing from source, or update the package.
+1. `resources/list` returns 7 entries. A smaller count means an older build; run `bun run build` when testing from source, or update the package.
 2. JSON resources parse cleanly; markdown resources return non-empty text.
 3. `server-info.clientMode` reports `app-server` or `exec`; record which one, because exec mode skips the approval tests.
 
@@ -183,10 +183,10 @@ test("mean of [5,5] should be 5", () => {
 });
 EOF
 
-npm test --prefix "$dst"
+bun test --prefix "$dst"
 ```
 
-> **Note**: Avoid `cd "$dst"` in the setup script — some MCP client environments (e.g., Claude Code) reset the working directory after each shell invocation. Use `npm test --prefix "$dst"` or `(cd "$dst" && npm test)` instead.
+> **Note**: Avoid `cd "$dst"` in the setup script — some MCP client environments (e.g., Claude Code) reset the working directory after each shell invocation. Use `bun test --prefix "$dst"` or `(cd "$dst" && bun test)` instead.
 
 ## 4.2 PowerShell Setup (Windows native pwsh)
 
@@ -230,7 +230,7 @@ test("mean of [5,5] should be 5", () => {
 '@ | Set-Content -Path (Join-Path $dst "math.test.js") -Encoding UTF8
 
 Set-Location $dst
-npm test
+bun test
 ```
 
 Expected initial state: tests fail.
@@ -308,7 +308,7 @@ Auto-approval behavior by policy:
 
 Not all commands trigger an approval request. The codex CLI applies its own safety classification before surfacing approvals to the MCP layer:
 
-- `untrusted`: Read-only commands (e.g., `ls`, `cat`, `dir`, `type`) are typically auto-approved by codex internally and will **not** generate an `actions[]` entry. Commands with side effects (e.g., `npm test`, `node`, write operations) require explicit approval.
+- `untrusted`: Read-only commands (e.g., `ls`, `cat`, `dir`, `type`) are typically auto-approved by codex internally and will **not** generate an `actions[]` entry. Commands with side effects (e.g., `bun test`, `node`, write operations) require explicit approval.
 - `on-request`: Similar to `untrusted` but with a broader set of auto-approved commands. Most read operations pass through; write operations and unknown commands require approval.
 - `on-failure`: Commands are auto-approved on first attempt; approval is only requested if a command fails.
 - `never`: All commands are auto-approved. No `actions[]` will appear for command approvals (file-change approvals may still appear depending on sandbox mode).
@@ -395,7 +395,7 @@ Tool call (`codex`) suggested payload:
 
 ```json
 {
-  "prompt": "Run npm test, fix the bug, rerun tests, then summarize changes.",
+  "prompt": "Run bun test, fix the bug, rerun tests, then summarize changes.",
   "approvalPolicy": "untrusted",
   "sandbox": "workspace-write",
   "effort": "medium",
@@ -574,7 +574,7 @@ Use short timeout:
 
 ```json
 {
-  "prompt": "Run npm test and fix.",
+  "prompt": "Run bun test and fix.",
   "approvalPolicy": "untrusted",
   "sandbox": "workspace-write",
   "effort": "low",

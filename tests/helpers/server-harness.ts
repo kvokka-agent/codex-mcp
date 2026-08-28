@@ -47,8 +47,7 @@ export function ensureServerBuilt(): void {
   if (built) return;
   const bundle = statSync(SERVER_ENTRY, { throwIfNoEntry: false });
   if (!bundle || bundle.mtimeMs < newestMtimeMs(join(REPO_ROOT, "src"))) {
-    // shell: npm is a .cmd shim on Windows, which execFile cannot spawn.
-    execFileSync("npm", ["run", "build"], { cwd: REPO_ROOT, stdio: "pipe", shell: true });
+    execFileSync("bun", ["run", "build"], { cwd: REPO_ROOT, stdio: "pipe" });
   }
   built = true;
 }

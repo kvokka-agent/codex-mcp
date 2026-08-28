@@ -1,23 +1,26 @@
+import { mockModule } from "./helpers/mock.js";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 
 import { executeCodexSetup } from "../src/tools/codex-setup.js";
 
-const { spawnSyncMock, spawnMock, homedirMock } = vi.hoisted(() => ({
-  spawnSyncMock: vi.fn(),
-  spawnMock: vi.fn(),
-  homedirMock: vi.fn(),
-}));
+const { spawnSyncMock, spawnMock, homedirMock } = {
+  spawnSyncMock: jest.fn(),
+  spawnMock: jest.fn(),
+  homedirMock: jest.fn(),
+};
 
-vi.mock("child_process", async () => {
-  const actual = await vi.importActual<typeof import("child_process")>("child_process");
+const realModule1 = { ...(await import("child_process")) };
+mockModule("child_process", realModule1, () => {
+  const actual = realModule1;
   return { ...actual, spawnSync: spawnSyncMock, spawn: spawnMock };
 });
 
-vi.mock("os", async () => {
-  const actual = await vi.importActual<typeof import("os")>("os");
+const realModule2 = { ...(await import("os")) };
+mockModule("os", realModule2, () => {
+  const actual = realModule2;
   return { ...actual, default: { ...actual, homedir: homedirMock }, homedir: homedirMock };
 });
 
@@ -59,7 +62,7 @@ beforeEach(() => {
   process.env.CODEX_MCP_MODE = "app-server";
   process.env.CODEX_MCP_STATE_DIR = path.join(root, "state");
   process.env.CODEX_MCP_PATH = makeExecutable(path.join(root, "bin"), "codex");
-  vi.spyOn(console, "error").mockImplementation(() => {});
+  jest.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -68,7 +71,7 @@ afterEach(() => {
     if (!(key in envBackup)) delete process.env[key];
   }
   Object.assign(process.env, envBackup);
-  vi.restoreAllMocks();
+  jest.restoreAllMocks();
 });
 
 describe("executeCodexSetup", () => {

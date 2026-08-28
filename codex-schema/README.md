@@ -25,5 +25,5 @@ codex app-server generate-json-schema --experimental --out codex-schema
 ```
 
 3. Update `codex-schema/metadata.json`.
-4. Run `npx vitest run tests/protocol-schema.test.ts` and resolve every reported difference — by
+4. Run `bun test tests/protocol-schema.test.ts` and resolve every reported difference — by
    extending `src/app-server/protocol.ts`, or by recording the reason in that test's exception lists.

@@ -1,9 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isoMsAgo } from "./helpers/clock.js";
+import { mockModule } from "./helpers/mock.js";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 /** Injected failures, keyed by `${call}\0${path}`, holding the errno code to raise. */
-const { fsFaults } = vi.hoisted(() => ({
+const { fsFaults } = {
   fsFaults: new Map<string, { code: string; skip: number; times: number }>(),
-}));
+};
 
 /**
  * Make one `node:fs` call fail for one path; every other call and path reaches the real
@@ -22,8 +24,9 @@ function failFs(
   fsFaults.set(`${call}\0${path}`, { code, skip, times });
 }
 
-vi.mock("node:fs", async () => {
-  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+const realModule1 = { ...(await import("node:fs")) };
+mockModule("node:fs", realModule1, () => {
+  const actual = realModule1;
   const failIfInjected = (call: string, target: unknown): void => {
     const fault = fsFaults.get(`${call}\0${String(target)}`);
     if (!fault) return;
@@ -60,7 +63,6 @@ import { join } from "node:path";
 import { SessionPersistence, startDiskPersistence } from "../src/session/persistence.js";
 import { SCHEMA_VERSION } from "../src/persistence/index.js";
 import type { SessionInfo } from "../src/types.js";
-import { isoMsAgo } from "./helpers/clock.js";
 
 let root: string;
 let persistence: SessionPersistence | null = null;

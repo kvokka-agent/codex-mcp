@@ -1,8 +1,9 @@
+import { advanceAsync } from "./helpers/clock.js";
 import { EventEmitter } from "events";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
@@ -20,16 +21,16 @@ class MockClient extends EventEmitter {
   supportsTurnOverrides = true;
   childPid: number | undefined = undefined;
 
-  start = vi.fn(async () => ({ userAgent: "mock" }));
-  threadStart = vi.fn(async () => ({ thread: { id: "thread_mock" } }));
-  threadFork = vi.fn(async () => ({ thread: { id: "thread_forked" } }));
-  threadResume = vi.fn(async () => ({ thread: { id: "thread_forked" } }));
-  threadBackgroundTerminalsClean = vi.fn(async () => ({}));
-  turnStart = vi.fn(async () => ({ turn: { id: "turn_mock" } }));
-  turnInterrupt = vi.fn(async () => {});
-  respondToServer = vi.fn((_id: number, _result: unknown) => {});
-  respondErrorToServer = vi.fn((_id: number, _code: number, _message: string) => {});
-  destroy = vi.fn(async () => {});
+  start = jest.fn(async () => ({ userAgent: "mock" }));
+  threadStart = jest.fn(async () => ({ thread: { id: "thread_mock" } }));
+  threadFork = jest.fn(async () => ({ thread: { id: "thread_forked" } }));
+  threadResume = jest.fn(async () => ({ thread: { id: "thread_forked" } }));
+  threadBackgroundTerminalsClean = jest.fn(async () => ({}));
+  turnStart = jest.fn(async () => ({ turn: { id: "turn_mock" } }));
+  turnInterrupt = jest.fn(async () => {});
+  respondToServer = jest.fn((_id: number, _result: unknown) => {});
+  respondErrorToServer = jest.fn((_id: number, _code: number, _message: string) => {});
+  destroy = jest.fn(async () => {});
 
   onNotification(handler: (method: string, params: unknown) => void): void {
     this.notificationHandler = handler;
@@ -74,7 +75,7 @@ describe("SessionManager background cleanup", () => {
   const warningsOf = (sessionId: string) => ttlWarnings(persistence, stateDir, sessionId);
 
   beforeEach(() => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     client = new MockClient();
     stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-cleanup-"));
     persistence = new SessionPersistence(stateDir);
@@ -88,8 +89,8 @@ describe("SessionManager background cleanup", () => {
     manager.destroy();
     persistence.destroy();
     rmSync(stateDir, { recursive: true, force: true });
-    vi.useRealTimers();
-    vi.restoreAllMocks();
+    jest.useRealTimers();
+    jest.restoreAllMocks();
   });
 
   it("cancels an idle session once it outlives the idle TTL", async () => {
@@ -100,7 +101,7 @@ describe("SessionManager background cleanup", () => {
     });
     expect(manager.getSession(started.sessionId).status).toBe("idle");
 
-    await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_CLEANUP_MS + 60_000);
+    await advanceAsync(DEFAULT_IDLE_CLEANUP_MS + 60_000);
 
     const info = manager.getSession(started.sessionId);
     expect(info.status).toBe("cancelled");
@@ -115,7 +116,7 @@ describe("SessionManager background cleanup", () => {
       turn: { id: "turn_1", status: "completed", output: "done" },
     });
 
-    await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_CLEANUP_MS - 60_000);
+    await advanceAsync(DEFAULT_IDLE_CLEANUP_MS - 60_000);
     const firstPass = warningsOf(started.sessionId);
     expect(firstPass).toHaveLength(1);
     expect(firstPass[0].ttlRemainingMs).toBe(60_000);
@@ -123,7 +124,7 @@ describe("SessionManager background cleanup", () => {
     expect(firstPass[0].type).toBe("ttl_warning");
 
     // The next cleanup pass sits inside the same warning window and must stay quiet.
-    await vi.advanceTimersByTimeAsync(60_000);
+    await advanceAsync(60_000);
     expect(warningsOf(started.sessionId)).toHaveLength(1);
     expect(manager.getSession(started.sessionId).status).toBe("idle");
   });
@@ -132,12 +133,12 @@ describe("SessionManager background cleanup", () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
     expect(manager.getSession(started.sessionId).status).toBe("running");
 
-    await vi.advanceTimersByTimeAsync(DEFAULT_RUNNING_CLEANUP_MS - 60_000);
+    await advanceAsync(DEFAULT_RUNNING_CLEANUP_MS - 60_000);
     const warnings = warningsOf(started.sessionId);
     expect(warnings).toHaveLength(1);
     expect(warnings[0].ttlRemainingMs).toBe(60_000);
 
-    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    await advanceAsync(2 * 60_000);
     const info = manager.getSession(started.sessionId);
     expect(info.status).toBe("cancelled");
     expect(info.cancelledReason).toBe("Running timeout");
@@ -156,7 +157,7 @@ describe("SessionManager background cleanup", () => {
     });
     expect(manager.getSession(started.sessionId).status).toBe("waiting_approval");
 
-    await vi.advanceTimersByTimeAsync(DEFAULT_RUNNING_CLEANUP_MS + 60_000);
+    await advanceAsync(DEFAULT_RUNNING_CLEANUP_MS + 60_000);
 
     const info = manager.getSession(started.sessionId);
     expect(info.status).toBe("cancelled");
@@ -170,7 +171,7 @@ describe("SessionManager background cleanup", () => {
       .sessions;
     sessions.get(started.sessionId)!.lastActiveAt = "not-a-timestamp";
 
-    await vi.advanceTimersByTimeAsync(60_000);
+    await advanceAsync(60_000);
 
     expect(manager.getSession(started.sessionId).cancelledReason).toBe("Invalid timestamp");
   });
@@ -187,7 +188,7 @@ describe("SessionManager background cleanup", () => {
       await terminalManager.cancelSession(started.sessionId, "by test");
       expect(persistence.hasSessionOnDisk(started.sessionId)).toBe(true);
 
-      await vi.advanceTimersByTimeAsync(DEFAULT_TERMINAL_CLEANUP_MS + 60_000);
+      await advanceAsync(DEFAULT_TERMINAL_CLEANUP_MS + 60_000);
 
       expect(terminalManager.listSessions()).toHaveLength(0);
       expect(persistence.hasSessionOnDisk(started.sessionId)).toBe(false);
@@ -199,8 +200,8 @@ describe("SessionManager background cleanup", () => {
   });
 
   it("reports a cancellation that fails during a cleanup pass", async () => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    client.destroy = vi.fn(async () => {
+    const errors = jest.spyOn(console, "error").mockImplementation(() => {});
+    client.destroy = jest.fn(async () => {
       throw new Error("shutdown boom");
     });
     const started = await manager.createSession("hi", workspace, {}, "medium");
@@ -209,7 +210,7 @@ describe("SessionManager background cleanup", () => {
       turn: { id: "turn_1", status: "completed", output: "done" },
     });
 
-    await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_CLEANUP_MS + 60_000);
+    await advanceAsync(DEFAULT_IDLE_CLEANUP_MS + 60_000);
 
     expect(
       errors.mock.calls.some(
@@ -222,7 +223,7 @@ describe("SessionManager background cleanup", () => {
 
   it("does not start a second cancellation while one is still in flight", async () => {
     let releaseDestroy: (() => void) | null = null;
-    client.destroy = vi.fn(
+    client.destroy = jest.fn(
       () =>
         new Promise<void>((resolve) => {
           releaseDestroy = resolve;
@@ -236,11 +237,11 @@ describe("SessionManager background cleanup", () => {
 
     // First pass past the TTL starts a cancellation that never settles; the
     // following passes must not queue another one.
-    await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_CLEANUP_MS + 5 * 60_000);
+    await advanceAsync(DEFAULT_IDLE_CLEANUP_MS + 5 * 60_000);
     expect(client.destroy).toHaveBeenCalledTimes(1);
 
     releaseDestroy!();
-    await vi.advanceTimersByTimeAsync(0);
+    await advanceAsync(0);
     expect(manager.getSession(started.sessionId).cancelledReason).toBe("Idle timeout");
   });
 });
@@ -252,7 +253,7 @@ describe("SessionManager cleanSessions", () => {
   let persistence: SessionPersistence;
 
   beforeEach(() => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     clients = [];
     stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-clean-"));
     persistence = new SessionPersistence(stateDir);
@@ -271,8 +272,8 @@ describe("SessionManager cleanSessions", () => {
     manager.destroy();
     persistence.destroy();
     rmSync(stateDir, { recursive: true, force: true });
-    vi.useRealTimers();
-    vi.restoreAllMocks();
+    jest.useRealTimers();
+    jest.restoreAllMocks();
   });
 
   async function startIdleSession(): Promise<string> {
@@ -323,7 +324,7 @@ describe("SessionManager cleanSessions", () => {
     expect(tooYoung.matchedSessionIds).toEqual([]);
     expect(manager.listSessions()).toHaveLength(1);
 
-    vi.advanceTimersByTime(11 * 60_000);
+    jest.advanceTimersByTime(11 * 60_000);
 
     const aged = await manager.cleanSessions({ olderThanMs: 10 * 60_000 });
     expect(aged.matchedSessionIds).toEqual([idleId]);
@@ -365,9 +366,9 @@ describe("SessionManager cleanSessions", () => {
   });
 
   it("names the session directories a failed removal left on disk", async () => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errors = jest.spyOn(console, "error").mockImplementation(() => {});
     const idleId = await startIdleSession();
-    vi.spyOn(persistence, "removeSession").mockImplementation(() => {
+    jest.spyOn(persistence, "removeSession").mockImplementation(() => {
       throw new Error("rm boom");
     });
 
@@ -397,14 +398,14 @@ describe("SessionManager cleanSessions", () => {
   });
 
   it("reports a client that fails to shut down during eviction and still drops the session", async () => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errors = jest.spyOn(console, "error").mockImplementation(() => {});
     const idleId = await startIdleSession();
-    clients[clients.length - 1].destroy = vi.fn(async () => {
+    clients[clients.length - 1].destroy = jest.fn(async () => {
       throw new Error("destroy boom");
     });
 
     const report = await manager.cleanSessions();
-    await vi.advanceTimersByTimeAsync(0);
+    await advanceAsync(0);
 
     expect(report.removedSessionIds).toEqual([idleId]);
     expect(manager.listSessions()).toHaveLength(0);
@@ -418,14 +419,14 @@ describe("SessionManager cleanSessions", () => {
   });
 
   it("reports a client that fails to shut down during manager.destroy()", async () => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errors = jest.spyOn(console, "error").mockImplementation(() => {});
     await startIdleSession();
-    clients[clients.length - 1].destroy = vi.fn(async () => {
+    clients[clients.length - 1].destroy = jest.fn(async () => {
       throw new Error("teardown boom");
     });
 
     manager.destroy();
-    await vi.advanceTimersByTimeAsync(0);
+    await advanceAsync(0);
 
     expect(manager.listSessions()).toHaveLength(0);
     expect(

@@ -1,7 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isoMsAgo, msSince, useFakeClock } from "./helpers/clock.js";
+import { mockModule } from "./helpers/mock.js";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 
 /** Injected failures, keyed by `${call}\0${path}`, holding the errno code to raise. */
-const { fsFaults } = vi.hoisted(() => ({ fsFaults: new Map<string, string>() }));
+const { fsFaults } = { fsFaults: new Map<string, string>() };
 
 /**
  * Make one `node:fs` call fail for one path; every other call and path reaches the real
@@ -22,19 +24,21 @@ function failFs(
  * `wmic` one on Windows — each with a five-second budget — against a pid this
  * machine may or may not have handed to somebody else by then.
  */
-vi.mock("node:child_process", async () => {
-  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+const realModule1 = { ...(await import("node:child_process")) };
+mockModule("node:child_process", realModule1, () => {
+  const actual = realModule1;
   return {
     ...actual,
     default: actual,
-    execSync: vi.fn(() => {
+    execSync: jest.fn(() => {
       throw new Error("no process table in these tests");
     }),
   };
 });
 
-vi.mock("node:fs", async () => {
-  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+const realModule2 = { ...(await import("node:fs")) };
+mockModule("node:fs", realModule2, () => {
+  const actual = realModule2;
   const failIfInjected = (call: string, target: unknown): void => {
     const code = fsFaults.get(`${call}\0${String(target)}`);
     if (!code) return;
@@ -99,7 +103,6 @@ import {
   scanRecoverableSessions,
 } from "../src/persistence/index.js";
 import { getDirSize } from "../src/persistence/retention.js";
-import { isoMsAgo, msSince, useFakeClock } from "./helpers/clock.js";
 
 let root: string;
 
@@ -108,10 +111,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.useRealTimers();
+  jest.useRealTimers();
   fsFaults.clear();
   rmSync(root, { recursive: true, force: true });
-  vi.restoreAllMocks();
+  jest.restoreAllMocks();
 });
 
 describe("atomicWriteJson", () => {
@@ -245,7 +248,7 @@ describe("EventLog", () => {
   it("reports a failed flush on stderr instead of throwing", () => {
     const dirAsFile = join(root, "blocked");
     mkdirSync(dirAsFile, { recursive: true });
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
 
     const log = new EventLog({ filePath: join(dirAsFile, "events.jsonl") });
     mkdirSync(join(dirAsFile, "events.jsonl"));
@@ -263,7 +266,7 @@ describe("EventLog", () => {
 describe("session ownership", () => {
   /** Make `process.kill(pid, 0)` raise the errno a real kernel would. */
   function killFails(pid: number, code: string): void {
-    vi.spyOn(process, "kill").mockImplementation(((target: number) => {
+    jest.spyOn(process, "kill").mockImplementation(((target: number) => {
       if (target !== pid) return true;
       const err = new Error(`kill ${code}`) as NodeJS.ErrnoException;
       err.code = code;
@@ -406,7 +409,7 @@ describe("scanRecoverableSessions", () => {
   });
 
   it("drops the torn tail of events.jsonl without reporting damage", () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     writeSession("sess_torn", {
       meta: { sessionId: "sess_torn", status: "running" },
       events: '{"seq":0}\n{"seq":1}\n{"seq":2,"partia',
@@ -419,7 +422,7 @@ describe("scanRecoverableSessions", () => {
   });
 
   it("reads past a corrupt line in the middle and reports it", () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     writeSession("sess_corrupt", {
       meta: { sessionId: "sess_corrupt", status: "running" },
       events: '{"seq":0}\n{"seq":1,"cut\n{"seq":2}\n{"seq":3}\n',
@@ -434,7 +437,7 @@ describe("scanRecoverableSessions", () => {
   });
 
   it("counts only the corrupt middle lines when the tail is torn as well", () => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    jest.spyOn(console, "error").mockImplementation(() => {});
     writeSession("sess_both", {
       meta: { sessionId: "sess_both", status: "running" },
       events: '{"seq":0}\nnot json\n{"seq":1}\n{"seq":2,"tor',
@@ -464,7 +467,7 @@ describe("scanRecoverableSessions", () => {
   });
 
   it("recovers a session whose meta.json is unparsable, keeping its pid for the reaper", () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     const dir = writeSession("sess_bad_meta", {
       events: '{"seq":4}\n',
       pid: { pid: 4242, spawnedAt: "2024-01-01T00:00:00.000Z" },
@@ -487,7 +490,7 @@ describe("scanRecoverableSessions", () => {
   });
 
   it("recovers a session whose meta.json names no session", () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     writeSession("sess_no_id", { meta: { status: "idle" }, pid: { pid: 77, spawnedAt: "x" } });
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
@@ -563,7 +566,7 @@ describe("scanRecoverableSessions", () => {
   });
 
   it("skips a session written by a newer schema", () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     writeSession("sess_future", {
       meta: { schemaVersion: SCHEMA_VERSION + 1, sessionId: "sess_future", status: "idle" },
     });
@@ -714,7 +717,7 @@ describe("pruneSessionDirs", () => {
 
   it("reports a removal failure on stderr and does not count it", () => {
     const old = makeSession("old", iso(120_000));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     failFs("rmSync", old);
 
     expect(pruneSessionDirs(join(root, "sessions"), { maxAgeMs: 60_000 })).toBe(0);
@@ -747,14 +750,14 @@ describe("getDirSize", () => {
   });
 
   it("counts nothing for a directory removed by a concurrent prune", () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
 
     expect(getDirSize(join(root, "gone"))).toBe(0);
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
   it("counts nothing for a path that is not a directory", () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     const file = join(root, "meta.json");
     writeFileSync(file, "{}");
 
@@ -768,7 +771,7 @@ describe("getDirSize", () => {
     mkdirSync(locked, { recursive: true });
     writeFileSync(join(locked, "blob.bin"), "x".repeat(500));
     writeFileSync(join(dir, "events.jsonl"), "x".repeat(42));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     failFs("readdirSync", locked);
 
     expect(getDirSize(dir)).toBe(42);

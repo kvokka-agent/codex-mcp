@@ -19,20 +19,16 @@ const VERSION_IN_TEXT = /\d+\.\d+\.\d+/;
 // pattern — moved, renamed, reformatted — fails the bump instead of releasing a
 // half-updated tree.
 export const TARGETS = [
+  // `bun.lock` records the workspace's name and its dependency ranges, not the
+  // version of the package itself, so a release moves no lock file.
   { path: "package.json", pattern: /"version": "\d+\.\d+\.\d+"/g, count: 1 },
-  // The lock file records the version of every dependency as well, so the package's
-  // own two entries are found by the name written above each of them.
-  {
-    path: "package-lock.json",
-    pattern: /"name": "@kvokka\/codex-mcp",\s*"version": "\d+\.\d+\.\d+"/g,
-    count: 2,
-  },
   {
     path: "plugins/codex-mcp/.claude-plugin/plugin.json",
     pattern: /"version": "\d+\.\d+\.\d+"/g,
     count: 1,
   },
   { path: ".claude-plugin/marketplace.json", pattern: /"version": "\d+\.\d+\.\d+"/g, count: 1 },
+  { path: "plugins/codex-mcp/.mcp.json", pattern: /@kvokka\/codex-mcp@\d+\.\d+\.\d+/g, count: 1 },
   {
     path: "plugins/codex-mcp/README.md",
     pattern: /@kvokka\/codex-mcp@\d+\.\d+\.\d+/g,

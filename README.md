@@ -32,8 +32,8 @@ paying for the transcript.
 
 ## Install
 
-Node.js >= 18, and the [Codex CLI](https://github.com/openai/codex) installed and
-logged in.
+[bun](https://bun.com), which starts the server, Node.js >= 18, which runs it,
+and the [Codex CLI](https://github.com/openai/codex) installed and logged in.
 
 ### Claude Code
 
@@ -53,8 +53,8 @@ does.
 {
   "mcpServers": {
     "codex-mcp": {
-      "command": "npx",
-      "args": ["-y", "@kvokka/codex-mcp"]
+      "command": "bunx",
+      "args": ["@kvokka/codex-mcp"]
     }
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "@kvokka/codex-mcp",
   "version": "2.4.1",
-  "description": "MCP server that wraps OpenAI Codex app-server — start coding agents, poll their progress, and manage permissions from any MCP client",
+  "description": "MCP server that wraps OpenAI Codex app-server \u2014 start coding agents, poll their progress, and manage permissions from any MCP client",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -25,14 +25,14 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsup",
-    "dev": "tsup --watch",
+    "build": "bun run scripts/build.mjs && bun run build:types",
+    "build:types": "tsc --emitDeclarationOnly",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "check": "npm run lint && npm run format:check && npm run typecheck && npm test && npm run build && npm run check:stdio && npm run smoke:mcp && npm run lint:md",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "prepublishOnly": "npm run build",
+    "check": "bun run lint && bun run format:check && bun run typecheck && bun test && bun run build && bun run check:stdio && bun run smoke:mcp && bun run lint:md",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "prepublishOnly": "bun run build",
     "check:stdio": "node scripts/check-stdio.mjs --timeout-ms 6000",
     "check:stdio:strict": "node scripts/check-stdio.mjs --mode strict --timeout-ms 6000",
     "smoke:mcp": "node scripts/mcp-smoke.mjs",
@@ -72,15 +72,13 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
+    "@types/bun": "^1.4.0",
     "@types/node": "^22.0.0",
-    "@vitest/coverage-v8": "^4.0.18",
     "eslint": "^9.39.2",
     "prettier": "^3.8.1",
     "rumdl": "0.2.60",
-    "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.55.0",
-    "vitest": "^4.0.18",
     "yaml": "^2.8.2"
   },
   "engines": {

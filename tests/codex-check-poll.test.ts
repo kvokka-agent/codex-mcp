@@ -5,17 +5,17 @@
  * The session manager is real; only the app-server client is a stand-in, so
  * every asserted value is produced by the code under test.
  */
+import { useFakeClock } from "./helpers/clock.js";
 import { EventEmitter } from "events";
 import os from "os";
 import path from "path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
 import { executeCodexCheck } from "../src/tools/codex-check.js";
 import { POLL_WINDOW_MARGIN_MS, PollWindow } from "../src/utils/poll-window.js";
 import { DEFAULT_APPROVAL_TIMEOUT_MS, MAX_LONG_POLL_WAIT_MS } from "../src/types.js";
-import { useFakeClock } from "./helpers/clock.js";
 import { ProgressReporter, type ProgressNotification } from "../src/utils/progress-notifier.js";
 import type { CheckResult } from "../src/types.js";
 
@@ -26,16 +26,16 @@ class MockClient extends EventEmitter {
   supportsTurnOverrides = true;
   childPid: number | undefined = undefined;
 
-  start = vi.fn(async () => ({ userAgent: "mock" }));
-  threadStart = vi.fn(async () => ({ thread: { id: "thread_mock" } }));
-  threadFork = vi.fn(async () => ({ thread: { id: "thread_forked" } }));
-  threadResume = vi.fn(async () => ({ thread: { id: "thread_forked" } }));
-  threadBackgroundTerminalsClean = vi.fn(async () => ({}));
-  turnStart = vi.fn(async () => ({ turn: { id: "turn_mock" } }));
-  turnInterrupt = vi.fn(async () => {});
-  respondToServer = vi.fn();
-  respondErrorToServer = vi.fn();
-  destroy = vi.fn(async () => {});
+  start = jest.fn(async () => ({ userAgent: "mock" }));
+  threadStart = jest.fn(async () => ({ thread: { id: "thread_mock" } }));
+  threadFork = jest.fn(async () => ({ thread: { id: "thread_forked" } }));
+  threadResume = jest.fn(async () => ({ thread: { id: "thread_forked" } }));
+  threadBackgroundTerminalsClean = jest.fn(async () => ({}));
+  turnStart = jest.fn(async () => ({ turn: { id: "turn_mock" } }));
+  turnInterrupt = jest.fn(async () => {});
+  respondToServer = jest.fn();
+  respondErrorToServer = jest.fn();
+  destroy = jest.fn(async () => {});
 
   onNotification(handler: (method: string, params: unknown) => void): void {
     this.notificationHandler = handler;
@@ -86,9 +86,9 @@ describe("executeCodexCheck", () => {
   });
 
   afterEach(() => {
-    vi.useRealTimers();
+    jest.useRealTimers();
     manager.destroy();
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   function emitOutput(delta: string, extra: Record<string, unknown> = {}): void {
@@ -450,7 +450,7 @@ describe("executeCodexCheck", () => {
   describe("long-poll", () => {
     it("answers at once when an action is already pending", async () => {
       requestApproval();
-      const waitForChange = vi.spyOn(manager, "waitForChange");
+      const waitForChange = jest.spyOn(manager, "waitForChange");
 
       const res = expectCheck(
         await executeCodexCheck(
@@ -467,7 +467,7 @@ describe("executeCodexCheck", () => {
 
     it("answers at once when the turn is already over", async () => {
       completeTurn();
-      const waitForChange = vi.spyOn(manager, "waitForChange");
+      const waitForChange = jest.spyOn(manager, "waitForChange");
 
       const res = expectCheck(
         await executeCodexCheck(
@@ -589,7 +589,7 @@ describe("executeCodexCheck", () => {
     it("returns immediately when the request is already aborted", async () => {
       const controller = new AbortController();
       controller.abort();
-      const waitForChange = vi.spyOn(manager, "waitForChange");
+      const waitForChange = jest.spyOn(manager, "waitForChange");
 
       const res = expectCheck(
         await executeCodexCheck(
@@ -625,7 +625,7 @@ describe("executeCodexCheck", () => {
     it("cuts the wait down to what the client tolerates", async () => {
       const window = new PollWindow({ MCP_TOOL_TIMEOUT: "600000" });
       const observed: number[] = [];
-      vi.spyOn(manager, "waitForChange").mockImplementation(async (_id, timeoutMs) => {
+      jest.spyOn(manager, "waitForChange").mockImplementation(async (_id, timeoutMs) => {
         observed.push(timeoutMs);
         // End the turn so the loop stops on the next read.
         completeTurn();
@@ -650,7 +650,7 @@ describe("executeCodexCheck", () => {
     it("holds a call the whole window when the caller asked for the whole window", async () => {
       const window = new PollWindow({ CLAUDECODE: "1", MCP_TOOL_TIMEOUT: "300000" });
       const observed: number[] = [];
-      vi.spyOn(manager, "waitForChange").mockImplementation(async (_id, timeoutMs) => {
+      jest.spyOn(manager, "waitForChange").mockImplementation(async (_id, timeoutMs) => {
         observed.push(timeoutMs);
         completeTurn();
       });
@@ -669,7 +669,7 @@ describe("executeCodexCheck", () => {
     it("gives a caller asking for less than the window exactly what it asked for", async () => {
       const window = new PollWindow({ MCP_TOOL_TIMEOUT: "600000" });
       const observed: number[] = [];
-      vi.spyOn(manager, "waitForChange").mockImplementation(async (_id, timeoutMs) => {
+      jest.spyOn(manager, "waitForChange").mockImplementation(async (_id, timeoutMs) => {
         observed.push(timeoutMs);
         completeTurn();
       });
@@ -734,7 +734,7 @@ describe("executeCodexCheck", () => {
       // A ceiling of some tens of milliseconds leaves no window worth holding,
       // so the next poll answers at once rather than walking into the same cut.
       expect(window.budgetMs()).toBe(0);
-      const waitForChange = vi.spyOn(manager, "waitForChange");
+      const waitForChange = jest.spyOn(manager, "waitForChange");
       const res = expectCheck(
         await executeCodexCheck(
           { action: "poll", sessionId, waitMs: 5_000_000 },
@@ -774,7 +774,7 @@ describe("executeCodexCheck", () => {
 
     it("answers at once when the client tolerates no window at all", async () => {
       const window = new PollWindow({ MCP_TOOL_TIMEOUT: "500" });
-      const waitForChange = vi.spyOn(manager, "waitForChange");
+      const waitForChange = jest.spyOn(manager, "waitForChange");
 
       const res = expectCheck(
         await executeCodexCheck(
@@ -808,7 +808,7 @@ describe("executeCodexCheck", () => {
     });
 
     it("answers without waiting when waitMs is zero", () => {
-      const waitSpy = vi.spyOn(manager, "waitForChange");
+      const waitSpy = jest.spyOn(manager, "waitForChange");
 
       const res = expectCheck(executeCodexCheck({ action: "poll", sessionId, waitMs: 0 }, manager));
 
@@ -817,7 +817,7 @@ describe("executeCodexCheck", () => {
     });
 
     it("stops retrying when the session has no waiter slot left", async () => {
-      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      const logged = jest.spyOn(console, "error").mockImplementation(() => {});
       const blockers = new AbortController();
       // MAX_WAITERS_PER_SESSION is 4, so these fill every slot of the session.
       const held = [0, 1, 2, 3].map(() =>

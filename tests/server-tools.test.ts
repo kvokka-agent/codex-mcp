@@ -7,7 +7,7 @@
  * registered input and output schemas run for real.
  */
 import { EventEmitter } from "events";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { createServer } from "../src/server.js";
@@ -22,22 +22,22 @@ class MockClient extends EventEmitter {
   startError: Error | null = null;
   turnStartError: Error | null = null;
 
-  start = vi.fn(async () => {
+  start = jest.fn(async () => {
     if (this.startError) throw this.startError;
     return { userAgent: "mock" };
   });
-  threadStart = vi.fn(async () => ({ thread: { id: "thread_mock" } }));
-  threadFork = vi.fn(async () => ({ thread: { id: "thread_forked" } }));
-  threadResume = vi.fn(async () => ({ thread: { id: "thread_forked" } }));
-  threadBackgroundTerminalsClean = vi.fn(async () => ({}));
-  turnStart = vi.fn(async () => {
+  threadStart = jest.fn(async () => ({ thread: { id: "thread_mock" } }));
+  threadFork = jest.fn(async () => ({ thread: { id: "thread_forked" } }));
+  threadResume = jest.fn(async () => ({ thread: { id: "thread_forked" } }));
+  threadBackgroundTerminalsClean = jest.fn(async () => ({}));
+  turnStart = jest.fn(async () => {
     if (this.turnStartError) throw this.turnStartError;
     return { turn: { id: "turn_mock" } };
   });
-  turnInterrupt = vi.fn(async () => {});
-  respondToServer = vi.fn();
-  respondErrorToServer = vi.fn();
-  destroy = vi.fn(async () => {});
+  turnInterrupt = jest.fn(async () => {});
+  respondToServer = jest.fn();
+  respondErrorToServer = jest.fn();
+  destroy = jest.fn(async () => {});
 
   onNotification(handler: (method: string, params: unknown) => void): void {
     this.notificationHandler = handler;
@@ -91,7 +91,7 @@ describe("server tool registration", () => {
 
   afterEach(async () => {
     await ctx.server.close();
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   async function startSession(): Promise<string> {

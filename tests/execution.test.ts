@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, jest } from "bun:test";
 import {
   buildExecutionInfo,
   coerceProgressForStatus,
@@ -231,7 +231,7 @@ describe("waitForCodexSessionForegroundResult", () => {
   });
 
   it("polls until the session becomes terminal", async () => {
-    const waitForChange = vi.fn(async () => undefined);
+    const waitForChange = jest.fn(async () => undefined);
     const manager = fakeManager({
       statuses: ["running", "running", "idle"],
       waitForChange,
@@ -248,8 +248,8 @@ describe("waitForCodexSessionForegroundResult", () => {
   it("reports a refused wait as such instead of as an expired budget", async () => {
     // waitForChange resolves on timeout, abort and change alike; it rejects only when the
     // session already holds the maximum number of waiters, and that happens immediately.
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const waitForChange = vi.fn(async () => {
+    const errors = jest.spyOn(console, "error").mockImplementation(() => {});
+    const waitForChange = jest.fn(async () => {
       throw new Error("[codex-mcp] Too many concurrent long-poll waiters for session 'sess_1'");
     });
     const manager = fakeManager({ statuses: ["running"], waitForChange });
@@ -270,7 +270,7 @@ describe("waitForCodexSessionForegroundResult", () => {
     const controller = new AbortController();
     // An aborted signal makes the real waitForChange resolve at once, so a loop that ignored the
     // abort would spin until the deadline.
-    const waitForChange = vi.fn(async () => {
+    const waitForChange = jest.fn(async () => {
       controller.abort();
     });
     const manager = fakeManager({ statuses: ["running"], waitForChange });
@@ -289,14 +289,14 @@ describe("waitForCodexSessionForegroundResult", () => {
   });
 
   it("caps the per-iteration wait at five seconds", async () => {
-    const waitForChange = vi.fn(async () => undefined);
+    const waitForChange = jest.fn(async () => undefined);
     const manager = fakeManager({ statuses: ["running", "idle"], waitForChange });
     await waitForCodexSessionForegroundResult(manager, "sess_1", 120_000);
     expect(waitForChange.mock.calls[0]![1]).toBe(5_000);
   });
 
   it("skips the loop entirely when the requested wait already elapsed", async () => {
-    const waitForChange = vi.fn(async () => undefined);
+    const waitForChange = jest.fn(async () => undefined);
     const manager = fakeManager({ statuses: ["running"], waitForChange });
     const out = await waitForCodexSessionForegroundResult(manager, "sess_1", 0);
     expect(waitForChange).not.toHaveBeenCalled();

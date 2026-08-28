@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { decideStdinShutdown } from "../src/utils/stdin-shutdown.js";
 
 const base = {

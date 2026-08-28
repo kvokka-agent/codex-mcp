@@ -1,16 +1,18 @@
+import { mockModule } from "./helpers/mock.js";
 import { EventEmitter } from "events";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "stream";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, jest } from "bun:test";
 import { Methods } from "../src/app-server/protocol.js";
 import { _resetForTesting } from "../src/utils/codex-executable.js";
 
-const spawnMock = vi.fn();
+const spawnMock = jest.fn();
 
-vi.mock("child_process", async () => {
-  const actual = await vi.importActual<typeof import("child_process")>("child_process");
+const realModule1 = { ...(await import("child_process")) };
+mockModule("child_process", realModule1, () => {
+  const actual = realModule1;
   return { ...actual, spawn: spawnMock };
 });
 
@@ -178,7 +180,7 @@ describe("AppServerClient spawn behavior", () => {
     const mod = await import("../src/app-server/client.js");
     const client = new mod.AppServerClient();
 
-    const requestSpy = vi.fn(async () => ({}));
+    const requestSpy = jest.fn(async () => ({}));
     (
       client as unknown as {
         request: (method: string, params?: unknown, timeout?: number) => Promise<unknown>;
@@ -233,7 +235,7 @@ describe("AppServerClient spawn behavior", () => {
     internal.writeQueue = ['{"jsonrpc":"2.0","id":1}\n'];
     internal.queuedBytes = internal.writeQueue[0].length;
 
-    const terminateSpy = vi
+    const terminateSpy = jest
       .spyOn(internal as unknown as { terminate: (signal: NodeJS.Signals) => void }, "terminate")
       .mockImplementation(() => {});
 

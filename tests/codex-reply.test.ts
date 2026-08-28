@@ -1,9 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, jest } from "bun:test";
 import { executeCodexReply } from "../src/tools/codex-reply.js";
 
 describe("executeCodexReply", () => {
   it("forwards sandbox override using the sandbox field", async () => {
-    const replyToSession = vi.fn(async () => ({
+    const replyToSession = jest.fn(async () => ({
       sessionId: "sess_123",
       threadId: "thread_123",
       status: "running" as const,
@@ -39,7 +39,7 @@ describe("executeCodexReply", () => {
   });
 
   it("forwards all supported overrides", async () => {
-    const replyToSession = vi.fn(async () => ({
+    const replyToSession = jest.fn(async () => ({
       sessionId: "sess_456",
       threadId: "thread_456",
       status: "running" as const,
@@ -83,7 +83,7 @@ describe("executeCodexReply", () => {
   });
 
   it("propagates replyToSession errors", async () => {
-    const replyToSession = vi.fn(async () => {
+    const replyToSession = jest.fn(async () => {
       throw new Error("boom");
     });
     const sessionManager = { replyToSession } as {

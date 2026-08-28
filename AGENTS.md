@@ -14,7 +14,7 @@ binaries without an app-server — and exposes their capability as five MCP tool
 - **[docs/TOOLS.md](docs/TOOLS.md)** and **[docs/SESSIONS.md](docs/SESSIONS.md)** —
   the public surface. A change to a tool schema changes these.
 - **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** — running your build in a real
-  client, and what `npm run check` covers.
+  client, and what `bun run check` covers.
 - **[docs/GLOSSARY.md](docs/GLOSSARY.md)** — the terms. Use them; do not invent
   synonyms.
 
@@ -42,12 +42,13 @@ server is `abandoned`, and `codex_session(action="resume")` picks it back up.
 
 ## Prerequisites
 
-Node.js >= 18, and a `codex` on PATH that answers `codex --version`.
+`bun`, a Node.js >= 18 for the runtime checks, and a `codex` on PATH that
+answers `codex --version`.
 
 ## Commands
 
-`npm run check` is the gate — lint, format, types, tests, build, the two runtime
-scripts and the markdown lint. Run it before opening a pull request. `npm run`
+`bun run check` is the gate — lint, format, types, tests, build, the two runtime
+scripts and the markdown lint. Run it before opening a pull request. `bun run`
 lists the rest.
 
 ## Layout
@@ -135,17 +136,17 @@ These are the patterns a change keeps, each of them written after it was broken:
   otherwise — `The nested job 'publish' is requesting 'id-token: write', but is
   only allowed 'id-token: none'` — with no job run and no log to read.
   `actionlint` checks one file at a time and passes it; `tests/workflows.test.ts`
-  reads both sides, so `npm run check` catches it before the push.
+  reads both sides, so `bun run check` catches it before the push.
 
 ## Tests
 
-- Vitest, `describe`/`it`, a fresh `SessionManager` in `beforeEach` and
+- `bun test`, `describe`/`it`, a fresh `SessionManager` in `beforeEach` and
   `manager.destroy()` in `afterEach`.
 - Deterministic, no network, the codex child process mocked.
 - A test asserts on a value the code under test produced.
 - A test measures on the fake clock, never on the wall clock. `useFakeClock()`
-  of `tests/helpers/clock.ts` installs vitest's fake timers and reports how far
-  the clock has moved, so a wait of 40ms is 40ms exactly; `eslint` refuses
+  of `tests/helpers/clock.ts` installs the fake timers and reports how far the
+  clock has moved, so a wait of 40ms is 40ms exactly; `eslint` refuses
   `Date.now`, `performance.now` and `process.hrtime` in a test file. A real
   `setTimeout(f, 40)` runs on libuv's millisecond loop clock and fires with a
   `Date.now()` delta of 39 about once in two thousand waits, which is a red

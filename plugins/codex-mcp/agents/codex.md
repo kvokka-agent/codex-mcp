@@ -46,29 +46,40 @@ who asked for it. Where every entry carries an `owner`, say that none is free.
 
 ## Drive
 
-Call `codex_check(action="poll", sessionId: <id>, waitMs: 60000)` until `status`
+Call `codex_check(action="poll", sessionId: <id>, waitMs: 300000)` until `status`
 is `idle`, `error` or `cancelled`. Every other status — `running`,
 `waiting_approval` — says the turn is still going, and the answer to it is the
 same call again. The call returns the moment the status changes, an action
-arrives or the turn ends, and at the end of the minute otherwise. Every answer
-carries the whole state — `status`, `progress`, `actions[]`, `interactionState`
-and `recommendedNextAction` — so repeat the same call with nothing carried
-between rounds. The terminal answer carries `result`, and so does every later
-check while the session stays terminal: a lost answer is read back, never
-reconstructed.
+arrives or the turn ends, and at the end of the five minutes otherwise. Every
+answer carries the whole state — `status`, `progress`, `actions[]`,
+`interactionState` and `recommendedNextAction` — so repeat the same call with
+nothing carried between rounds. The terminal answer carries `result`, and so
+does every later check while the session stays terminal: a lost answer is read
+back, never reconstructed.
 
-After each poll that answered with a `progress.activity` you have not written
-yet, write that line and nothing else:
+Write one line after every round that came back with the turn still running:
 
-```text
-codex: <progress.activity>
-```
+- A `progress.activity` you have not written yet is the new line. Write it, and
+  count the wait from zero again.
 
-The minute is what buys those lines. The server pushes each activity line to
-the MCP client as `notifications/progress` while a poll is held, and from inside
-a subagent that notification reaches nobody who is watching, so a call held for
-an hour shows an hour of silence. The line above is the whole of what the person
-sees while the turn runs.
+  ```text
+  codex: <progress.activity>
+  ```
+
+- The line you already wrote is the same work still going. Write it again with
+  how long it has stood, in whole five-minute rounds.
+
+  ```text
+  codex: <progress.activity> — 5+ min
+  codex: <progress.activity> — 10+ min
+  ```
+
+That line is the whole of what the person waiting sees. The server pushes each
+activity line to the MCP client as `notifications/progress` while a poll is
+held, and a client renders those under the call it made itself; a call made
+inside a subagent shows the person watching nothing. Five minutes is the window
+that keeps the round trips down to twelve an hour and still says, every time,
+either what changed or that nothing has.
 
 Report nothing else until the status is terminal. "Still working" and "waiting
 for the task to finish" are states of the poll rather than answers to the

@@ -5,7 +5,7 @@ import { EventEmitter } from "events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 
 import { SessionManager } from "../src/session/manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
@@ -21,16 +21,16 @@ class MockClient extends EventEmitter {
   childPid: number | undefined = undefined;
   destroyed = false;
 
-  start = vi.fn(async () => ({ userAgent: "mock" }));
-  threadStart = vi.fn(async () => ({ thread: { id: "thr_started" } }));
-  threadFork = vi.fn(async () => ({ thread: { id: "thr_forked" } }));
-  threadResume = vi.fn(async (_params: unknown) => ({ thread: { id: "thr_resumed" } }));
-  threadBackgroundTerminalsClean = vi.fn(async () => ({}));
-  turnStart = vi.fn(async (_params: unknown) => ({ turn: { id: "turn_1" } }));
-  turnInterrupt = vi.fn(async () => {});
-  respondToServer = vi.fn(() => {});
-  respondErrorToServer = vi.fn(() => {});
-  destroy = vi.fn(async () => {
+  start = jest.fn(async () => ({ userAgent: "mock" }));
+  threadStart = jest.fn(async () => ({ thread: { id: "thr_started" } }));
+  threadFork = jest.fn(async () => ({ thread: { id: "thr_forked" } }));
+  threadResume = jest.fn(async (_params: unknown) => ({ thread: { id: "thr_resumed" } }));
+  threadBackgroundTerminalsClean = jest.fn(async () => ({}));
+  turnStart = jest.fn(async (_params: unknown) => ({ turn: { id: "turn_1" } }));
+  turnInterrupt = jest.fn(async () => {});
+  respondToServer = jest.fn(() => {});
+  respondErrorToServer = jest.fn(() => {});
+  destroy = jest.fn(async () => {
     this.destroyed = true;
   });
 
@@ -102,7 +102,7 @@ afterEach(() => {
   manager.destroy();
   persistence.destroy();
   rmSync(stateDir, { recursive: true, force: true });
-  vi.restoreAllMocks();
+  jest.restoreAllMocks();
 });
 
 describe("a session this server drives", () => {
@@ -210,12 +210,19 @@ describe("resume", () => {
       sessionFile("sess_held", "owner.json"),
       JSON.stringify({ pid: process.pid, startedAt: ownStartedAt() })
     );
-    // The owner is read as another server: the pid is not this manager's to take.
-    vi.spyOn(process, "pid", "get").mockReturnValue(process.pid + 1);
-
-    await expect(manager.resumeSession("sess_held")).rejects.toThrow(
-      ErrorCode.SESSION_HELD_BY_OTHER_SERVER
-    );
+    // The owner is read as another server: the pid is not this manager's to
+    // take. `process.pid` is an own accessor of the process object, which a spy
+    // does not reach, so it is redefined here and put back below — every file of
+    // the suite shares this process.
+    const ownPid = process.pid;
+    Object.defineProperty(process, "pid", { configurable: true, get: () => ownPid + 1 });
+    try {
+      await expect(manager.resumeSession("sess_held")).rejects.toThrow(
+        ErrorCode.SESSION_HELD_BY_OTHER_SERVER
+      );
+    } finally {
+      Object.defineProperty(process, "pid", { configurable: true, value: ownPid });
+    }
     // 30s: proving the recorded pid is a live process asks the OS for its start
     // time, and on Windows that is a CIM query and then a wmic one, each with a
     // five-second budget of its own.
@@ -237,7 +244,7 @@ describe("resume", () => {
   it("leaves the session abandoned when the resume itself fails", async () => {
     writeAbandonedOnDisk("sess_broken");
     const failing = new MockClient();
-    failing.threadResume = vi.fn(async () => {
+    failing.threadResume = jest.fn(async () => {
       throw new Error("app-server refused");
     });
     manager = new SessionManager({

@@ -1,27 +1,31 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { advanceAsync, msAgo } from "./helpers/clock.js";
+import { mockModule } from "./helpers/mock.js";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { reapOrphanProcesses } from "../src/session/orphan-reaper.js";
 import type { RecoveredSession } from "../src/persistence/index.js";
-import { msAgo } from "./helpers/clock.js";
 
-const { execSyncMock, spawnMock, readFileSyncMock, uptimeMock } = vi.hoisted(() => ({
-  execSyncMock: vi.fn(),
-  spawnMock: vi.fn(),
-  readFileSyncMock: vi.fn(),
-  uptimeMock: vi.fn(),
-}));
+const { execSyncMock, spawnMock, readFileSyncMock, uptimeMock } = {
+  execSyncMock: jest.fn(),
+  spawnMock: jest.fn(),
+  readFileSyncMock: jest.fn(),
+  uptimeMock: jest.fn(),
+};
 
-vi.mock("node:child_process", async () => {
-  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+const realModule1 = { ...(await import("node:child_process")) };
+mockModule("node:child_process", realModule1, () => {
+  const actual = realModule1;
   return { ...actual, execSync: execSyncMock, spawn: spawnMock };
 });
 
-vi.mock("node:fs", async () => {
-  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+const realModule2 = { ...(await import("node:fs")) };
+mockModule("node:fs", realModule2, () => {
+  const actual = realModule2;
   return { ...actual, default: actual, readFileSync: readFileSyncMock };
 });
 
-vi.mock("node:os", async () => {
-  const actual = await vi.importActual<typeof import("node:os")>("node:os");
+const realModule3 = { ...(await import("node:os")) };
+mockModule("node:os", realModule3, () => {
+  const actual = realModule3;
   return { ...actual, default: actual, uptime: uptimeMock };
 });
 
@@ -59,9 +63,40 @@ function procFiles(
   };
 }
 
+const PS_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const PS_MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+/**
+ * One `ps -o lstart=` reading of `at`: "Sun May  5 10:00:02 2024", the day
+ * space-padded to two columns.
+ *
+ * It is printed at UTC because that is the zone `readPosixProcess` runs `ps`
+ * in. A `Date.toString()` in its place would be a JavaScript date rather than a
+ * ps reading, and the parser under test rejects one.
+ */
+function psLstart(at: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const day = String(at.getUTCDate()).padStart(2, " ");
+  const clock = `${pad(at.getUTCHours())}:${pad(at.getUTCMinutes())}:${pad(at.getUTCSeconds())}`;
+  return `${PS_DAYS[at.getUTCDay()]} ${PS_MONTHS[at.getUTCMonth()]} ${day} ${clock} ${at.getUTCFullYear()}`;
+}
+
 /** One line of `ps -p PID -o pgid=,lstart=`: the group id, then the start time. */
 function psLine(pgid: number, startedAt: Date): string {
-  return `${pgid} ${startedAt.toString()}\n`;
+  return `${pgid} ${psLstart(startedAt)}\n`;
 }
 
 function setPlatform(platform: string): void {
@@ -96,7 +131,7 @@ function esrch(): NodeJS.ErrnoException {
  * exit.  A signal to a negative pid reaches the group, the leader included.
  */
 function killsOnSignal(): void {
-  vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+  jest.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
     killCalls.push([pid, signal]);
     if (signal === 0 || signal === undefined) {
       if (dead.has(pid)) throw esrch();
@@ -109,7 +144,7 @@ function killsOnSignal(): void {
 
 /** Survives SIGTERM and dies on SIGKILL, so the reaper has to escalate. */
 function diesOnForce(): void {
-  vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+  jest.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
     killCalls.push([pid, signal]);
     if (signal === 0 || signal === undefined) {
       if (dead.has(pid)) throw esrch();
@@ -122,7 +157,7 @@ function diesOnForce(): void {
 
 /** Ignores termination signals so the reaper has to escalate to a force kill. */
 function ignoresSignals(): void {
-  vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+  jest.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
     killCalls.push([pid, signal]);
     if ((signal === 0 || signal === undefined) && dead.has(pid)) throw esrch();
     return true;
@@ -142,12 +177,12 @@ beforeEach(() => {
   uptimeMock.mockImplementation(() => {
     throw new Error("uptime unavailable");
   });
-  vi.spyOn(console, "error").mockImplementation(() => {});
+  jest.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
-  vi.useRealTimers();
+  jest.restoreAllMocks();
+  jest.useRealTimers();
   setPlatform(realPlatform);
 });
 
@@ -205,7 +240,7 @@ describe("reapOrphanProcesses", () => {
     execSyncMock.mockImplementation((cmd: string) => {
       // A ps that rejects the pgid keyword still answers for lstart alone.
       if (cmd.includes("pgid=")) throw new Error("ps: pgid: keyword not found");
-      return `${new Date(spawnedAt.getTime() + 2_000).toString()}\n`;
+      return `${psLstart(new Date(spawnedAt.getTime() + 2_000))}\n`;
     });
     killsOnSignal();
 
@@ -221,7 +256,7 @@ describe("reapOrphanProcesses", () => {
     setPlatform("linux");
     const spawnedAt = new Date("2024-05-05T10:00:00.000Z");
     execSyncMock.mockReturnValue(psLine(932, new Date(spawnedAt.getTime() + 2_000)));
-    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+    jest.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
       killCalls.push([pid, signal]);
       if (signal === 0 || signal === undefined) {
         if (dead.has(pid)) throw esrch();
@@ -372,13 +407,13 @@ describe("reapOrphanProcesses", () => {
 
   it("force kills the group of a process that ignores the graceful signal", async () => {
     setPlatform("linux");
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const spawnedAt = new Date().toISOString();
     execSyncMock.mockReturnValue(psLine(907, new Date(Date.parse(spawnedAt) + 1_000)));
     diesOnForce();
 
     const pending = reapOrphanProcesses([session(907, spawnedAt)]);
-    await vi.advanceTimersByTimeAsync(6_000);
+    await advanceAsync(6_000);
     const summary = await pending;
 
     expect(summary).toEqual({ reaped: 1, alreadyDead: 0, unconfirmed: 0, skipped: 0 });
@@ -389,13 +424,13 @@ describe("reapOrphanProcesses", () => {
 
   it("counts a process that survives the force kill as unconfirmed, not reaped", async () => {
     setPlatform("linux");
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const spawnedAt = new Date().toISOString();
     execSyncMock.mockReturnValue(psLine(908, new Date(Date.parse(spawnedAt) + 1_000)));
     ignoresSignals();
 
     const pending = reapOrphanProcesses([session(908, spawnedAt)]);
-    await vi.advanceTimersByTimeAsync(6_000);
+    await advanceAsync(6_000);
     const summary = await pending;
 
     expect(summary).toEqual({ reaped: 0, alreadyDead: 0, unconfirmed: 1, skipped: 0 });
@@ -404,7 +439,7 @@ describe("reapOrphanProcesses", () => {
 
   it("counts an orphan as unconfirmed when no source answers after the graceful signal", async () => {
     setPlatform("linux");
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const spawnedAt = new Date().toISOString();
     let psCalls = 0;
     execSyncMock.mockImplementation(() => {
@@ -417,7 +452,7 @@ describe("reapOrphanProcesses", () => {
     ignoresSignals();
 
     const pending = reapOrphanProcesses([session(909, spawnedAt)]);
-    await vi.advanceTimersByTimeAsync(6_000);
+    await advanceAsync(6_000);
     const summary = await pending;
 
     // The process took SIGTERM and stayed alive: nothing confirms it is gone.
@@ -428,12 +463,12 @@ describe("reapOrphanProcesses", () => {
 
   it("signals a live process owned by another user and reports it unconfirmed", async () => {
     setPlatform("linux");
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const spawnedAt = new Date().toISOString();
     execSyncMock.mockReturnValue(psLine(916, new Date(Date.parse(spawnedAt) + 1_000)));
     // EPERM is a running process this user may not signal — it never becomes
     // "already dead", and no signal of ours confirms its exit.
-    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+    jest.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
       killCalls.push([pid, signal]);
       const err = new Error("kill EPERM") as NodeJS.ErrnoException;
       err.code = "EPERM";
@@ -441,7 +476,7 @@ describe("reapOrphanProcesses", () => {
     }) as typeof process.kill);
 
     const pending = reapOrphanProcesses([session(916, spawnedAt)]);
-    await vi.advanceTimersByTimeAsync(6_000);
+    await advanceAsync(6_000);
     const summary = await pending;
 
     expect(summary).toEqual({ reaped: 0, alreadyDead: 0, unconfirmed: 1, skipped: 0 });
@@ -452,7 +487,7 @@ describe("reapOrphanProcesses", () => {
     const spawnedAt = new Date().toISOString();
     execSyncMock.mockReturnValue(psLine(918, new Date(Date.parse(spawnedAt) + 1_000)));
     let probes = 0;
-    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+    jest.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
       killCalls.push([pid, signal]);
       if (signal === 0 || signal === undefined) {
         // The second probe, the one right before the signal, finds it gone.
@@ -473,7 +508,7 @@ describe("reapOrphanProcesses", () => {
     const spawnedAt = new Date().toISOString();
     execSyncMock.mockReturnValue(psLine(919, new Date(Date.parse(spawnedAt) + 1_000)));
     let probes = 0;
-    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+    jest.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
       killCalls.push([pid, signal]);
       if ((signal === 0 || signal === undefined) && ++probes >= 2) {
         const err = new Error("kill EINVAL") as NodeJS.ErrnoException;
@@ -491,7 +526,7 @@ describe("reapOrphanProcesses", () => {
 
   it("skips a pid whose liveness the kernel does not answer for", async () => {
     setPlatform("linux");
-    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+    jest.spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
       killCalls.push([pid, signal]);
       const err = new Error("kill EINVAL") as NodeJS.ErrnoException;
       err.code = "EINVAL";
@@ -506,7 +541,7 @@ describe("reapOrphanProcesses", () => {
 
   it("sends no force signal when the pid stops matching during the graceful window", async () => {
     setPlatform("linux");
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const spawnedAt = new Date().toISOString();
     let psCalls = 0;
     execSyncMock.mockImplementation(() => {
@@ -519,7 +554,7 @@ describe("reapOrphanProcesses", () => {
     ignoresSignals();
 
     const pending = reapOrphanProcesses([session(934, spawnedAt)]);
-    await vi.advanceTimersByTimeAsync(6_000);
+    await advanceAsync(6_000);
     const summary = await pending;
 
     expect(summary).toEqual({ reaped: 1, alreadyDead: 0, unconfirmed: 0, skipped: 0 });
@@ -635,7 +670,7 @@ describe("reapOrphanProcesses", () => {
 
   it("force kills the child tree on Windows when taskkill is ignored", async () => {
     setPlatform("win32");
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const spawnedAt = new Date();
     execSyncMock.mockReturnValue(`${new Date(spawnedAt.getTime() + 1_000).toISOString()}\r\n`);
     ignoresSignals();
@@ -646,7 +681,7 @@ describe("reapOrphanProcesses", () => {
     });
 
     const pending = reapOrphanProcesses([session(924, spawnedAt.toISOString())]);
-    await vi.advanceTimersByTimeAsync(6_000);
+    await advanceAsync(6_000);
     const summary = await pending;
 
     expect(summary).toEqual({ reaped: 1, alreadyDead: 0, unconfirmed: 0, skipped: 0 });
@@ -658,14 +693,14 @@ describe("reapOrphanProcesses", () => {
 
   it("counts a Windows tree that survives taskkill /F as unconfirmed", async () => {
     setPlatform("win32");
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const spawnedAt = new Date();
     execSyncMock.mockReturnValue(`${new Date(spawnedAt.getTime() + 1_000).toISOString()}\r\n`);
     ignoresSignals();
     spawnMock.mockReturnValue({});
 
     const pending = reapOrphanProcesses([session(925, spawnedAt.toISOString())]);
-    await vi.advanceTimersByTimeAsync(6_000);
+    await advanceAsync(6_000);
     const summary = await pending;
 
     expect(summary).toEqual({ reaped: 0, alreadyDead: 0, unconfirmed: 1, skipped: 0 });

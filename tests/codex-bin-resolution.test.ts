@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import path from "path";
 import { findOnPath, resolveCodexInvocation } from "../src/app-server/codex-bin.js";
 

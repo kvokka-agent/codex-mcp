@@ -3,11 +3,11 @@
 ## The gate
 
 ```bash
-npm ci
-npm run check
+bun install --frozen-lockfile
+bun run check
 ```
 
-`npm run check` is what CI runs: lint, format, types, tests, build, the two
+`bun run check` is what CI runs: lint, format, types, tests, build, the two
 runtime scripts, and the markdown lint. A pull request passes it before it is
 opened.
 
@@ -20,7 +20,7 @@ code conventions and the implementation patterns this repository keeps.
 
 1. Branch from `master`.
 2. Make the change, and update the documents it makes wrong in the same branch.
-3. `npm run check`.
+3. `bun run check`.
 4. Open the pull request against `kvokka/codex-mcp`; a fork only holds the
    branch.
 

@@ -7,19 +7,21 @@
  * `codex` CLI therefore fails this file wherever the model drifted.
  */
 
+import { mockModule } from "./helpers/mock.js";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, jest } from "bun:test";
 import type { AppServerSpawnOptions } from "../src/app-server/lifecycle.js";
 import { Methods } from "../src/app-server/protocol.js";
 
-const spawnMock = vi.fn();
+const spawnMock = jest.fn();
 
-vi.mock("child_process", async () => {
-  const actual = await vi.importActual<typeof import("child_process")>("child_process");
+const realModule1 = { ...(await import("child_process")) };
+mockModule("child_process", realModule1, () => {
+  const actual = realModule1;
   return { ...actual, spawn: spawnMock };
 });
 

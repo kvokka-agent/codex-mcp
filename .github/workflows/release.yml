@@ -43,9 +43,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.ref_name }}
-      - uses: actions/setup-node@v7
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 24
+          bun-version: 1.4.0
       - name: Read the release label of the pull request this merge came from
         id: level
         env:
@@ -56,7 +56,7 @@ jobs:
           labels=$(gh api "repos/$REPOSITORY/commits/$SHA/pulls" \
             --jq '[.[] | select(.merge_commit_sha == env.SHA) | .labels[].name]')
           echo "The pull request of $SHA carries: $labels"
-          level=$(node scripts/release.mjs level "$labels")
+          level=$(bun scripts/release.mjs level "$labels")
           if [ -z "$level" ]; then
             echo "No release:major, release:minor or release:patch label — this merge ships no release."
           else
@@ -73,7 +73,7 @@ jobs:
           BRANCH: release-candidate/${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           base=$(git rev-parse HEAD)
-          version=$(node scripts/release.mjs bump "$LEVEL")
+          version=$(bun scripts/release.mjs bump "$LEVEL")
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # Only the version files changed, and the bump refuses to run on a tree where

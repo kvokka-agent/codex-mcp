@@ -1,8 +1,9 @@
+import { advanceAsync } from "./helpers/clock.js";
 import { EventEmitter } from "events";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
@@ -24,19 +25,19 @@ class MockAppServerClient extends EventEmitter {
   /** Spawn instant reported with the "spawn" event, as the real clients report theirs. */
   spawnedAt = "2024-05-05T10:00:00.000Z";
 
-  start = vi.fn(async () => {
+  start = jest.fn(async () => {
     if (this.childPid !== undefined) this.emit("spawn", this.childPid, this.spawnedAt);
     return { userAgent: "mock" };
   });
-  threadStart = vi.fn(async () => this.threadStartResult);
-  threadFork = vi.fn(async () => this.threadForkResult);
-  threadResume = vi.fn(async () => this.threadResumeResult);
-  turnStart = vi.fn(async () => this.turnStartResult);
-  turnInterrupt = vi.fn(async () => {});
+  threadStart = jest.fn(async () => this.threadStartResult);
+  threadFork = jest.fn(async () => this.threadForkResult);
+  threadResume = jest.fn(async () => this.threadResumeResult);
+  turnStart = jest.fn(async () => this.turnStartResult);
+  turnInterrupt = jest.fn(async () => {});
 
-  respondToServer = vi.fn((_id: number, _result: unknown) => {});
-  respondErrorToServer = vi.fn((_id: number, _code: number, _message: string) => {});
-  destroy = vi.fn(async () => {});
+  respondToServer = jest.fn((_id: number, _result: unknown) => {});
+  respondErrorToServer = jest.fn((_id: number, _code: number, _message: string) => {});
+  destroy = jest.fn(async () => {});
 
   onNotification(handler: (method: string, params: unknown) => void): void {
     this.notificationHandler = handler;
@@ -98,7 +99,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
   it("cleans up forked session resources when the new app-server fails to start", async () => {
     const originalClient = new MockAppServerClient();
     const forkClient = new MockAppServerClient();
-    forkClient.start = vi.fn(async () => {
+    forkClient.start = jest.fn(async () => {
       throw new Error("start failed");
     });
 
@@ -129,7 +130,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
   it("cleans up forked session resources when threadResume fails", async () => {
     const originalClient = new MockAppServerClient();
     const forkClient = new MockAppServerClient();
-    forkClient.threadResume = vi.fn(async () => {
+    forkClient.threadResume = jest.fn(async () => {
       throw new Error("resume failed");
     });
 
@@ -160,10 +161,10 @@ describe("SessionManager protocol compatibility + approvals", () => {
   it("still removes forked session bookkeeping when destroy fails after fork error", async () => {
     const originalClient = new MockAppServerClient();
     const forkClient = new MockAppServerClient();
-    forkClient.threadResume = vi.fn(async () => {
+    forkClient.threadResume = jest.fn(async () => {
       throw new Error("resume failed");
     });
-    forkClient.destroy = vi.fn(async () => {
+    forkClient.destroy = jest.fn(async () => {
       throw new Error("destroy failed");
     });
 
@@ -831,7 +832,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
   });
 
   it("auto-declines approvals after approvalTimeoutMs and clears pending", async () => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     try {
       const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium", {
         approvalTimeoutMs: 5,
@@ -845,17 +846,17 @@ describe("SessionManager protocol compatibility + approvals", () => {
       });
       expect(manager.pollStatus(sessionId).actions?.length).toBe(1);
 
-      await vi.advanceTimersByTimeAsync(10);
+      await advanceAsync(10);
 
       expect(client.respondToServer).toHaveBeenCalledWith(11, { decision: "decline" });
       expect(manager.getSession(sessionId).pendingRequestCount).toBe(0);
     } finally {
-      vi.useRealTimers();
+      jest.useRealTimers();
     }
   });
 
   it("auto-answers user input with empty answers on timeout", async () => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     try {
       const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium", {
         approvalTimeoutMs: 5,
@@ -868,7 +869,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
       });
 
       expect(manager.pollStatus(sessionId).actions?.length).toBe(1);
-      await vi.advanceTimersByTimeAsync(10);
+      await advanceAsync(10);
 
       expect(client.respondToServer).toHaveBeenCalledWith(13, { answers: {} });
       const poll = manager.pollStatus(sessionId);
@@ -876,7 +877,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
       expect(poll.status).toBe("running");
       expect(manager.getSession(sessionId).pendingRequestCount).toBe(0);
     } finally {
-      vi.useRealTimers();
+      jest.useRealTimers();
     }
   });
 
@@ -950,7 +951,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
     const destroyGate = new Promise<void>((resolve) => {
       releaseDestroy = resolve;
     });
-    client.destroy = vi.fn(async () => {
+    client.destroy = jest.fn(async () => {
       await destroyGate;
     });
 
@@ -1035,9 +1036,9 @@ describe("SessionManager protocol compatibility + approvals", () => {
   });
 
   it("unrefs approval timeout timers so they do not block process exit", async () => {
-    const unrefSpy = vi.fn();
+    const unrefSpy = jest.fn();
     const timeoutHandle = { unref: unrefSpy } as unknown as ReturnType<typeof setTimeout>;
-    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+    const setTimeoutSpy = jest.spyOn(globalThis, "setTimeout").mockImplementation(((
       handler: TimerHandler,
       timeout?: number
     ) => {
@@ -1295,11 +1296,11 @@ describe("SessionManager protocol compatibility + approvals", () => {
 describe("SessionManager missing protocol ids", () => {
   let manager: SessionManager;
   let client: MockAppServerClient;
-  let errors: ReturnType<typeof vi.spyOn>;
+  let errors: ReturnType<typeof jest.spyOn>;
   const workspace = path.resolve(os.tmpdir(), "codex-mcp-tests");
 
   beforeEach(() => {
-    errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    errors = jest.spyOn(console, "error").mockImplementation(() => {});
     client = new MockAppServerClient();
     manager = new SessionManager({
       disableCleanup: true,
@@ -1309,7 +1310,7 @@ describe("SessionManager missing protocol ids", () => {
 
   afterEach(() => {
     manager.destroy();
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   function logged(fragment: string): boolean {

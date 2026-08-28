@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { mockModule } from "./helpers/mock.js";
+import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -8,10 +9,11 @@ import path from "path";
  * temporary directory: `existsSync` already returns false for every path `statSync` rejects.
  * The wrapper delegates to the real implementation unless a test arms `statError`.
  */
-const fsState = vi.hoisted(() => ({ statError: null as Error | null }));
+const fsState = { statError: null as Error | null };
 
-vi.mock("fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("fs")>();
+const realModule1 = { ...(await import("fs")) };
+mockModule("fs", realModule1, () => {
+  const actual = realModule1;
   return {
     ...actual,
     default: actual,

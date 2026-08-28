@@ -4,7 +4,7 @@
  * Every asserted value is a notification the reporter produced, captured by the
  * send function it was built with.
  */
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, jest } from "bun:test";
 import {
   ProgressReporter,
   progressReporterFor,
@@ -54,7 +54,7 @@ describe("ProgressReporter", () => {
   });
 
   it("survives a client that refuses the notification", async () => {
-    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const stderr = jest.spyOn(console, "error").mockImplementation(() => {});
     const reporter = new ProgressReporter("tok-1", async () => {
       throw new Error("connection closed");
     });

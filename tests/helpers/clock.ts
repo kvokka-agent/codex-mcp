@@ -10,7 +10,7 @@
  * holds it to that — and drives the fake one from here instead, where a wait of
  * 40ms is 40ms exactly.
  */
-import { vi } from "vitest";
+import { jest } from "bun:test";
 
 export interface FakeClock {
   /** Move the clock on, and let every timer and promise it wakes run. */
@@ -20,16 +20,54 @@ export interface FakeClock {
 }
 
 /**
- * Install vitest's fake timers and hand back the clock they run on.
+ * How many pieces `advanceAsync` cuts a window into.
  *
- * The caller puts `vi.useRealTimers()` in its `afterEach`, as the rest of this
- * suite already does.
+ * `jest.advanceTimersByTime` runs the callbacks it wakes synchronously, so a
+ * timer that a promise continuation schedules is not on the queue while that
+ * advance is still running: the continuation cannot run until the microtask
+ * queue drains, and by then the window is over. Advancing in pieces and
+ * draining between them puts such a timer back inside the window it belongs
+ * to. The count is fixed rather than the step, so a window of a minute costs
+ * the same sixteen rounds as a window of ten milliseconds.
+ */
+const ADVANCE_PIECES = 16;
+
+/** Let everything already queued as a microtask run. */
+async function drainMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+/**
+ * Move the fake clock on by `ms`, letting the timers and the promises they
+ * wake run.
+ *
+ * `bun:test` carries the synchronous `advanceTimersByTime` alone, so the wait
+ * for what it wakes is assembled here.
+ */
+export async function advanceAsync(ms: number): Promise<void> {
+  const piece = Math.max(1, Math.ceil(ms / ADVANCE_PIECES));
+  let left = ms;
+  await drainMicrotasks();
+  while (left > 0) {
+    const step = Math.min(piece, left);
+    jest.advanceTimersByTime(step);
+    left -= step;
+    await drainMicrotasks();
+  }
+}
+
+/**
+ * Install the fake timers and hand back the clock they run on.
+ *
+ * The caller puts `jest.useRealTimers()` in its `afterEach`, as the rest of
+ * this suite already does.
  */
 export function useFakeClock(): FakeClock {
-  vi.useFakeTimers();
+  jest.useFakeTimers();
   const startedAt = Date.now();
   return {
-    advance: (ms: number) => vi.advanceTimersByTimeAsync(ms),
+    advance: advanceAsync,
     elapsedMs: () => Date.now() - startedAt,
   };
 }

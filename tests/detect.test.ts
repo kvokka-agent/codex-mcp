@@ -1,11 +1,14 @@
+import { advanceAsync } from "./helpers/clock.js";
+import { mockModule } from "./helpers/mock.js";
 import { EventEmitter } from "node:events";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, jest } from "bun:test";
 import { detectClientMode } from "../src/app-server/detect.js";
 
-const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
+const { spawnMock } = { spawnMock: jest.fn() };
 
-vi.mock("child_process", async () => {
-  const actual = await vi.importActual<typeof import("child_process")>("child_process");
+const realModule1 = { ...(await import("child_process")) };
+mockModule("child_process", realModule1, () => {
+  const actual = realModule1;
   return { ...actual, spawn: spawnMock };
 });
 
@@ -50,8 +53,8 @@ function procThatExits(code: number | null, out = "", err = ""): FakeProc {
 afterEach(() => {
   spawnMock.mockReset();
   killed.length = 0;
-  vi.useRealTimers();
-  vi.restoreAllMocks();
+  jest.useRealTimers();
+  jest.restoreAllMocks();
 });
 
 describe("detectClientMode", () => {
@@ -97,8 +100,8 @@ describe("detectClientMode", () => {
   });
 
   it("retries a probe that timed out instead of reading the timeout as an answer", async () => {
-    vi.useFakeTimers();
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    jest.useFakeTimers();
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     const hanging = fakeProc();
     const answering = fakeProc();
     spawnMock
@@ -109,7 +112,7 @@ describe("detectClientMode", () => {
       });
 
     const pending = detectClientMode("codex", false, {});
-    await vi.advanceTimersByTimeAsync(5_000);
+    await advanceAsync(5_000);
     expect(killed).toEqual(["SIGTERM"]);
 
     await expect(pending).resolves.toBe("app-server");
@@ -118,13 +121,13 @@ describe("detectClientMode", () => {
   });
 
   it("kills both probes and falls back to exec when the binary never answers", async () => {
-    vi.useFakeTimers();
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    jest.useFakeTimers();
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     spawnMock.mockImplementation(() => fakeProc());
 
     const pending = detectClientMode("codex", false, {});
-    await vi.advanceTimersByTimeAsync(5_000);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await advanceAsync(5_000);
+    await advanceAsync(10_000);
 
     await expect(pending).resolves.toBe("exec");
     expect(spawnMock).toHaveBeenCalledTimes(2);
@@ -139,7 +142,7 @@ describe("detectClientMode", () => {
   });
 
   it("names an unsupported binary differently from a probe that gave no answer", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     procThatExits(2, "", "error: unrecognized subcommand 'app-server'");
     await expect(detectClientMode("codex", false, {})).resolves.toBe("exec");
     expect(errorSpy.mock.calls.flat().join(" ")).toContain("not supported");
@@ -153,7 +156,7 @@ describe("detectClientMode", () => {
   });
 
   it("reports the spawn failure rather than calling the subcommand unknown", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     const proc = fakeProc();
     spawnMock.mockImplementation(() => {
       queueMicrotask(() => proc.emit("error", new Error("ENOENT")));
@@ -169,7 +172,7 @@ describe("detectClientMode", () => {
   });
 
   it("force kills a probe that survives the graceful signal", async () => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     spawnMock.mockImplementation(() => {
       const proc = fakeProc();
       proc.kill = (signal?: NodeJS.Signals) => {
@@ -180,26 +183,26 @@ describe("detectClientMode", () => {
     });
 
     const pending = detectClientMode("codex", false, {});
-    await vi.advanceTimersByTimeAsync(7_000);
+    await advanceAsync(7_000);
     expect(killed).toEqual(["SIGTERM", "SIGKILL"]);
 
-    await vi.advanceTimersByTimeAsync(12_000);
+    await advanceAsync(12_000);
     await expect(pending).resolves.toBe("exec");
     expect(killed).toEqual(["SIGTERM", "SIGKILL", "SIGTERM", "SIGKILL"]);
   });
 
   it("ignores a late exit after the probe already settled", async () => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     const first = fakeProc();
     const second = fakeProc();
     spawnMock.mockImplementationOnce(() => first).mockImplementationOnce(() => second);
 
     const pending = detectClientMode("codex", false, {});
-    await vi.advanceTimersByTimeAsync(5_000);
+    await advanceAsync(5_000);
     // The timed-out probe exits cleanly after the retry already started; its
     // answer belongs to a settled probe and must not decide the mode.
     first.emit("exit", 0);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await advanceAsync(10_000);
 
     await expect(pending).resolves.toBe("exec");
   });
