@@ -22,8 +22,8 @@ export const FAKE_CODEX = join(HERE, "fake-codex.mjs");
 /**
  * Whether this platform can run the suite at all.
  *
- * The codex stand-in is a Node script handed to the server as `CODEX_MCP_PATH`,
- * and Windows spawns an executable by its extension: a `.mjs` is not one. The
+ * The codex stand-in is a script handed to the server as `CODEX_MCP_PATH`, and
+ * Windows spawns an executable by its extension: a `.mjs` is not one. The
  * lifetime behaviour these tests measure — the startup event loop, the stdin
  * end, the ownership of a session directory — is covered per platform by the
  * unit tests around it.
@@ -85,11 +85,10 @@ export class ServerProcess {
   constructor(opts: ServerOptions = {}) {
     ensureServerBuilt();
     this.stateDir = opts.stateDir ?? mkdtempSync(join(tmpdir(), "codex-mcp-e2e-"));
-    // `node`, named rather than taken from `process.execPath`: the package ships
-    // a Node bundle behind a `#!/usr/bin/env node` line, and that is the runtime
-    // these tests measure. `process.execPath` is whatever runs the test file,
-    // which under `bun test` is bun.
-    this.child = spawn("node", [SERVER_ENTRY], {
+    // `bun`, named rather than taken from `process.execPath`: the bundle ships
+    // behind a `#!/usr/bin/env bun` line, and naming the runtime keeps the test
+    // measuring that one even when something else runs the test file.
+    this.child = spawn("bun", [SERVER_ENTRY], {
       cwd: REPO_ROOT,
       env: {
         ...process.env,

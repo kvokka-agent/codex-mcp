@@ -40,7 +40,7 @@ Optional but recommended:
 
 Required:
 
-1. Node.js >= 18
+1. bun >= 1.4
 2. `codex` in PATH (`codex --version` works)
 3. `@kvokka/codex-mcp` launchable from host machine
 4. Network available for model calls
@@ -64,7 +64,7 @@ Use one of these launch modes in your MCP client configuration:
 1. Recommended installed package path:
 
 ```bash
-npx -y @kvokka/codex-mcp
+bunx @kvokka/codex-mcp
 ```
 
 2. If globally installed:
@@ -76,14 +76,14 @@ codex-mcp
 3. If you are testing this repository checkout directly:
 
 ```bash
-npm install
+bun install
 bun run build
-node dist/index.js
+bun dist/index.js
 ```
 
 Do not continue to TC0 until the MCP client can start the server command successfully.
 
-Source-only verification (skip if you installed via npm/npx):
+Source-only verification (skip if you installed the published package):
 
 If you are testing from a local repository checkout (option 3 above), these scripts can verify stdout cleanliness before connecting an MCP client. They are **not available** when using the published npm package.
 
@@ -156,7 +156,7 @@ cat > "$dst/package.json" <<'EOF'
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "bun test"
   }
 }
 EOF
@@ -202,7 +202,7 @@ New-Item -ItemType Directory -Force -Path $dst | Out-Null
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "bun test"
   }
 }
 '@ | Set-Content -Path (Join-Path $dst "package.json") -Encoding UTF8
@@ -308,7 +308,7 @@ Auto-approval behavior by policy:
 
 Not all commands trigger an approval request. The codex CLI applies its own safety classification before surfacing approvals to the MCP layer:
 
-- `untrusted`: Read-only commands (e.g., `ls`, `cat`, `dir`, `type`) are typically auto-approved by codex internally and will **not** generate an `actions[]` entry. Commands with side effects (e.g., `bun test`, `node`, write operations) require explicit approval.
+- `untrusted`: Read-only commands (e.g., `ls`, `cat`, `dir`, `type`) are typically auto-approved by codex internally and will **not** generate an `actions[]` entry. Commands with side effects (e.g., `bun test`, `bun run`, write operations) require explicit approval.
 - `on-request`: Similar to `untrusted` but with a broader set of auto-approved commands. Most read operations pass through; write operations and unknown commands require approval.
 - `on-failure`: Commands are auto-approved on first attempt; approval is only requested if a command fails.
 - `never`: All commands are auto-approved. No `actions[]` will appear for command approvals (file-change approvals may still appear depending on sandbox mode).
@@ -784,7 +784,7 @@ Keep all discussion grounded in actual tool responses (copy the exact JSON paylo
 This appendix is optional and does not replace the generic flow above.
 
 1. In Claude Code MCP settings, prefer launch commands that avoid shell stdout noise.
-2. On Windows, if command resolution needs it, use `npx.cmd` instead of `npx`.
+2. On Windows, if command resolution needs it, use `bunx.exe` instead of `bunx`.
 3. In MCP payloads, keep `cwd` as Windows path format (for example `D:\\Lab\\repo`) even if your shell prompt is `/d/Lab/repo`.
 4. Recommended order:
    - validate stdout cleanliness

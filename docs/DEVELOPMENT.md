@@ -17,8 +17,8 @@ bun run build
 `dist/` is not committed. `bun run build` bundles the whole server into the
 single file `dist/index.js`, and that file is what every step below launches.
 
-`bun` builds and tests; `node` runs what is built, which is what the two
-runtime checks of the gate measure.
+`bun` builds it, runs it and runs the tests; nothing in the repository calls
+node.
 
 The server drives the Codex CLI, so `codex --version` must answer and
 `codex login` must have run. Without a login the server still starts and
@@ -34,7 +34,7 @@ directory — and put a `.mcp.json` in its root:
 {
   "mcpServers": {
     "codex-mcp": {
-      "command": "node",
+      "command": "bun",
       "args": ["/absolute/path/to/codex-mcp/dist/index.js"],
       "env": {
         "CODEX_MCP_STATE_DIR": "/absolute/path/to/codex-mcp/.codex-mcp-state"
@@ -65,7 +65,7 @@ build from every project instead, register it once at user scope:
 ```bash
 claude mcp add --scope user codex-mcp-dev \
   -e CODEX_MCP_STATE_DIR=/absolute/path/to/codex-mcp/.codex-mcp-state \
-  -- node /absolute/path/to/codex-mcp/dist/index.js
+  -- bun /absolute/path/to/codex-mcp/dist/index.js
 ```
 
 A user-scope server under a different name lives beside the published one, and
@@ -179,7 +179,7 @@ first questions there — which codex binary was resolved, whether the app-serve
 probe passed or the run fell back to `exec`, how many sessions the state
 directory held, and how many of them another running server owns.
 
-Outside a client, `node dist/index.js` writes the same lines to the terminal.
+Outside a client, `bun dist/index.js` writes the same lines to the terminal.
 
 **What the state directory holds.** One directory per session, laid out in
 [DESIGN.md](DESIGN.md#disk-persistence). `events.jsonl` is the server's own

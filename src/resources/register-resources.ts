@@ -18,6 +18,18 @@ import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 
 const RESOURCE_SCHEME = "codex-mcp";
 
+/**
+ * The runtime this process is, as a name and a version.
+ *
+ * bun sets `process.versions.bun` and answers `process.version` with the Node
+ * release it emulates, so reading `process.version` alone names the wrong
+ * runtime.
+ */
+function describeRuntime(): string {
+  const bun = process.versions.bun;
+  return bun ? `bun v${bun}` : `node ${process.version}`;
+}
+
 export const RESOURCE_URIS = {
   serverInfo: `${RESOURCE_SCHEME}:///server-info`,
   compatReport: `${RESOURCE_SCHEME}:///compat-report`,
@@ -580,7 +592,7 @@ export function registerResources(
             version: deps.version,
             codexCliVersion: getCodexCliVersion(),
             clientMode: deps.clientMode,
-            node: process.version,
+            runtime: describeRuntime(),
             platform: process.platform,
             arch: process.arch,
             stdioMode: resolveStdioMode().mode,

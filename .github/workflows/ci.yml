@@ -27,11 +27,6 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
-      # The end-to-end tests spawn the built server the way the package ships
-      # it, which is under node.
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
       - run: bun install --frozen-lockfile
       - run: bun run lint
       - run: bun run format:check
@@ -42,7 +37,7 @@ jobs:
       - run: bun test
       - run: bun run lint:md
 
-  # What the published server does on the Node versions and the platforms it
+  # What the published server does on the bun versions and the platforms it
   # claims. Launching the built bundle is the only thing that exercises the
   # startup path: STATE_DIR lock, session recovery, orphan reaping, and a stdout
   # kept clean until the MCP handshake. Neither script needs the codex binary —
@@ -52,21 +47,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            node-version: 18
-          - os: ubuntu-latest
-            node-version: 24
-          - os: ubuntu-latest
-            node-version: 22
-          - os: windows-latest
-            node-version: 18
-          - os: windows-latest
-            node-version: 24
-          - os: macos-latest
-            node-version: 18
-          - os: macos-latest
-            node-version: 24
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # `1.4.0` is the floor `engines.bun` names; `latest` is what a fresh
+        # `bunx` run installs for.
+        bun-version: ["1.4.0", latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Normalize git EOL settings on Windows
@@ -79,12 +63,7 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
-      # The bundle is built by bun and run by node: `node-version` is the version
-      # under test, and the two scripts below spawn `node dist/index.js`.
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ matrix.node-version }}
+          bun-version: ${{ matrix.bun-version }}
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: bun run check:stdio

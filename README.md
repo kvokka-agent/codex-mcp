@@ -32,8 +32,9 @@ paying for the transcript.
 
 ## Install
 
-[bun](https://bun.com), which starts the server, Node.js >= 18, which runs it,
-and the [Codex CLI](https://github.com/openai/codex) installed and logged in.
+[bun](https://bun.com) >= 1.4, which starts and runs the server, and the
+[Codex CLI](https://github.com/openai/codex) installed and logged in. Node.js is
+not part of it.
 
 ### Claude Code
 

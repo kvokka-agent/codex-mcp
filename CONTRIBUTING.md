@@ -31,5 +31,5 @@ the merge does with it. A pull request without one merges without releasing.
 ## Reporting issues
 
 Use [GitHub Issues](https://github.com/kvokka/codex-mcp/issues). Include the
-steps to reproduce, what you expected against what happened, and the Node.js and
+steps to reproduce, what you expected against what happened, and the bun and
 Codex CLI versions.

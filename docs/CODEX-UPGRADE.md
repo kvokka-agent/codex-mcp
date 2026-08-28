@@ -3,7 +3,7 @@
 `codex-mcp` spawns `codex app-server` and speaks its JSON-RPC wire format, so a
 Codex CLI upgrade is a protocol upgrade. This document is the procedure for one.
 The same procedure covers a change in `@modelcontextprotocol/sdk`, in `zod`, or
-in the Node/TypeScript floor that moves a tool interface.
+in the bun/TypeScript floor that moves a tool interface.
 
 ## What decides
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * A codex app-server stand-in for the end-to-end tests.
  *

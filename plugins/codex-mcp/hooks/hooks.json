@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/codex-subagent-only.mjs\"",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/codex-subagent-only.mjs\"",
             "timeout": 10
           }
         ]

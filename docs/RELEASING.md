@@ -31,11 +31,11 @@ merge an empty follow-up pull request carrying the label you meant.
 1. **prepare** reads the labels of the pull request whose merge produced the commit,
    through `repos/{repo}/commits/{sha}/pulls`. With no release label the job ends
    here and the three below it are skipped. With one it runs
-   `node scripts/release.mjs bump <level>` on the tip of `master`, commits the
+   `bun scripts/release.mjs bump <level>` on the tip of `master`, commits the
    version files as `chore(release): vX.Y.Z` and pushes that commit to a branch of
    its own, `release-candidate/<run id>-<attempt>`. `master` does not move.
 2. **verify** calls `.github/workflows/ci.yml` on the candidate commit — the same
-   matrix of seven runners the pull request went through, plus the markdown lint. It
+   matrix of six runners the pull request went through, plus the markdown lint. It
    checks the tree that ships, the raised version files included.
 3. **promote** fast-forwards `master` to the candidate commit and pushes the tag
    `vX.Y.Z` in one `git push --atomic`, then deletes the candidate branch. This is
