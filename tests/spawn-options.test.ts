@@ -60,13 +60,18 @@ describe("buildAppServerArgs", () => {
   });
 });
 
+const NO_DEFAULTS = { effort: "low", approvalTimeoutMs: 60000 } as const;
+
 describe("extractSpawnOptions", () => {
   it("leaves optional fields undefined when the tool call omits them", () => {
-    const opts = extractSpawnOptions({
-      prompt: "hello",
-      approvalPolicy: "never",
-      sandbox: "read-only",
-    });
+    const opts = extractSpawnOptions(
+      {
+        prompt: "hello",
+        approvalPolicy: "never",
+        sandbox: "read-only",
+      },
+      NO_DEFAULTS
+    );
 
     expect(opts).toEqual({
       profile: undefined,
@@ -78,24 +83,27 @@ describe("extractSpawnOptions", () => {
   });
 
   it("drops advanced fields that are not spawn options", () => {
-    const opts = extractSpawnOptions({
-      prompt: "hello",
-      cwd: "/tmp/project",
-      approvalPolicy: "on-failure",
-      sandbox: "workspace-write",
-      effort: "high",
-      advanced: {
-        baseInstructions: "be terse",
-        developerInstructions: "prefer tests",
-        personality: "pragmatic",
-        summary: "concise",
-        ephemeral: true,
-        approvalTimeoutMs: 300000,
-        images: ["/tmp/shot.png"],
-        outputSchema: { type: "object" },
-        config: { model_reasoning_effort: "high" },
+    const opts = extractSpawnOptions(
+      {
+        prompt: "hello",
+        cwd: "/tmp/project",
+        approvalPolicy: "on-failure",
+        sandbox: "workspace-write",
+        effort: "high",
+        advanced: {
+          baseInstructions: "be terse",
+          developerInstructions: "prefer tests",
+          personality: "pragmatic",
+          summary: "concise",
+          ephemeral: true,
+          approvalTimeoutMs: 300000,
+          images: ["/tmp/shot.png"],
+          outputSchema: { type: "object" },
+          config: { model_reasoning_effort: "high" },
+        },
       },
-    });
+      NO_DEFAULTS
+    );
 
     expect(opts).toEqual({
       profile: undefined,
@@ -108,14 +116,17 @@ describe("extractSpawnOptions", () => {
 
   it("feeds buildAppServerArgs so advanced.config reaches the CLI flags", () => {
     const args = buildAppServerArgs(
-      extractSpawnOptions({
-        prompt: "hello",
-        approvalPolicy: "untrusted",
-        sandbox: "danger-full-access",
-        model: "gpt-5",
-        profile: "work",
-        advanced: { config: { "sandbox_workspace_write.network_access": true } },
-      })
+      extractSpawnOptions(
+        {
+          prompt: "hello",
+          approvalPolicy: "untrusted",
+          sandbox: "danger-full-access",
+          model: "gpt-5",
+          profile: "work",
+          advanced: { config: { "sandbox_workspace_write.network_access": true } },
+        },
+        NO_DEFAULTS
+      )
     );
 
     expect(args).toEqual([

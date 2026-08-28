@@ -7,12 +7,15 @@ import {
   SANDBOX_MODES,
   EFFORT_LEVELS,
   DEFAULT_APPROVAL_TIMEOUT_MS,
+  DEFAULT_EFFORT_LEVEL,
   MAX_LONG_POLL_WAIT_MS,
   DEFAULT_IDLE_CLEANUP_MS,
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
   ErrorCode,
 } from "../types.js";
+import type { SessionDefaults } from "../utils/session-defaults.js";
+import { SESSION_DEFAULT_ENV } from "../utils/session-defaults.js";
 import { resolveStdioMode } from "../utils/stdio-guard.js";
 import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 
@@ -52,6 +55,8 @@ export interface ResourceDeps {
   clientMode: string;
   /** Whether the state directory was claimed at startup, so session history outlives a restart. */
   diskPersistence: boolean;
+  /** How a session starts when the caller names nothing, as the environment set it. */
+  sessionDefaults: SessionDefaults;
 }
 
 interface ResourceCatalogEntry {
@@ -178,12 +183,12 @@ function msToMinutes(ms: number): number {
   return Math.floor(ms / 60_000);
 }
 
-function buildConfigGuideText(): string {
+function buildConfigGuideText(defaults: SessionDefaults): string {
   return [
     "## Top-level parameters (`codex`)",
     "",
-    "- Required: `prompt`, `approvalPolicy`, `sandbox`.",
-    "- Optional: `effort` (default `low`), `cwd` (default server cwd), `model` (default config.toml), `profile` (default CLI profile), `advanced`.",
+    `- Required: ${["`prompt`", defaults.approvalPolicy ? "" : "`approvalPolicy`", defaults.sandbox ? "" : "`sandbox`"].filter(Boolean).join(", ")}.`,
+    `- Optional: ${defaults.approvalPolicy ? `\`approvalPolicy\` (default \`${defaults.approvalPolicy}\`), ` : ""}${defaults.sandbox ? `\`sandbox\` (default \`${defaults.sandbox}\`), ` : ""}\`effort\` (default \`${defaults.effort}\`), \`cwd\` (default server cwd), \`model\` (default ${defaults.model ? `\`${defaults.model}\`` : "config.toml"}), \`profile\` (default CLI profile), \`advanced\`.`,
     "- Prefer passing `cwd` explicitly to avoid accidental server-cwd execution.",
     "",
     "## `advanced.*` guide",
@@ -194,7 +199,7 @@ function buildConfigGuideText(): string {
     "- `advanced.summary`: summary verbosity preset for turn output (default: config.toml).",
     "- `advanced.ephemeral`: do not persist thread state remotely (default `false`).",
     "- `advanced.images`: local image file paths on the same host as codex-mcp (default: none).",
-    `- \`advanced.approvalTimeoutMs\`: auto-decline timeout for approval/user-input requests (default \`${DEFAULT_APPROVAL_TIMEOUT_MS}\` ms).`,
+    `- \`advanced.approvalTimeoutMs\`: auto-decline timeout for approval/user-input requests (default \`${defaults.approvalTimeoutMs}\` ms).`,
     "- `advanced.outputSchema`: JSON Schema for structured output from `codex` turns (default: none).",
     "",
     "## `advanced.config` mapping",
@@ -234,6 +239,13 @@ function buildConfigGuideText(): string {
     "- `CODEX_MCP_DISABLE_NOISE_FILTER`: set to `1` to keep shell-profile noise (oh-my-posh, PSReadLine banners) in command output events. Default: those lines are stripped.",
     "- `CODEX_MCP_DISABLE_ACTIVITY_MARKER`: set to `1` to start threads without the activity-marker instruction, which leaves `progress.activity` empty. Default: the instruction is sent, and markers are extracted and cut from the result either way.",
     '- `CODEX_MCP_PROGRESS_HEARTBEAT_MS`: how often a held `codex_check(action="poll")` repeats the standing activity line as `notifications/progress`. Default: 30000. Set 0 to send heartbeats no more, which also lets a client watchdog end a call that has been silent.',
+    `- \`${SESSION_DEFAULT_ENV.model}\`: model a \`codex\` call that names none starts on. Default: none — the Codex CLI reads its own config.toml. Now: ${defaults.model ?? "unset"}.`,
+    `- \`${SESSION_DEFAULT_ENV.effort}\`: reasoning effort a \`codex\` call that names none starts on, one of ${EFFORT_LEVELS.join(", ")}. Default: ${DEFAULT_EFFORT_LEVEL}. Now: ${defaults.effort}.`,
+    `- \`${SESSION_DEFAULT_ENV.approvalTimeoutMs}\`: milliseconds a pending approval waits before it auto-declines, where the call names no \`advanced.approvalTimeoutMs\`. Default: ${DEFAULT_APPROVAL_TIMEOUT_MS}. Now: ${defaults.approvalTimeoutMs}.`,
+    `- \`${SESSION_DEFAULT_ENV.approvalPolicy}\`: approval policy a \`codex\` call that names none starts on, one of ${APPROVAL_POLICIES.join(", ")}. Default: none, which keeps \`approvalPolicy\` a required parameter. Now: ${defaults.approvalPolicy ?? "unset"}.`,
+    `- \`${SESSION_DEFAULT_ENV.sandbox}\`: sandbox a \`codex\` call that names none starts on, one of ${SANDBOX_MODES.join(", ")}. Default: none, which keeps \`sandbox\` a required parameter. Now: ${defaults.sandbox ?? "unset"}.`,
+    "",
+    "A value none of those five can be read as stops the server at startup, naming the variable.",
     "",
     "## Version compatibility note",
     "",
@@ -250,7 +262,7 @@ function buildConfigGuideText(): string {
   ].join("\n");
 }
 
-function buildGotchasText(): string {
+function buildGotchasText(defaults: SessionDefaults): string {
   return [
     "## Checking a session",
     "",
@@ -264,9 +276,9 @@ function buildGotchasText(): string {
     "",
     "## Approval behavior",
     "",
-    `- Pending approvals/user-input auto-decline after \`approvalTimeoutMs\` (default ${DEFAULT_APPROVAL_TIMEOUT_MS} ms).`,
+    `- Pending approvals/user-input auto-decline after \`approvalTimeoutMs\` (default ${defaults.approvalTimeoutMs} ms).`,
     "- The Codex CLI decides which commands `untrusted` prompts for, and that set moves between CLI versions: do not count on a given read-only command asking for approval.",
-    `- **Timeout vs polling conflict**: The recommended polling interval for \`running\` status is >=120 seconds, but the default approval timeout is ${DEFAULT_APPROVAL_TIMEOUT_MS / 1000} seconds. If a session transitions to \`waiting_approval\` between polls, the approval will auto-decline before the client can respond. Set \`advanced.approvalTimeoutMs\` to at least 300000 (5 minutes) when using \`untrusted\` or \`on-request\` policies.`,
+    `- **Timeout vs polling conflict**: The recommended polling interval for \`running\` status is >=120 seconds, but the default approval timeout is ${defaults.approvalTimeoutMs / 1000} seconds. If that is shorter than the gap between two polls, a session that transitions to \`waiting_approval\` between them auto-declines before the client can respond: raise \`advanced.approvalTimeoutMs\` to at least 300000 (5 minutes) under \`untrusted\` or \`on-request\`.`,
     "",
     "## What a check reports",
     "",
@@ -309,7 +321,7 @@ function buildGotchasText(): string {
   ].join("\n");
 }
 
-function buildQuickstartText(): string {
+function buildQuickstartText(defaults: SessionDefaults): string {
   return [
     "## Minimal flow",
     "",
@@ -353,7 +365,7 @@ function buildQuickstartText(): string {
     "- Write `progress.activity` out after every round that came back with the turn still running, then call again. `progress.activityStandingMs` says how long that same line has stood, so a repeat reads `compiling the workspace — 15 min` rather than the same sentence twice.",
     "- Without `waitMs`, use `pollInterval` as a minimum delay: `running` >=120000ms (and usually longer for big tasks).",
     "- `waiting_approval` is the exception: poll/answer around 1000ms to avoid timeout.",
-    `- When using \`untrusted\` or \`on-request\` policies, set \`advanced.approvalTimeoutMs\` to at least 300000 to prevent approvals from expiring between polling intervals.`,
+    `- A pending approval auto-declines after ${defaults.approvalTimeoutMs}ms. Under \`untrusted\` or \`on-request\`, that has to outlive the gap between two polls: raise \`advanced.approvalTimeoutMs\` to at least 300000 where it does not.`,
     "",
     "3. If `actions[]` contains an approval request, respond:",
     "",
@@ -429,7 +441,7 @@ function buildErrorsText(): string {
   return lines.join("\n");
 }
 
-function buildDelegationGuideText(): string {
+function buildDelegationGuideText(defaults: SessionDefaults): string {
   return [
     "# Codex Delegation Guide",
     "",
@@ -453,11 +465,22 @@ function buildDelegationGuideText(): string {
     "**Key rule:** `read-only` sandbox already prevents writes, so `approvalPolicy: 'never'` is safe with it. Avoid `untrusted` + `read-only` — every read command triggers approval for no safety gain.",
     "",
     "## Approval policy quick guide",
+    defaults.approvalPolicy || defaults.sandbox
+      ? `A call that names neither starts on ${[
+          defaults.approvalPolicy && `\`${defaults.approvalPolicy}\``,
+          defaults.sandbox && `\`${defaults.sandbox}\``,
+        ]
+          .filter(Boolean)
+          .join(
+            " with "
+          )}, which ${SESSION_DEFAULT_ENV.approvalPolicy} and ${SESSION_DEFAULT_ENV.sandbox} set.`
+      : "A call states its own approval policy and sandbox; the server carries no default for either.",
+    "",
     "- `never`: no interactive prompts. Best for read-only review or tightly scoped trusted tasks.",
     "- `on-failure`: pragmatic default for implementation work when you still want some safety rails.",
     "- `on-request`: use when a human or outer agent will actively poll and answer approvals.",
     "- `untrusted`: strictest interactive mode; expect frequent prompts and higher timeout sensitivity.",
-    `- Default approval timeout is ${DEFAULT_APPROVAL_TIMEOUT_MS}ms. If interactive approvals are possible, raise \`advanced.approvalTimeoutMs\` to at least 300000 so requests do not expire between normal running-session polls.`,
+    `- Default approval timeout is ${defaults.approvalTimeoutMs}ms. If interactive approvals are possible, raise \`advanced.approvalTimeoutMs\` to at least 300000 so requests do not expire between normal running-session polls.`,
     "",
     "## The loop",
     `Every start returns at once. Follow the turn with \`codex_check(action="poll", waitMs=300000)\` until the status is terminal, and write \`progress.activity\` out after each round that came back still running — that line is what the person waiting reads. \`waitMs\` accepts up to ${MAX_LONG_POLL_WAIT_MS}, and the server holds the call for as long as the MCP client tolerates one.`,
@@ -466,9 +489,10 @@ function buildDelegationGuideText(): string {
     "Levels, least to most reasoning: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. The value is passed to the Codex CLI as the turn reasoning effort.",
     "- `none`: least reasoning; fully specified, mechanical steps",
     "- `minimal`: small lookups and single-file edits",
-    "- `low` (default): quick questions, lookups, simple edits",
+    "- `low`: quick questions, lookups, simple edits",
     "- `medium`: multi-file changes, moderate reasoning",
     "- `high`/`xhigh`: complex architecture decisions, large refactors",
+    `A codex call that names no effort runs at ${defaults.effort}, and \`${SESSION_DEFAULT_ENV.effort}\` sets which level that is.`,
     "",
     "**`minimal` and web search:** some Codex CLI builds reject `effort: 'minimal'` when the `web_search` tool is enabled. codex-mcp retries that turn at `low` and reports the switch in `compatWarnings` on the response.",
     "",
@@ -635,7 +659,7 @@ export function registerResources(
       description: configMeta.description,
       mimeType: configMeta.mimeType,
     },
-    () => asTextResource(configUri, buildConfigGuideText(), "text/markdown")
+    () => asTextResource(configUri, buildConfigGuideText(deps.sessionDefaults), "text/markdown")
   );
 
   const gotchasMeta = byKey.get("gotchas")!;
@@ -648,7 +672,7 @@ export function registerResources(
       description: gotchasMeta.description,
       mimeType: gotchasMeta.mimeType,
     },
-    () => asTextResource(gotchasUri, buildGotchasText(), "text/markdown")
+    () => asTextResource(gotchasUri, buildGotchasText(deps.sessionDefaults), "text/markdown")
   );
 
   const quickstartMeta = byKey.get("quickstart")!;
@@ -661,7 +685,7 @@ export function registerResources(
       description: quickstartMeta.description,
       mimeType: quickstartMeta.mimeType,
     },
-    () => asTextResource(quickstartUri, buildQuickstartText(), "text/markdown")
+    () => asTextResource(quickstartUri, buildQuickstartText(deps.sessionDefaults), "text/markdown")
   );
 
   const errorsMeta = byKey.get("errors")!;
@@ -687,6 +711,11 @@ export function registerResources(
       description: delegationGuideMeta.description,
       mimeType: delegationGuideMeta.mimeType,
     },
-    () => asTextResource(delegationGuideUri, buildDelegationGuideText(), "text/markdown")
+    () =>
+      asTextResource(
+        delegationGuideUri,
+        buildDelegationGuideText(deps.sessionDefaults),
+        "text/markdown"
+      )
   );
 }

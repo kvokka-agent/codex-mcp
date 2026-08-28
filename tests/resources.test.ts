@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_EFFORT_LEVEL } from "../src/types.js";
 
 /**
  * `detectCodexCliVersion` runs the resolved executable with `--version` under a
@@ -108,6 +109,10 @@ function collect(
     version: overrides.version ?? "0.0.0-test",
     clientMode: overrides.clientMode ?? "app-server",
     diskPersistence: overrides.diskPersistence ?? true,
+    sessionDefaults: {
+      effort: DEFAULT_EFFORT_LEVEL,
+      approvalTimeoutMs: DEFAULT_APPROVAL_TIMEOUT_MS,
+    },
     sessionManager: {
       getActiveSessionCount: () => overrides.activeSessions ?? 3,
       getObservedDefaultModel: () =>

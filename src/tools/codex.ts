@@ -7,9 +7,11 @@
  */
 import type { SessionManager } from "../session/manager.js";
 import type { ProgressInfo, SessionStartResult } from "../types.js";
-import { DEFAULT_EFFORT_LEVEL } from "../types.js";
+import { ErrorCode } from "../types.js";
 import type { CodexToolParams } from "../utils/config.js";
 import { extractSpawnOptions } from "../utils/config.js";
+import type { SessionDefaults } from "../utils/session-defaults.js";
+import { SESSION_DEFAULT_ENV } from "../utils/session-defaults.js";
 import { resolveAndValidateCwd } from "../utils/cwd.js";
 import {
   coerceProgressForStatus,
@@ -32,18 +34,36 @@ function safeGetProgress(
 export async function executeCodex(
   args: CodexToolParams,
   sessionManager: SessionManager,
-  serverCwd: string
+  serverCwd: string,
+  defaults: SessionDefaults
 ): Promise<SessionStartResult> {
   const cwd = resolveAndValidateCwd(args.cwd, serverCwd);
-  const spawnOpts = extractSpawnOptions(args);
-  const effort = args.effort ?? DEFAULT_EFFORT_LEVEL;
+  const spawnOpts = extractSpawnOptions(args, defaults);
+  // The permission level of a turn is stated, never inferred: the tool schema
+  // requires both where the environment sets neither, and this is what a caller
+  // reaching the function directly hits.
+  for (const [name, value] of [
+    ["approvalPolicy", spawnOpts.approvalPolicy],
+    ["sandbox", spawnOpts.sandbox],
+  ] as const) {
+    if (value === undefined) {
+      throw new Error(
+        `Error [${ErrorCode.INVALID_ARGUMENT}]: ${name} is required — the call named none and ${SESSION_DEFAULT_ENV[name]} sets none.`
+      );
+    }
+  }
+  const effort = args.effort ?? defaults.effort;
+  const advanced = {
+    ...args.advanced,
+    approvalTimeoutMs: args.advanced?.approvalTimeoutMs ?? defaults.approvalTimeoutMs,
+  };
 
   const startResult = await sessionManager.createSession(
     args.prompt,
     cwd,
     spawnOpts,
     effort,
-    args.advanced
+    advanced
   );
 
   return {

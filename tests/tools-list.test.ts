@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createServer } from "../src/server.js";
 import { RESOURCE_URIS } from "../src/resources/register-resources.js";
+import { SESSION_DEFAULT_ENV } from "../src/utils/session-defaults.js";
 
 type RequestHandler = (req: unknown, extra: unknown) => Promise<unknown>;
 
 interface McpTool {
   name: string;
   description?: string;
-  inputSchema?: { type?: string; properties?: Record<string, unknown> };
+  inputSchema?: { type?: string; properties?: Record<string, unknown>; required?: string[] };
   outputSchema?: { type?: string; properties?: Record<string, unknown> };
   annotations?: Record<string, unknown>;
 }
@@ -149,5 +150,46 @@ describe("tools/list metadata", () => {
     };
     expect(compat.toolCounts, "compat report has no toolCounts").toBeDefined();
     expect(compat.toolCounts!.core).toBe(tools.size);
+  });
+});
+
+describe("what the codex schema asks for, given the environment", () => {
+  const KEYS = [SESSION_DEFAULT_ENV.approvalPolicy, SESSION_DEFAULT_ENV.sandbox] as const;
+  const before = new Map(KEYS.map((key) => [key, process.env[key]]));
+
+  afterEach(async () => {
+    for (const [key, value] of before) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await server.close();
+  });
+
+  it("requires the permission level of the turn where the environment sets none", async () => {
+    for (const key of KEYS) delete process.env[key];
+    server = createServer(process.cwd()).server;
+
+    const codex = tool(await listTools(), "codex");
+
+    expect(codex.inputSchema?.required).toContain("approvalPolicy");
+    expect(codex.inputSchema?.required).toContain("sandbox");
+  });
+
+  it("publishes it as optional, naming the value in force, where the environment sets it", async () => {
+    process.env[SESSION_DEFAULT_ENV.approvalPolicy] = "never";
+    process.env[SESSION_DEFAULT_ENV.sandbox] = "danger-full-access";
+    server = createServer(process.cwd()).server;
+
+    const codex = tool(await listTools(), "codex");
+    const properties = propertiesOf(codex.inputSchema, "codex");
+
+    expect(codex.inputSchema?.required ?? []).not.toContain("approvalPolicy");
+    expect(codex.inputSchema?.required ?? []).not.toContain("sandbox");
+    expect((properties.approvalPolicy as { description: string }).description).toContain(
+      "default: never"
+    );
+    expect((properties.sandbox as { description: string }).description).toContain(
+      "default: danger-full-access"
+    );
   });
 });
