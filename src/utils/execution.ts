@@ -2,6 +2,7 @@ import type {
   InteractionState,
   ProgressInfo,
   RecommendedNextAction,
+  SessionStartResult,
   SessionStatus,
 } from "../types.js";
 
@@ -49,5 +50,37 @@ export function coerceProgressForStatus(
         : status === "running"
           ? progress.pendingActionCount
           : 0,
+  };
+}
+
+/**
+ * What `startedTurnResult` asks of the session manager. It is declared here
+ * rather than imported so `utils/` stays below `session/` in the import graph.
+ */
+interface ProgressSource {
+  getProgress?: (sessionId: string) => ProgressInfo;
+}
+
+/**
+ * The answer `codex` and `codex_reply` hand back once a turn is under way:
+ * `running`, carrying whatever progress the manager already holds.
+ *
+ * `getProgress` is probed before it is called — a caller may pass a manager
+ * stand-in that carries no such method — and the started result's own progress
+ * is what stands in when it does not.
+ */
+export function startedTurnResult(
+  sessionManager: ProgressSource,
+  startResult: SessionStartResult
+): SessionStartResult {
+  const observed =
+    typeof sessionManager.getProgress === "function"
+      ? sessionManager.getProgress(startResult.sessionId)
+      : undefined;
+  return {
+    ...startResult,
+    progress: coerceProgressForStatus("running", observed ?? startResult.progress),
+    interactionState: interactionStateForStatus("running"),
+    recommendedNextAction: recommendedNextActionForStatus("running"),
   };
 }

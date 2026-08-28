@@ -9,28 +9,11 @@ import type {
   ApprovalPolicy,
   EffortLevel,
   Personality,
-  ProgressInfo,
   SandboxMode,
   SessionStartResult,
   SummaryMode,
 } from "../types.js";
-import {
-  coerceProgressForStatus,
-  interactionStateForStatus,
-  recommendedNextActionForStatus,
-} from "../utils/execution.js";
-
-function safeGetProgress(
-  sessionManager: SessionManager,
-  sessionId: string
-): ProgressInfo | undefined {
-  return typeof (sessionManager as SessionManager & { getProgress?: unknown }).getProgress ===
-    "function"
-    ? (
-        sessionManager as SessionManager & { getProgress: (id: string) => ProgressInfo }
-      ).getProgress(sessionId)
-    : undefined;
-}
+import { startedTurnResult } from "../utils/execution.js";
 
 export interface CodexReplyParams {
   sessionId: string;
@@ -62,13 +45,5 @@ export async function executeCodexReply(
     outputSchema: args.outputSchema,
   });
 
-  return {
-    ...startResult,
-    progress: coerceProgressForStatus(
-      "running",
-      safeGetProgress(sessionManager, startResult.sessionId) ?? startResult.progress
-    ),
-    interactionState: interactionStateForStatus("running"),
-    recommendedNextAction: recommendedNextActionForStatus("running"),
-  };
+  return startedTurnResult(sessionManager, startResult);
 }
