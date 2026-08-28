@@ -6,7 +6,7 @@
  * - Support caller-selected behavior via CODEX_MCP_STDIO_MODE.
  */
 
-export const STDIO_MODES = ["auto", "strict", "off"] as const;
+const STDIO_MODES = ["auto", "strict", "off"] as const;
 export type StdioMode = (typeof STDIO_MODES)[number];
 
 export interface StdioModeResolution {

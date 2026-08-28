@@ -42,7 +42,7 @@ import type {
  * `summary` are not thread state, so a turn that omits them silently falls back
  * to `~/.codex/config.toml` instead of the values the session was started with.
  */
-export interface PersistedSessionMeta {
+interface PersistedSessionMeta {
   schemaVersion: number;
   sessionId: string;
   status: string;
@@ -65,7 +65,7 @@ export interface PersistedSessionMeta {
   approvalTimeoutMs?: number;
 }
 
-export interface PidInfo {
+interface PidInfo {
   pid: number;
   spawnedAt: string;
   /** Command line the child was spawned with, when the client exposes it. */

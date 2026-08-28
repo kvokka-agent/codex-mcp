@@ -11,9 +11,9 @@
  */
 
 /** Opens a marker. The `ACTIVITY:` tag is what keeps a `%%%` run in quoted output from matching. */
-export const ACTIVITY_OPEN = "%%%ACTIVITY:";
+const ACTIVITY_OPEN = "%%%ACTIVITY:";
 /** Closes a marker. */
-export const ACTIVITY_CLOSE = "%%%";
+const ACTIVITY_CLOSE = "%%%";
 /** Hard cap on the stored line. A longer one is cut to this length. */
 export const MAX_ACTIVITY_LENGTH = 120;
 /**
@@ -21,7 +21,7 @@ export const MAX_ACTIVITY_LENGTH = 120;
  * ordinary text. It bounds both the memory one stream can hold and the damage a
  * `%%%ACTIVITY:` inside quoted output can do.
  */
-export const ACTIVITY_SCAN_LIMIT = 480;
+const ACTIVITY_SCAN_LIMIT = 480;
 
 const FULL_LINE_MARKER = new RegExp(
   `^[ \\t]*%%%ACTIVITY:[^\\n\\r]{0,${ACTIVITY_SCAN_LIMIT}}?%%%[ \\t]*(?:\\r?\\n)?`,
@@ -53,7 +53,7 @@ ${ACTIVITY_OPEN} <what you are doing right now>${ACTIVITY_CLOSE}
 - The marker is cut out of the answer the caller reads, so never use one to carry the answer itself.`;
 
 /** Environment switch that stops the server from sending the instruction. */
-export function activityMarkerInstructionEnabled(): boolean {
+function activityMarkerInstructionEnabled(): boolean {
   return process.env.CODEX_MCP_DISABLE_ACTIVITY_MARKER !== "1";
 }
 

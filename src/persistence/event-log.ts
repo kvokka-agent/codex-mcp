@@ -17,7 +17,7 @@ interface PendingWrite {
   line: string;
 }
 
-export interface EventLogOptions {
+interface EventLogOptions {
   /** Path to the JSONL file */
   filePath: string;
   /** Batch interval for normal events in ms (default: 100) */

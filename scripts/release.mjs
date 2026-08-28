@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-export const LEVELS = ["major", "minor", "patch"];
+const LEVELS = ["major", "minor", "patch"];
 const LABEL_PREFIX = "release:";
 
 const VERSION = /^(\d+)\.(\d+)\.(\d+)$/;
@@ -85,7 +85,7 @@ export function currentVersion(root = ROOT) {
   return JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 }
 
-export function writeVersion(version, root = ROOT) {
+function writeVersion(version, root = ROOT) {
   const written = TARGETS.map((target) => {
     const file = join(root, target.path);
     return [file, applyVersion(readFileSync(file, "utf8"), target, version)];

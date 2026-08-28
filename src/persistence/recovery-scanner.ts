@@ -19,7 +19,7 @@ import { ownerState, readOwner, type OwnerState } from "./session-owner.js";
  */
 export const SCHEMA_VERSION = 3;
 
-export interface RecoveredSessionMeta {
+interface RecoveredSessionMeta {
   schemaVersion: number;
   sessionId: string;
   status: string;
@@ -35,7 +35,7 @@ export interface RecoveredSessionMeta {
   [key: string]: unknown;
 }
 
-export interface RecoveredPidInfo {
+interface RecoveredPidInfo {
   pid: number;
   spawnedAt: string;
   command?: string;

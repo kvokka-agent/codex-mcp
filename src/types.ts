@@ -37,8 +37,7 @@ export type SessionAction = (typeof SESSION_ACTIONS)[number];
 export const CHECK_ACTIONS = ["poll", "respond_permission", "respond_user_input"] as const;
 export type CheckAction = (typeof CHECK_ACTIONS)[number];
 
-export const APPROVAL_TYPES = ["command", "fileChange"] as const;
-export type ApprovalType = (typeof APPROVAL_TYPES)[number];
+type ApprovalType = "command" | "fileChange";
 
 export const COMMAND_DECISIONS = [
   "accept",
@@ -48,10 +47,8 @@ export const COMMAND_DECISIONS = [
   "decline",
   "cancel",
 ] as const;
-export type CommandDecision = (typeof COMMAND_DECISIONS)[number];
 
 export const FILE_CHANGE_DECISIONS = ["accept", "acceptForSession", "decline", "cancel"] as const;
-export type FileChangeDecision = (typeof FILE_CHANGE_DECISIONS)[number];
 
 export const ALL_DECISIONS = [
   "accept",

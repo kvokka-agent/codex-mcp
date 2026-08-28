@@ -17,7 +17,7 @@ import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, "..", "..");
 export const SERVER_ENTRY = join(REPO_ROOT, "dist", "index.js");
-export const FAKE_CODEX = join(HERE, "fake-codex.mjs");
+const FAKE_CODEX = join(HERE, "fake-codex.mjs");
 
 /**
  * Whether this platform can run the suite at all.
