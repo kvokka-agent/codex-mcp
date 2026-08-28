@@ -2,7 +2,7 @@
   "mcpServers": {
     "codex-mcp": {
       "command": "bunx",
-      "args": ["@kvokka/codex-mcp@2.6.0"]
+      "args": ["@kvokka/codex-mcp@2.6.1"]
     }
   }
 }
