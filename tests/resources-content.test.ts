@@ -39,6 +39,7 @@ const {
   SANDBOX_MODES,
   EFFORT_LEVELS,
   DEFAULT_EFFORT_LEVEL,
+  DEFAULT_APPROVAL_TIMEOUT_MS,
   ErrorCode,
   MAX_LONG_POLL_WAIT_MS,
   DEFAULT_IDLE_CLEANUP_MS,
@@ -497,7 +498,7 @@ describe("resource documents served over MCP", () => {
     }
     expect(named.filter((level) => !EFFORT_LEVELS.includes(level as never))).toEqual([]);
     expect(named, "first mentions run out of enum order").toEqual([...EFFORT_LEVELS]);
-    expect(section).toContain(`\`${DEFAULT_EFFORT_LEVEL}\` (default)`);
+    expect(section).toContain(`names no effort runs at ${DEFAULT_EFFORT_LEVEL}`);
   });
 
   it("names the effort level a rejected minimal turn is actually retried at", async () => {
@@ -818,6 +819,10 @@ describe("runtime metadata in server-info and compat-report", () => {
         version: deps.version ?? "0.0.0-test",
         clientMode: deps.clientMode ?? "app-server",
         diskPersistence: deps.diskPersistence ?? true,
+        sessionDefaults: {
+          effort: DEFAULT_EFFORT_LEVEL,
+          approvalTimeoutMs: DEFAULT_APPROVAL_TIMEOUT_MS,
+        },
         sessionManager: {
           getActiveSessionCount: deps.activeSessions ?? (() => 0),
           getObservedDefaultModel: () => deps.observedModel ?? null,

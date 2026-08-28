@@ -21,12 +21,11 @@ import {
   CLEANABLE_STATUSES,
   CHECK_ACTIONS,
   ALL_DECISIONS,
-  DEFAULT_APPROVAL_TIMEOUT_MS,
   MAX_LONG_POLL_WAIT_MS,
-  DEFAULT_EFFORT_LEVEL,
   ErrorCode,
 } from "./types.js";
 import { PollWindow } from "./utils/poll-window.js";
+import { resolveSessionDefaults } from "./utils/session-defaults.js";
 import { progressReporterFor } from "./utils/progress-notifier.js";
 import { redactPaths } from "./utils/redact.js";
 import { classifyTurnCompatibilityError, compatibilityErrorMessage } from "./utils/turn-compat.js";
@@ -68,6 +67,9 @@ export function createServer(
   serverCwd: string,
   options?: SessionManagerOptions & { clientMode?: string }
 ): ServerContext {
+  // Read before anything is built: an unreadable value stops the server here
+  // rather than at the first session it would have started differently.
+  const sessionDefaults = resolveSessionDefaults();
   const sessionManager = new SessionManager(options);
   // One per connection: the tool-call ceiling belongs to the client on the
   // other end of the pipe, and every session of that client shares it.
@@ -88,6 +90,7 @@ export function createServer(
   registerResources(server, {
     version: SERVER_VERSION,
     sessionManager,
+    sessionDefaults,
     clientMode: options?.clientMode ?? (options?.createClient ? "unknown" : "app-server"),
     diskPersistence: options?.persistence !== undefined,
   });
@@ -409,10 +412,13 @@ export function createServer(
           .describe("Required enum: read-only/workspace-write/danger-full-access."),
         effort: z
           .enum(EFFORT_LEVELS)
-          .default(DEFAULT_EFFORT_LEVEL)
-          .describe("Reasoning effort (default: low)."),
+          .optional()
+          .describe(`Reasoning effort (default: ${sessionDefaults.effort}).`),
         cwd: z.string().optional().describe("Working directory (default: server cwd)."),
-        model: z.string().optional().describe("Model override (default: config.toml)"),
+        model: z
+          .string()
+          .optional()
+          .describe(`Model override (default: ${sessionDefaults.model ?? "config.toml"})`),
         profile: z.string().optional().describe("Profile name (default: CLI default profile)."),
         advanced: z
           .object({
@@ -440,9 +446,10 @@ export function createServer(
               .number()
               .int()
               .positive()
-              .default(DEFAULT_APPROVAL_TIMEOUT_MS)
               .optional()
-              .describe(`Auto-decline timeout in ms (default: ${DEFAULT_APPROVAL_TIMEOUT_MS})`),
+              .describe(
+                `Auto-decline timeout in ms (default: ${sessionDefaults.approvalTimeoutMs})`
+              ),
           })
           .optional()
           .describe("Advanced settings."),
@@ -458,7 +465,7 @@ export function createServer(
     },
     async (args) => {
       try {
-        const result = await executeCodex(args, sessionManager, serverCwd);
+        const result = await executeCodex(args, sessionManager, serverCwd, sessionDefaults);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
           structuredContent: toStructuredContent(result),
@@ -672,7 +679,7 @@ export function createServer(
     "codex_check",
     {
       title: "Poll & Respond",
-      description: `Report where a session stands and answer what it waits for. Every action returns the same payload: { sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }. The turn's own events are never returned — Codex writes the full transcript to its rollout log under ~/.codex/sessions/. Answer every entry of actions[]; stop checking on terminal status (idle/error/cancelled), where result carries the final answer and keeps carrying it while the session stands there. WARNING: without waitMs you are polling on a timer, and approvalTimeoutMs defaults to ${DEFAULT_APPROVAL_TIMEOUT_MS}ms, so approvals expire between checks unless you raise the timeout, use non-interactive policies, or pass waitMs — which answers the moment an approval arrives. See codex-mcp:///quickstart and codex-mcp:///gotchas.
+      description: `Report where a session stands and answer what it waits for. Every action returns the same payload: { sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }. The turn's own events are never returned — Codex writes the full transcript to its rollout log under ~/.codex/sessions/. Answer every entry of actions[]; stop checking on terminal status (idle/error/cancelled), where result carries the final answer and keeps carrying it while the session stands there. WARNING: without waitMs you are polling on a timer, and approvalTimeoutMs defaults to ${sessionDefaults.approvalTimeoutMs}ms, so approvals expire between checks unless you raise the timeout, use non-interactive policies, or pass waitMs — which answers the moment an approval arrives. See codex-mcp:///quickstart and codex-mcp:///gotchas.
 
 poll: current status; with waitMs it holds the call until the status changes, an action arrives, the turn ends, or Codex says it is working on something new — and answers with the state it found when the window runs out instead. Loop it: write progress.activity out where the person waiting reads it, then call again. progress.activityStandingMs says how long that same line has stood, so a turn that is still on it reads "compiling — 15 min" rather than repeating itself. waitedMs says how long the call was held. Send _meta.progressToken and the same lines also arrive as notifications/progress while the call is still open, with a heartbeat every 30s.
 respond_permission: answer an approval action.

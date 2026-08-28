@@ -2,6 +2,7 @@
  * Configuration helpers for codex-mcp.
  */
 import type { AppServerSpawnOptions } from "../app-server/lifecycle.js";
+import type { SessionDefaults } from "./session-defaults.js";
 import type {
   ApprovalPolicy,
   EffortLevel,
@@ -31,10 +32,13 @@ export interface CodexToolParams {
   };
 }
 
-export function extractSpawnOptions(params: CodexToolParams): AppServerSpawnOptions {
+export function extractSpawnOptions(
+  params: CodexToolParams,
+  defaults: SessionDefaults
+): AppServerSpawnOptions {
   return {
     profile: params.profile,
-    model: params.model,
+    model: params.model ?? defaults.model,
     approvalPolicy: params.approvalPolicy,
     sandbox: params.sandbox,
     config: params.advanced?.config,

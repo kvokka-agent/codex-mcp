@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveSessionDefaults } from "../src/utils/session-defaults.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
@@ -12,7 +13,18 @@ describe("the server the plugin starts", () => {
 
   it("is bunx on the version this repository publishes", () => {
     const version = JSON.parse(read("package.json")).version;
-    expect(server).toEqual({ command: "bunx", args: [`@kvokka/codex-mcp@${version}`] });
+    expect(server.command).toBe("bunx");
+    expect(server.args).toEqual([`@kvokka/codex-mcp@${version}`]);
+  });
+
+  // The subagent runs on Haiku and names none of these, so the plugin is where
+  // the model, the effort and the approval timeout of every session are set.
+  it("names the model, the effort and the approval timeout a session starts on", () => {
+    expect(resolveSessionDefaults(server.env)).toEqual({
+      model: "gpt-5.6-luna",
+      effort: "high",
+      approvalTimeoutMs: 900_000,
+    });
   });
 
   // npm exec answers a package request from the tree of the directory the client

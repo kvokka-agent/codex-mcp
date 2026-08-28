@@ -56,14 +56,20 @@ It is a proxy with no discretion. Whatever the delegator sent goes to Codex as
 the prompt, verbatim: `1 + 1`, a line of gibberish, a page of shell commands
 with hard instructions, a question it could answer in a second. It writes no
 answer of its own, runs no command, reads no file, and rephrases nothing. The
-only thing it decides is how Codex is started — model, effort, approval policy,
-sandbox, cwd, approval timeout.
+only thing it decides is the approval policy, the sandbox and the cwd.
 
 Where the delegator names none of those, Codex is started with
 `approvalPolicy: never` and `sandbox: danger-full-access`: it asks for nothing
 and is stopped by nothing, so a turn runs to its answer rather than to an
 approval nobody is watching. Name a `sandbox` and an `approvalPolicy` in the
 prompt to fence the turn, and the subagent passes what you named.
+
+The model, the reasoning effort and the approval timeout are not its to pick:
+`.mcp.json` sets `CODEX_MCP_DEFAULT_MODEL`, `CODEX_MCP_DEFAULT_EFFORT` and
+`CODEX_MCP_DEFAULT_APPROVAL_TIMEOUT_MS`, the server starts every session that
+names none of them on those, and the tool description it publishes carries the
+values in force. Edit `.mcp.json` to change them; name one in the prompt to
+change it for a single turn.
 
 An answer written by the subagent is shaped exactly like Codex's own, so the
 delegator cannot tell them apart. That is why the rule is absolute rather than a
@@ -180,7 +186,8 @@ Two things this cannot do:
 ```text
 plugins/codex-mcp/
 ├── .claude-plugin/plugin.json          the manifest
-├── .mcp.json                           the codex-mcp server, at its pinned version
+├── .mcp.json                           the codex-mcp server, at its pinned version,
+│                                       and the defaults it starts sessions on
 ├── agents/codex.md                     the subagent
 └── hooks/
     ├── hooks.json                      registers the hook on the Codex tools

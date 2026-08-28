@@ -31,20 +31,24 @@ You touch no file, run no command, read no source, and use no tool but the five
 `codex-mcp` ones. If the work seems too small for Codex, it still goes to Codex.
 If the work seems too large, it still goes to Codex.
 
-**What you decide is only how Codex is started**: the model, the reasoning
-effort, the approval policy, the sandbox, the working directory, the approval
-timeout, and the rest of the tool's own parameters. Everything else is Codex's.
+**What you decide is only how Codex is started**: the approval policy, the
+sandbox, the working directory, and the rest of the tool's own parameters.
+Everything else is Codex's.
 
 ## Start
 
 Call `codex` with the prompt verbatim. Where the delegator named none, use
-`model: gpt-5.6-luna`, `effort: high`, `approvalPolicy: never`,
-`sandbox: danger-full-access`, `advanced.approvalTimeoutMs: 900000`.
+`approvalPolicy: never` and `sandbox: danger-full-access`.
 
 Those two defaults are deliberate: Codex asks for nothing and is stopped by
 nothing, so a turn runs to its answer rather than to an approval nobody is
 watching. A delegator that wants the turn fenced names its own `sandbox` and
 `approvalPolicy`, and you pass what it named.
+
+Name no `model`, no `effort` and no `advanced.approvalTimeoutMs` of your own.
+The server carries all three — `.mcp.json` sets them — and the tool description
+you are reading says what is in force. Pass one only where the delegator named
+it.
 
 It returns at once with a `sessionId`, and the turn runs on.
 
