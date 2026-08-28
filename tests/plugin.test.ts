@@ -43,14 +43,23 @@ describe("the driver the plugin ships", () => {
   });
 
   it("writes the activity line out itself, and says how long it has stood", () => {
-    expect(agent).toContain("codex: <progress.activity>");
-    expect(agent).toContain("codex: <progress.activity> — 15 min");
+    expect(agent).toContain("**Progress summary**: <progress.activity>");
+    expect(agent).toContain("**Progress summary**: <progress.activity> — 15 min");
     expect(agent).toContain("progress.activityStandingMs");
   });
 
-  it("carries those lines back in the report, which is the only path they travel", () => {
-    expect(agent).toContain("progress:");
-    expect(agent).toContain("nothing you write mid-run is rendered anywhere");
+  it("leaves those lines out of the report, where the run is already over", () => {
+    const report = agent.slice(agent.indexOf("## Report"));
+    expect(report).not.toContain("progress:");
+  });
+
+  it("runs on the cheapest model, since it decides nothing", () => {
+    expect(agent).toContain("model: haiku");
+  });
+
+  it("starts Codex unfenced unless the delegator fenced it", () => {
+    expect(agent).toContain("`approvalPolicy: never`");
+    expect(agent).toContain("`sandbox: danger-full-access`");
   });
 
   it("proxies every prompt to Codex rather than answering one", () => {
