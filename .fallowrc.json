@@ -1,0 +1,7 @@
+{
+  "$schema": "./node_modules/fallow/schema.json",
+  "entry": ["scripts/*.mjs"],
+  "dynamicallyLoaded": ["plugins/codex-mcp/hooks/*.mjs", "tests/helpers/fake-codex.mjs"],
+  "ignorePatterns": ["codex-schema/**"],
+  "includeEntryExports": true
+}

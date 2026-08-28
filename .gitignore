@@ -52,3 +52,6 @@ server-notifications.*.json
 
 # rumdl cache (fallback when --no-config bypasses cache-dir)
 .rumdl_cache/
+
+# fallow analysis cache and churn history
+.fallow/

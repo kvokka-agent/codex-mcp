@@ -38,6 +38,7 @@
     "smoke:mcp": "bun scripts/mcp-smoke.mjs",
     "lint": "eslint src/ tests/",
     "lint:md": "rumdl check .",
+    "lint:fallow": "fallow; code=$?; [ $code -le 1 ] && exit 0; exit $code",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\""
   },
@@ -75,6 +76,7 @@
     "@types/bun": "^1.4.0",
     "@types/node": "^22.0.0",
     "eslint": "^9.39.2",
+    "fallow": "^3.20.0",
     "prettier": "^3.8.1",
     "rumdl": "0.2.60",
     "typescript": "^5.9.3",
