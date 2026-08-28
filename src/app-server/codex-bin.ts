@@ -79,7 +79,7 @@ export function resolveCodexInvocation(
   }
 
   // Last resort: spawn via cmd.exe. Keep arguments as separate tokens to avoid nested-quote issues
-  // when Node builds the final CreateProcess command line.
+  // when the runtime builds the final CreateProcess command line.
   const comspec = env.ComSpec || env.COMSPEC || "cmd.exe";
   return {
     cmd: comspec,
