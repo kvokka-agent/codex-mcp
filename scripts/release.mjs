@@ -33,7 +33,6 @@ export const TARGETS = [
     count: 1,
   },
   { path: ".claude-plugin/marketplace.json", pattern: /"version": "\d+\.\d+\.\d+"/g, count: 1 },
-  { path: "plugins/codex-mcp/.mcp.json", pattern: /@kvokka\/codex-mcp@\d+\.\d+\.\d+/g, count: 1 },
   {
     path: "plugins/codex-mcp/README.md",
     pattern: /@kvokka\/codex-mcp@\d+\.\d+\.\d+/g,

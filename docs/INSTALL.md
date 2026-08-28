@@ -39,6 +39,14 @@ Claude Code registers the same thing from the command line:
 claude mcp add codex-mcp -- npx -y @kvokka/codex-mcp
 ```
 
+npm exec answers this from the tree of the directory the client starts the
+server in. A client whose working directory carries `@kvokka/codex-mcp` — the
+server's own checkout, or a project depending on it — makes npm exec skip the
+fetch and run the bare name `codex-mcp`, which `PATH` answers to only after a
+global install; the server exits 127 before writing a frame and the client
+reports `CONNECTION_CLOSED`. Install globally there, and give `command` the
+`codex-mcp` binary.
+
 ## A global install
 
 ```bash

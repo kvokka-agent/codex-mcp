@@ -669,6 +669,13 @@ describe("resource documents served over MCP", () => {
     expect(guide).toContain(`Default approval timeout is ${DEFAULT_APPROVAL_TIMEOUT_MS}ms`);
   });
 
+  it("tells a caller whose progress notifications reach nobody to write the activity out", () => {
+    const gotchas = docs.get(RESOURCE_URIS.gotchas)!;
+
+    expect(gotchas).toContain("A caller nobody can see");
+    expect(gotchas).toContain("`progress.activity`");
+  });
+
   it("states cleanup windows as whole minutes derived from the cleanup constants", () => {
     const gotchas = docs.get(RESOURCE_URIS.gotchas)!;
 

@@ -3,7 +3,8 @@
 Runs OpenAI Codex from Claude Code. One connection installs three parts that
 work together:
 
-- the **`codex-mcp` MCP server**, pinned to `@kvokka/codex-mcp@2.4.1`;
+- the **`codex-mcp` MCP server**, at the version this plugin release names,
+  `@kvokka/codex-mcp@2.4.1`;
 - the **`codex` subagent**, which carries a prompt to Codex, drives the turn to
   a terminal status and hands back what Codex answered;
 - a **`PreToolUse` hook**, which lets the Codex tools through for that subagent
@@ -54,12 +55,16 @@ the work in place of the answer.
 
 ## Watching a turn that has not finished
 
-The subagent holds one `codex_check` call open for as long as the client allows,
-so a turn of any length is a handful of calls rather than a poll on a timer. The
-server does not leave that call silent: each activity line Codex writes goes to
-the client as an MCP `notifications/progress` while the call is still held, and
-the client shows it under the running tool call. Nothing has to be asked for
-beyond the `_meta.progressToken` an MCP client already sends.
+The subagent polls in rounds of a minute and writes one `codex: <activity>` line
+for each new thing Codex says it is doing, so a turn of any length reads as a
+running list of what the work is on.
+
+The server also pushes each activity line to the MCP client as
+`notifications/progress` while a poll is held, which is what a client driving
+the tools itself renders under the running call. That path ends at the client:
+a notification sent under a subagent's tool call reaches nobody watching the
+subagent, so the minute-long round, not the notification, is what puts the line
+in front of the person.
 
 ## Why the hook
 
@@ -127,16 +132,31 @@ Two things this cannot do:
 
 ```text
 plugins/codex-mcp/
-├── .claude-plugin/plugin.json          the manifest
-├── .mcp.json                           the codex-mcp server
+├── .claude-plugin/plugin.json          the manifest, and the version to run
+├── .mcp.json                           starts the launcher
+├── bin/codex-mcp.mjs                   installs that version and imports it
 ├── agents/codex.md                     the subagent
 └── hooks/
     ├── hooks.json                      registers the hook on the Codex tools
     └── codex-subagent-only.mjs         allow the subagent, deny the rest
 ```
 
-The MCP server is pinned to the exact published version rather than `latest`, so
-a given plugin release always runs the server it was written against. A release
-moves `package.json`, `plugins/codex-mcp/.claude-plugin/plugin.json`, the
-marketplace entry in `.claude-plugin/marketplace.json` and the pin in
-`.mcp.json` to the same number.
+The MCP server runs at the exact published version rather than `latest`, so a
+given plugin release always runs the server it was written against. `.mcp.json`
+starts `bin/codex-mcp.mjs`, which reads that version from the manifest, installs
+it under `~/.cache/codex-mcp/versions/<version>` the first time and imports it
+from there on every start.
+
+`npx @kvokka/codex-mcp@<version>` cannot do that job: npm exec answers the
+request from the tree of the directory the client started the server in, so a
+project that already carries the package at that version — the server's own
+checkout, or anything depending on it — makes npm exec run the bare name
+`codex-mcp`, which no `PATH` answers to, and the client reads `CONNECTION_CLOSED`
+from a process that exited 127. Installing under a directory of its own leaves
+the project's tree out of it, and running `node` rather than `npx` keeps
+`process.cwd()` as the client set it, which is where the server puts a session
+that names no `cwd` of its own.
+
+A release moves `package.json`, `plugins/codex-mcp/.claude-plugin/plugin.json`,
+the marketplace entry in `.claude-plugin/marketplace.json` and the version this
+README names to the same number.

@@ -62,13 +62,12 @@ describe("the files that carry the version", () => {
   const current = currentVersion() as string;
   const raised = nextVersion(current, "minor") as string;
 
-  it("names the npm package, its lock file, the plugin, the marketplace and both pins", () => {
+  it("names the npm package, its lock file, the plugin, the marketplace and the README pin", () => {
     expect(targets.map((target) => target.path)).toEqual([
       "package.json",
       "package-lock.json",
       "plugins/codex-mcp/.claude-plugin/plugin.json",
       ".claude-plugin/marketplace.json",
-      "plugins/codex-mcp/.mcp.json",
       "plugins/codex-mcp/README.md",
     ]);
   });
