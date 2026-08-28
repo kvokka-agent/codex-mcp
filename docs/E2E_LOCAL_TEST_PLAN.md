@@ -286,8 +286,8 @@ Codex tasks often take 2-10+ minutes. Do not poll every turn.
 2. When `status` is `waiting_approval`: target ~1 second polling to respond to `actions[]` and unblock quickly.
 3. When `status` is `idle`, `error`, or `cancelled`: stop polling. The session is done.
 4. The tool descriptions for `codex`, `codex_reply`, and `codex_check` include this guidance so LLM callers see it directly.
-5. To learn about a change as it happens without shortening the interval, pass `waitMs`: one call covers the whole stretch and costs one round trip.
-6. `codex` (`advanced.waitForResult`) and `codex_reply` (`waitForResult`) skip polling entirely for short non-interactive runs: they block up to 300000 ms and return the result. Use them only with `approvalPolicy` `on-failure` or `never`; an approval request makes them return early with `execution.fallbackReason="interactive_poll_required"`.
+5. To learn about a change as it happens without shortening the interval, pass `waitMs`: one call covers the whole stretch and costs one round trip, and it answers as soon as Codex says it is working on something new.
+6. A start never blocks for the result. `codex` and `codex_reply` return as soon as the turn is under way, and `codex_check(action="poll", waitMs=300000)` is the only place a caller waits.
 7. A session writes one `codex-mcp/ttl_warning` line to its event log 60 seconds before TTL cleanup. Checking a session does not postpone it: the TTL measures `lastActiveAt`, which moves when the session does — a reply, a cancel, a resume, a notification from the backend — and a `poll` writes nothing.
 
 **CRITICAL: Approval timeout vs polling interval conflict.** The default `approvalTimeoutMs` is 60 seconds, but the recommended `running` polling interval is ≥2 minutes. If a session transitions from `running` to `waiting_approval` between polls, the approval will auto-decline before the client can respond. Mitigations:
@@ -617,17 +617,17 @@ Checks:
 
 Checks:
 
-1. Start a long `running` session, then check with `waitMs: 3600000`. The call sits through the model's reasoning and its command output, and returns when the status changes, an action arrives, or the turn ends — or, if none of the three happens, just inside the client's own ceiling on one tool call.
+1. Start a long `running` session, then check with `waitMs: 300000`. The call sits through the model's reasoning and its command output, and returns when the status changes, an action arrives, the turn ends, or Codex writes a new activity line — or, if none of them happens, just inside the client's own ceiling on one tool call.
 2. Check an `idle` session with `waitMs: 5000`. It returns at once with the terminal `result`; a second check returns the same status without the result.
 3. Issue 5 concurrent long polls on one session. Four wait; the fifth returns immediately instead of blocking.
 
-## 7.6 Foreground Execution (`waitForResult`)
+## 7.6 The round the person waiting reads
 
 Checks:
 
-1. `codex` with `approvalPolicy: "never"`, `sandbox: "read-only"`, a small prompt, and `advanced.waitForResult: 120000`. Expect the tool call itself to return `result` and `completedAt`, with `execution.effective: "foreground"`.
-2. Same call with `waitForResult: 2000` on a slow prompt. Expect a return without `result`, `execution.fallbackReason: "wait_for_result_timeout"`, and a `sessionId` you can keep polling.
-3. `codex` with `approvalPolicy: "untrusted"` and `waitForResult: 120000`. When an approval appears, expect an early return with `execution.fallbackReason: "interactive_poll_required"` and `recommendedNextAction: "respond_permission"`.
+1. Start a session on a prompt that takes several minutes, then poll it with `waitMs: 300000` in a loop. Expect each round to answer with a `progress.activity` that has moved on, a `progress.activityStandingMs` counting from when that line arrived, and a `waitedMs` shorter than the window.
+2. Poll a turn that stays on one line for longer than the window. Expect `waitedMs` at the window, the same `progress.activity`, and `progress.activityStandingMs` grown by about the window.
+3. Poll with `_meta.progressToken` set. Expect a `notifications/progress` for the standing line, one per new line, and one every 30 s carrying the standing line with how long it has stood. Set `CODEX_MCP_PROGRESS_HEARTBEAT_MS=5000` and expect the repeat every five seconds instead.
 
 ## 7.7 Restart Recovery And Orphan Reaping
 

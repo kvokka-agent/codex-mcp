@@ -28,7 +28,6 @@ export interface CodexToolParams {
     outputSchema?: Record<string, unknown>;
     images?: string[];
     approvalTimeoutMs?: number;
-    waitForResult?: number;
   };
 }
 

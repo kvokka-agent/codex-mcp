@@ -17,6 +17,9 @@
  * unsolicited line.
  */
 
+import { PROGRESS_HEARTBEAT_MS } from "../types.js";
+import type { ProgressInfo } from "../types.js";
+
 /** The token the client put on its request, which every notification quotes back. */
 export type ProgressToken = string | number;
 
@@ -92,4 +95,46 @@ export function progressReporterFor(
   const token = meta?.progressToken;
   if (token === undefined || send === undefined) return undefined;
   return new ProgressReporter(token, send);
+}
+
+/**
+ * A duration as a person reads it: seconds under a minute, whole minutes above
+ * it, hours and minutes past an hour.
+ */
+export function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+}
+
+/**
+ * The line a held call shows the person waiting: what the turn is doing and how
+ * long it has been doing it.
+ *
+ * Codex writes the first half. Where it has written nothing yet — the turn is
+ * starting, or the backend is `codex exec`, which takes no activity instruction
+ * — the phase stands in its place, so the line still moves and still says the
+ * work is alive.
+ */
+export function activityLine(progress: ProgressInfo, heldMs: number): string {
+  const standing = progress.activityStandingMs ?? heldMs;
+  const what = progress.activity ?? progress.phase;
+  return `${what} — ${formatDuration(standing)}`;
+}
+
+/**
+ * How often a held call repeats that line, from
+ * `CODEX_MCP_PROGRESS_HEARTBEAT_MS` or the default. Zero, a negative and an
+ * unreadable value all mean no heartbeat.
+ */
+export function heartbeatIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CODEX_MCP_PROGRESS_HEARTBEAT_MS;
+  if (raw === undefined) return PROGRESS_HEARTBEAT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return parsed;
 }

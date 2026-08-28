@@ -4,8 +4,9 @@ Runs OpenAI Codex from Claude Code. One connection installs three parts that
 work together:
 
 - the **`codex-mcp` MCP server**, pinned to `@kvokka/codex-mcp@2.5.0`;
-- the **`codex` subagent**, which carries a prompt to Codex, drives the turn to
-  a terminal status and hands back what Codex answered;
+- the **`codex` subagent**, a proxy: it hands the delegator's prompt to Codex
+  unchanged, follows the turn in rounds of five minutes, and hands back what
+  Codex answered together with the line-by-line progress of the run;
 - a **`PreToolUse` hook**, which lets the Codex tools through for that subagent
   and denies them to everyone else.
 
@@ -42,10 +43,45 @@ Spawn the subagent and hand it the work:
 Agent(subagent_type="codex-mcp:codex", prompt="<what Codex should do>")
 ```
 
-It answers with one block and nothing around it: the `outcome` of the turn, the
-`sessionId`, the `model` Codex ran on, the last `activity` line, whether the
-`session` is closed, anything it `declined`, and last the `result` — what Codex
+Spawn one per task. Two of them started in the same message run at once, each on
+its own Codex session, and the head agent carries on with its own work while
+they do — which is what the subagent is for: the turn's polling, its approval
+answers and its transcript stay out of the head agent's context, and only the
+report comes back.
+
+## What the subagent will not do
+
+It is a proxy with no discretion. Whatever the delegator sent goes to Codex as
+the prompt, verbatim: `1 + 1`, a line of gibberish, a page of shell commands
+with hard instructions, a question it could answer in a second. It writes no
+answer of its own, runs no command, reads no file, and rephrases nothing. The
+only thing it decides is how Codex is started — model, effort, approval policy,
+sandbox, cwd, approval timeout.
+
+An answer written by the subagent is shaped exactly like Codex's own, so the
+delegator cannot tell them apart. That is why the rule is absolute rather than a
+preference.
+
+## What comes back
+
+One block, and nothing around it: the `outcome` of the turn, the `sessionId`,
+the `model` Codex ran on, whether the `session` is closed, anything it
+`declined`, the `progress` of the run, and last the `result` — what Codex
 answered, verbatim and whole.
+
+`progress` is every line the subagent wrote while the turn ran, in order:
+
+```text
+progress:
+codex: reading src/session/manager.ts
+codex: running the test suite — 5 min
+codex: running the test suite — 15 min
+```
+
+The number comes from `progress.activityStandingMs`, which the server measures
+from when the line arrived, so it is right however the rounds fell. Put that
+block in front of the person waiting: nothing the subagent writes mid-run is
+rendered anywhere, so its report is the only path those lines travel.
 
 `outcome` is the turn's, read from `lastTurn` and untouched by the close, so a
 finished turn reads `completed` even though the closed session's own status is
@@ -53,19 +89,21 @@ finished turn reads `completed` even though the closed session's own status is
 `result: unavailable — <what the tools answered>`; it never writes an account of
 the work in place of the answer.
 
-## Watching a turn that has not finished
+## How a turn is followed
 
-The subagent polls in rounds of five minutes and writes one line after each: the
-new `codex: <activity>` when Codex moved on to something else, and the standing
-one with how long it has held — `codex: <activity> — 15+ min` — when it did not.
-A turn of any length reads as a running list of what the work is on.
+`codex` returns as soon as the thread is up — no start blocks for a result — and
+the subagent polls with `codex_check(action="poll", waitMs=300000)`. That call
+comes back the moment Codex says it is working on something new, an action
+arrives, the status changes or the turn ends, and at the end of the five minutes
+otherwise, so each round either reports a change or says the same work is still
+running.
 
-The server also pushes each activity line to the MCP client as
-`notifications/progress` while a poll is held, which is what a client driving
-the tools itself renders under the running call. That path ends at the client:
-a notification sent under a subagent's tool call reaches nobody watching the
-subagent, so the round, not the notification, is what puts the line in front of
-the person.
+The server also sends each activity line to the MCP client as
+`notifications/progress` while a poll is held, with a heartbeat every 30 seconds
+(`CODEX_MCP_PROGRESS_HEARTBEAT_MS`). A client renders those under the call it
+made itself, so they are for a client driving the tools directly; under a
+subagent's call they reach nobody, which is why the subagent keeps the lines and
+reports them.
 
 ## Why the hook
 

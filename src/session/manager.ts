@@ -272,6 +272,9 @@ export class SessionManager {
           lastEventAt: lastActiveAt,
           tokens: extractTokens((rec.result as TurnResult | undefined)?.turn),
           activity: rec.lastActivity,
+          // The record holds the line, not the instant it arrived. The session
+          // was last active then, which is the closest the disk answers.
+          activityAt: rec.lastActivity === undefined ? undefined : lastActiveAt,
         },
       };
       this.registerSession(session);
@@ -833,9 +836,8 @@ export class SessionManager {
    * Hear each new activity line of a session for as long as the returned
    * function is not called.
    *
-   * It is what a caller holding a tool call open reports upward while the turn
-   * runs. A long poll is not woken by it: the caller answers actions and
-   * statuses, and an activity line is neither.
+   * It is what a caller holding a tool call open reports upward as the line
+   * arrives, before the poll it is holding answers.
    */
   onActivity(sessionId: string, listener: (activity: string) => void): () => void {
     const session = this.getSessionOrThrow(sessionId);
@@ -1370,13 +1372,16 @@ export class SessionManager {
   }
 
   /**
-   * Wake the long-poll waiters of a session, but only for what they can act on:
-   * the status, the set of open actions, and the result of a finished turn.
+   * Wake the long-poll waiters of a session, for what they act on and for what
+   * they report: the status, the set of open actions, the result of a finished
+   * turn, and each new line the turn says it is working on.
    *
-   * A measured run of ten parallel sessions delivered 20.2% agent-message deltas
-   * and 25.7% token-counter updates; waking on those turned a 120s long poll into
-   * a 4.8s median round trip and put the whole transcript through the caller's
-   * context. Those move `signalOf` not at all, so a waiter sleeps through them.
+   * Nothing else wakes them. A measured run of ten parallel sessions delivered
+   * 20.2% agent-message deltas and 25.7% token-counter updates; waking on those
+   * turned a 120s long poll into a 4.8s median round trip and put the whole
+   * transcript through the caller's context. Those move `signalOf` not at all,
+   * so a waiter sleeps through them, while the handful of activity lines a turn
+   * writes each move it once.
    */
   private notifyWaiters(sessionId: string): void {
     const session = this.sessions.get(sessionId);
@@ -1464,7 +1469,8 @@ export class SessionManager {
     return {
       key: signalOf(session),
       awaitsCaller:
-        countPendingRequests(session) > 0 || TERMINAL_SESSION_STATUSES.has(session.status),
+        countPendingRequests(session) > 0 ||
+        (TERMINAL_SESSION_STATUSES.has(session.status) && !awaitsTurnRecord(session)),
     };
   }
 
@@ -1798,7 +1804,10 @@ export class SessionManager {
             // The new turn has not said what it is doing yet, and the line the
             // previous one left would read as if it had.
             scannerOf(session).reset();
-            if (session.progressState) session.progressState.activity = undefined;
+            if (session.progressState) {
+              session.progressState.activity = undefined;
+              session.progressState.activityAt = undefined;
+            }
             recordEvent(session, "progress", {
               method,
               ...p,
@@ -1900,9 +1909,14 @@ export class SessionManager {
 
         case Methods.AGENT_MESSAGE_DELTA:
           if (typeof p.delta === "string") {
+            let lines = 0;
             for (const line of scannerOf(session).push(p.delta)) {
               recordActivity(session, line, normalizeOptionalString(p.itemId));
+              lines += 1;
             }
+            // A new line is what the person waiting reads, so the poll holding
+            // this session answers with it rather than sitting out its window.
+            if (lines > 0) this.notifyWaiters(session.sessionId);
           }
           recordEvent(session, "output", { method, delta: p.delta, itemId: p.itemId });
           break;
@@ -2495,7 +2509,17 @@ function buildProgressInfo(session: SessionInfo): ProgressInfo {
     // counters win over a later update.
     tokens: session.progressState?.tokens,
     activity: session.progressState?.activity,
+    activitySince: session.progressState?.activityAt,
+    activityStandingMs: standingMs(session.progressState?.activityAt),
   };
+}
+
+/** How long ago an ISO instant was, or undefined when there is none to measure. */
+function standingMs(since: string | undefined): number | undefined {
+  if (since === undefined) return undefined;
+  const at = Date.parse(since);
+  if (Number.isNaN(at)) return undefined;
+  return Math.max(0, Date.now() - at);
 }
 
 /**
@@ -2883,9 +2907,9 @@ const activityScanners = new WeakMap<SessionInfo, ActivityMarkerScanner>();
 /**
  * Who to tell when a session says what it is doing now.
  *
- * A caller holding a tool call open on this session subscribes here. It is not
- * `waitForChange`: an activity line is not something the caller answers, so it
- * must not end the wait — it only travels alongside it.
+ * A caller holding a tool call open on this session subscribes here, so the line
+ * reaches the client as a notification the moment it arrives — before the poll
+ * that the same line ends returns it.
  */
 const activityListeners = new WeakMap<SessionInfo, Set<(activity: string) => void>>();
 
@@ -2899,17 +2923,18 @@ function scannerOf(session: SessionInfo): ActivityMarkerScanner {
 }
 
 /**
- * Record what Codex said it is doing: overwrite the one line a poll reports, and
- * append one `activity` record to the session's events.jsonl.
+ * Record what Codex said it is doing: overwrite the one line a poll reports,
+ * stamp when it arrived, and append one `activity` record to the session's
+ * events.jsonl.
  *
- * It deliberately does not wake a long-poll waiter. An activity line is a
- * heading a caller reads on its next poll, not something the caller answers, and
- * waking on it would put the whole run back through the caller's context — the
- * cost the event stream was removed for.
+ * The caller wakes the long-poll waiters after it — `signalOf` carries the line,
+ * so a poll answers with each new heading and the person waiting reads the work
+ * as it happens. One line per heading is what travels, not the turn's stream.
  */
 function recordActivity(session: SessionInfo, activity: string, itemId?: string): void {
   const next = session.progressState ?? { lastEventAt: new Date().toISOString() };
   next.activity = activity;
+  next.activityAt = new Date().toISOString();
   session.progressState = next;
   recordEvent(session, "activity", { activity, turnId: session.activeTurnId, itemId });
   for (const listener of activityListeners.get(session) ?? []) {
@@ -2947,13 +2972,33 @@ const TERMINAL_SESSION_STATUSES = new Set<SessionStatus>(["idle", "error", "canc
  * The session state a long-poll caller acts on, as one string: status, open
  * actions and the finished turn's result.
  */
+/**
+ * The thread said idle before the turn it was running was recorded.
+ *
+ * `thread/status/changed` arrives one notification ahead of `turn/completed` —
+ * measured on codex app-server 0.149.1, `events.jsonl` seq 71 then 72 — and the
+ * result is written by the second of them. A poll answered in between hands the
+ * caller a terminal status with no `result`, which reads as a turn that finished
+ * and said nothing. `TURN_COMPLETED` clears `activeTurnId`, so an active one
+ * under an idle status is exactly that gap.
+ */
+function awaitsTurnRecord(session: SessionInfo): boolean {
+  return session.status === "idle" && session.activeTurnId !== undefined;
+}
+
 function signalOf(session: SessionInfo): string {
   const openRequests = Array.from(session.pendingRequests.values())
     .filter((req) => !req.resolved)
     .map((req) => req.requestId)
     .sort()
     .join(",");
-  return `${session.status}|${openRequests}|${session.lastResult?.completedAt ?? ""}`;
+  return [
+    // The status a waiter is woken by, which is the one the turn's record backs.
+    awaitsTurnRecord(session) ? "running" : session.status,
+    openRequests,
+    session.lastResult?.completedAt ?? "",
+    session.progressState?.activityAt ?? "",
+  ].join("|");
 }
 
 function toPublicInfo(session: SessionInfo, owner?: SessionOwnership): PublicSessionInfo {

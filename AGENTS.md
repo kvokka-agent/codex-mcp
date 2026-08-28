@@ -29,8 +29,8 @@ complete.
 
 | Tool | Responsibility | Blocking |
 | --- | --- | --- |
-| `codex` | start a session | waits for the thread only, or for `waitForResult` |
-| `codex_reply` | continue a session | returns at once, or waits for `waitForResult` |
+| `codex` | start a session | waits for the thread only |
+| `codex_reply` | continue a session | returns at once |
 | `codex_setup` | report executable, auth and backend readiness | sync |
 | `codex_session` | list, get, resume, cancel, interrupt, fork, clean, clean background terminals | sync |
 | `codex_check` | report status and answer what the session waits for | sync, or long-poll on `waitMs` |
@@ -115,6 +115,11 @@ These are the patterns a change keeps, each of them written after it was broken:
   exit.
 - Call `notifyWaiters(sessionId)` after any state change, or long-poll callers
   block until their `waitMs` budget expires.
+- A session that reads `idle` while `activeTurnId` is still set has not recorded
+  its turn yet: `thread/status/changed` arrives one notification ahead of
+  `turn/completed`, which is what writes `lastResult`. `signalOf` reports that
+  session as running and `getSessionSignal` does not call it awaited, so a poll
+  answers with the turn's answer rather than with a terminal status and nothing.
 - Verify a pid's recorded spawn time before signalling it; an unverified pid is
   skipped, never killed.
 - **Carry through what a dependency answered.** An unreadable directory is not

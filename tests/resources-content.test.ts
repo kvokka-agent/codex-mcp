@@ -40,7 +40,6 @@ const {
   EFFORT_LEVELS,
   DEFAULT_EFFORT_LEVEL,
   ErrorCode,
-  DEFAULT_APPROVAL_TIMEOUT_MS,
   MAX_LONG_POLL_WAIT_MS,
   DEFAULT_IDLE_CLEANUP_MS,
   DEFAULT_RUNNING_CLEANUP_MS,
@@ -628,47 +627,12 @@ describe("resource documents served over MCP", () => {
     }
   });
 
-  it("documents every execution.fallbackReason the codex tool may answer with", () => {
-    const guide = docs.get(RESOURCE_URIS.delegationGuide)!;
-    const execution = tools.get("codex")!.outputSchema!.properties!.execution as {
-      properties: { fallbackReason: { enum?: string[]; anyOf?: Array<{ enum?: string[] }> } };
-    };
-    const field = execution.properties.fallbackReason;
-    const reasons = field.enum ?? field.anyOf?.flatMap((entry) => entry.enum ?? []) ?? [];
-
-    expect(reasons.length).toBeGreaterThan(0);
-    for (const reason of reasons) {
-      expect(guide, `fallbackReason absent from the delegation guide: ${reason}`).toContain(
-        `- \`${reason}\`:`
-      );
-    }
-  });
-
-  it("reports the approval-policy, sandbox and effort enums the server accepts", () => {
-    const info = JSON.parse(docs.get(RESOURCE_URIS.serverInfo)!) as Record<string, unknown>;
-    const codexSchema = tools.get("codex")!.inputSchema!;
-
-    expect(info.supportedApprovalPolicies).toEqual([...APPROVAL_POLICIES]);
-    expect(info.supportedSandboxModes).toEqual([...SANDBOX_MODES]);
-    expect(info.supportedEffortLevels).toEqual([...EFFORT_LEVELS]);
-    expect(codexSchema.properties!.approvalPolicy.enum).toEqual([...APPROVAL_POLICIES]);
-    expect(codexSchema.properties!.sandbox.enum).toEqual([...SANDBOX_MODES]);
-    expect(codexSchema.properties!.effort.enum).toEqual([...EFFORT_LEVELS]);
-  });
-
-  it("quotes the polling and approval defaults from the shared constants", () => {
-    const gotchas = docs.get(RESOURCE_URIS.gotchas)!;
-    const quickstart = docs.get(RESOURCE_URIS.quickstart)!;
-    const configText = docs.get(RESOURCE_URIS.config)!;
+  it("names the round the driver polls in, and the server's own ceiling", () => {
     const guide = docs.get(RESOURCE_URIS.delegationGuide)!;
 
-    expect(gotchas).toContain(`\`waitMs\` (max ${MAX_LONG_POLL_WAIT_MS})`);
-    expect(gotchas).toContain(`(default ${DEFAULT_APPROVAL_TIMEOUT_MS} ms)`);
-    expect(gotchas).toContain(`default approval timeout is ${DEFAULT_APPROVAL_TIMEOUT_MS / 1000}`);
-    expect(quickstart).toContain(`"waitMs": ${MAX_LONG_POLL_WAIT_MS}`);
-    expect(configText).toContain(`(default \`${DEFAULT_APPROVAL_TIMEOUT_MS}\` ms)`);
-    expect(configText).toContain(`maximum \`${MAX_LONG_POLL_WAIT_MS}\``);
-    expect(guide).toContain(`Default approval timeout is ${DEFAULT_APPROVAL_TIMEOUT_MS}ms`);
+    expect(guide).toContain('codex_check(action="poll", waitMs=300000)');
+    expect(guide).toContain("progress.activity");
+    expect(guide).toContain(String(MAX_LONG_POLL_WAIT_MS));
   });
 
   it("tells a caller whose progress notifications reach nobody to write the activity out", () => {
@@ -676,7 +640,7 @@ describe("resource documents served over MCP", () => {
 
     expect(gotchas).toContain("A caller nobody can see");
     expect(gotchas).toContain("`progress.activity`");
-    expect(gotchas).toContain("`waitMs` of about 300000");
+    expect(gotchas).toContain("`waitMs: 300000`");
   });
 
   it("states cleanup windows as whole minutes derived from the cleanup constants", () => {

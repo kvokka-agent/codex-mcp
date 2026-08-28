@@ -1,14 +1,9 @@
 import type {
-  CheckResult,
-  ExecutionFallbackReason,
-  ExecutionInfo,
   InteractionState,
   ProgressInfo,
   RecommendedNextAction,
   SessionStatus,
 } from "../types.js";
-import type { SessionManager } from "../session/manager.js";
-import type { ProgressReporter } from "./progress-notifier.js";
 
 const TERMINAL_STATUSES = new Set<SessionStatus>(["idle", "error", "cancelled", "abandoned"]);
 
@@ -28,22 +23,6 @@ export function recommendedNextActionForStatus(
   }
   if (TERMINAL_STATUSES.has(status)) return "none";
   return "poll";
-}
-
-export function buildExecutionInfo(
-  waitForResultMs: number | undefined,
-  status: SessionStatus,
-  fallbackReason?: ExecutionFallbackReason
-): ExecutionInfo {
-  const requested = waitForResultMs && waitForResultMs > 0 ? "foreground" : "background";
-  const effective =
-    requested === "foreground" && TERMINAL_STATUSES.has(status) ? "foreground" : "background";
-  return {
-    requested,
-    effective,
-    waitForResultMs: waitForResultMs && waitForResultMs > 0 ? waitForResultMs : undefined,
-    fallbackReason: effective === "background" ? fallbackReason : undefined,
-  };
 }
 
 export function coerceProgressForStatus(
@@ -70,99 +49,5 @@ export function coerceProgressForStatus(
         : status === "running"
           ? progress.pendingActionCount
           : 0,
-  };
-}
-
-export async function waitForCodexSessionForegroundResult(
-  sessionManager: SessionManager,
-  sessionId: string,
-  waitForResultMs: number,
-  signal?: AbortSignal,
-  progress?: ProgressReporter
-): Promise<{
-  status: SessionStatus;
-  result?: CheckResult["result"];
-  completedAt?: string;
-  pendingActionTypes?: Array<"approval" | "user_input">;
-  fallbackReason?: ExecutionFallbackReason;
-}> {
-  const deadline = Date.now() + Math.min(waitForResultMs, 300_000);
-
-  // What the turn says it is doing, reported out of this held call as it
-  // happens. Everything below returns, so the unsubscribe runs in a finally.
-  let stopReporting: (() => void) | undefined;
-  if (progress) {
-    const current = sessionManager.getProgress(sessionId).activity;
-    if (current !== undefined) progress.report(current);
-    stopReporting = sessionManager.onActivity(sessionId, (activity) => progress.report(activity));
-  }
-  try {
-    return await foregroundWaitLoop(sessionManager, sessionId, deadline, signal);
-  } finally {
-    stopReporting?.();
-  }
-}
-
-async function foregroundWaitLoop(
-  sessionManager: SessionManager,
-  sessionId: string,
-  deadline: number,
-  signal?: AbortSignal
-): Promise<{
-  status: SessionStatus;
-  result?: CheckResult["result"];
-  completedAt?: string;
-  pendingActionTypes?: Array<"approval" | "user_input">;
-  fallbackReason?: ExecutionFallbackReason;
-}> {
-  while (Date.now() < deadline) {
-    // A session evicted mid-wait makes getSession throw SESSION_NOT_FOUND, and that reaches the
-    // caller: a status invented here would only make terminalTurnResult throw the same error one
-    // line down, and would tell the caller its turn ended when the session simply went away.
-    const status = sessionManager.getSession(sessionId).status;
-
-    if (TERMINAL_STATUSES.has(status)) {
-      const finalResult = sessionManager.terminalTurnResult(sessionId);
-      return {
-        status,
-        result: finalResult,
-        completedAt: finalResult?.completedAt ?? new Date().toISOString(),
-      };
-    }
-
-    if (status === "waiting_approval") {
-      return {
-        status,
-        pendingActionTypes: sessionManager.getPendingActionTypes(sessionId),
-        fallbackReason: "interactive_poll_required",
-      };
-    }
-
-    const remainingMs = Math.min(deadline - Date.now(), 5_000);
-    if (remainingMs <= 0) break;
-    try {
-      await sessionManager.waitForChange(sessionId, remainingMs, signal);
-    } catch (err: unknown) {
-      // Timeout, abort and change notification all resolve; the only rejection is a session whose
-      // waiter slots are full. Waiting again re-rejects with no delay, so this call stops waiting
-      // and reports the refusal — the wait budget did not run out and may still be nearly intact.
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[codex-mcp] Foreground wait refused for session '${sessionId}': ${message}`);
-      return {
-        status: sessionManager.getSession(sessionId).status,
-        fallbackReason: "wait_refused",
-      };
-    }
-
-    // An aborted signal makes waitForChange resolve at once; looping on it would spin until the
-    // deadline. The caller dropped the request, so report where the session stands and no reason.
-    if (signal?.aborted) {
-      return { status: sessionManager.getSession(sessionId).status };
-    }
-  }
-
-  return {
-    status: sessionManager.getSession(sessionId).status,
-    fallbackReason: "wait_for_result_timeout",
   };
 }

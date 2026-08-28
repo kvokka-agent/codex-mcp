@@ -1,29 +1,24 @@
 /**
  * codex_reply tool — continue an existing session.
+ *
+ * Like `codex`, it returns as soon as the turn is under way; the turn is
+ * followed with `codex_check(action="poll", waitMs=…)`.
  */
 import type { SessionManager } from "../session/manager.js";
 import type {
   ApprovalPolicy,
-  ExecutionInfo,
   EffortLevel,
-  InteractionState,
-  ProgressInfo,
   Personality,
-  RecommendedNextAction,
+  ProgressInfo,
   SandboxMode,
-  SessionStatus,
   SessionStartResult,
   SummaryMode,
 } from "../types.js";
-import { WAITING_APPROVAL_POLL_INTERVAL } from "../types.js";
 import {
-  buildExecutionInfo,
   coerceProgressForStatus,
   interactionStateForStatus,
   recommendedNextActionForStatus,
-  waitForCodexSessionForegroundResult,
 } from "../utils/execution.js";
-import type { ProgressReporter } from "../utils/progress-notifier.js";
 
 function safeGetProgress(
   sessionManager: SessionManager,
@@ -48,34 +43,13 @@ export interface CodexReplyParams {
   sandbox?: SandboxMode;
   cwd?: string;
   outputSchema?: Record<string, unknown>;
-  waitForResult?: number;
 }
 
-export type CodexReplyResult =
-  | (SessionStartResult & {
-      execution?: ExecutionInfo;
-      interactionState?: InteractionState;
-      recommendedNextAction?: RecommendedNextAction;
-    })
-  | {
-      sessionId: string;
-      threadId: string;
-      status: SessionStatus;
-      pollInterval?: number;
-      result?: import("../types.js").TurnResult;
-      completedAt?: string;
-      compatWarnings?: string[];
-      progress?: ProgressInfo;
-      execution?: ExecutionInfo;
-      interactionState?: InteractionState;
-      recommendedNextAction?: RecommendedNextAction;
-    };
+export type CodexReplyResult = SessionStartResult;
 
 export async function executeCodexReply(
   args: CodexReplyParams,
-  sessionManager: SessionManager,
-  requestSignal?: AbortSignal,
-  progress?: ProgressReporter
+  sessionManager: SessionManager
 ): Promise<CodexReplyResult> {
   const startResult = await sessionManager.replyToSession(args.sessionId, args.prompt, {
     model: args.model,
@@ -88,59 +62,13 @@ export async function executeCodexReply(
     outputSchema: args.outputSchema,
   });
 
-  const waitMs = args.waitForResult;
-  const baseResult: SessionStartResult & {
-    execution?: ExecutionInfo;
-    interactionState?: InteractionState;
-    recommendedNextAction?: RecommendedNextAction;
-  } = {
+  return {
     ...startResult,
     progress: coerceProgressForStatus(
       "running",
       safeGetProgress(sessionManager, startResult.sessionId) ?? startResult.progress
     ),
-    execution: buildExecutionInfo(waitMs, "running"),
     interactionState: interactionStateForStatus("running"),
     recommendedNextAction: recommendedNextActionForStatus("running"),
-  };
-
-  if (!waitMs || waitMs <= 0) {
-    return baseResult;
-  }
-
-  const foreground = await waitForCodexSessionForegroundResult(
-    sessionManager,
-    startResult.sessionId,
-    waitMs,
-    requestSignal,
-    progress
-  );
-  return {
-    sessionId: startResult.sessionId,
-    threadId: startResult.threadId,
-    status: foreground.status,
-    compatWarnings: startResult.compatWarnings,
-    progress: coerceProgressForStatus(
-      foreground.status,
-      safeGetProgress(sessionManager, startResult.sessionId) ?? startResult.progress,
-      {
-        completedAt: foreground.completedAt,
-        pendingActionCount: foreground.pendingActionTypes?.length ?? 0,
-      }
-    ),
-    pollInterval:
-      foreground.status === "waiting_approval"
-        ? WAITING_APPROVAL_POLL_INTERVAL
-        : foreground.status === "running"
-          ? startResult.pollInterval
-          : undefined,
-    result: foreground.result,
-    completedAt: foreground.completedAt,
-    execution: buildExecutionInfo(waitMs, foreground.status, foreground.fallbackReason),
-    interactionState: interactionStateForStatus(foreground.status),
-    recommendedNextAction: recommendedNextActionForStatus(
-      foreground.status,
-      foreground.pendingActionTypes ?? []
-    ),
   };
 }

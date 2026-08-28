@@ -254,17 +254,6 @@ describe("server tool registration", () => {
       expect(res.isError).toBe(true);
       expect(res.content[0].text).toBe("Error [INTERNAL]: boom at <path>");
     });
-
-    it("rejects waitForResult above the 5 minute cap", async () => {
-      const res = await callTool("codex_reply", {
-        sessionId: "sess_x",
-        prompt: "hi",
-        waitForResult: 300001,
-      });
-
-      expect(res.isError).toBe(true);
-      expect(res.content[0].text).toContain("waitForResult");
-    });
   });
 
   describe("codex_session", () => {

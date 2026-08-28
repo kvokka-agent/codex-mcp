@@ -32,6 +32,13 @@ Thumbs.db
 # Claude
 .claude/
 
+# The knowledge graph a local tool writes from the sources.
+/graphify-out/
+
+# Where a change is worked, per AGENTS.md. Each holds a full checkout of this
+# repository, which git and every linter would otherwise walk into.
+/.worktrees/
+
 # Local development server wiring (docs/DEVELOPMENT.md). The plugin's own
 # plugins/codex-mcp/.mcp.json is tracked; only the repo-root one is local.
 /.mcp.json

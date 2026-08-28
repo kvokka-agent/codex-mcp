@@ -112,13 +112,6 @@ export interface SessionSignal {
   awaitsCaller: boolean;
 }
 
-export type ExecutionMode = "background" | "foreground";
-
-export type ExecutionFallbackReason =
-  | "wait_for_result_timeout"
-  | "interactive_poll_required"
-  | "wait_refused";
-
 export type ProgressPhase =
   | "starting"
   | "running"
@@ -150,13 +143,16 @@ export interface ProgressInfo {
    * before it — a heading, not a percentage, and not a history.
    */
   activity?: string;
-}
-
-export interface ExecutionInfo {
-  requested: ExecutionMode;
-  effective: ExecutionMode;
-  waitForResultMs?: number;
-  fallbackReason?: ExecutionFallbackReason;
+  /** When the standing activity line arrived. */
+  activitySince?: string;
+  /**
+   * How long the session has been on that line, in milliseconds.
+   *
+   * A driver writes it out — "still compiling — 15 min" — and carries nothing
+   * between rounds: the number is the server's, measured from when the line
+   * arrived rather than summed from how many polls the driver has made.
+   */
+  activityStandingMs?: number;
 }
 
 export type SessionEventType =
@@ -229,6 +225,8 @@ export interface SessionInfo {
     tokens?: ProgressTokens;
     /** Last activity line extracted from the agent-message stream. */
     activity?: string;
+    /** When that line arrived, which is how long the session has been on it. */
+    activityAt?: string;
   };
   /** Developer instructions the thread was started with, reused when it is forked or resumed. */
   developerInstructions?: string;
@@ -325,7 +323,6 @@ export interface SessionStartResult {
   pollInterval: number;
   compatWarnings?: string[];
   progress?: ProgressInfo;
-  execution?: ExecutionInfo;
   interactionState?: InteractionState;
   recommendedNextAction?: RecommendedNextAction;
 }
@@ -366,6 +363,14 @@ export interface CheckResult {
   actions: PendingAction[];
   /** The final answer of the turn, carried by the first check that sees it. */
   result?: TurnResult;
+  /**
+   * How long the poll held the call before answering, in milliseconds.
+   *
+   * A long poll that answers with the state it started on held the call for the
+   * whole window and nothing the caller acts on happened in it. Present on
+   * `poll` with a `waitMs`, absent on every immediate answer.
+   */
+  waitedMs?: number;
 }
 
 // ── Error Types ────────────────────────────────────────────────────
@@ -410,6 +415,17 @@ export const WAITING_APPROVAL_POLL_INTERVAL = 1000;
  * session for one.
  */
 export const MAX_LONG_POLL_WAIT_MS = 3_600_000;
+/**
+ * How often a held poll tells the client what the turn is doing.
+ *
+ * Two things need it. A person watching reads the line under the call rather
+ * than a spinner, and a client watchdog that ends a call which said nothing —
+ * Claude Code 2.1.250 cuts a silent stdio call at 1,800,000ms,
+ * `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` — counts a progress notification as the
+ * server speaking. `CODEX_MCP_PROGRESS_HEARTBEAT_MS` overrides it; 0 sends
+ * heartbeats no more.
+ */
+export const PROGRESS_HEARTBEAT_MS = 30_000;
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 60_000;
 export const DEFAULT_IDLE_CLEANUP_MS = 30 * 60 * 1000;
 export const DEFAULT_RUNNING_CLEANUP_MS = 4 * 60 * 60 * 1000;

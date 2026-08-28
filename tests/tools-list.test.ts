@@ -80,12 +80,14 @@ describe("tools/list metadata", () => {
     const tools = await listTools();
 
     const codex = tool(tools, "codex").description ?? "";
-    expect(codex).toContain("pollInterval");
-    expect(codex).toContain("asynchronously");
+    expect(codex).toContain("at once");
+    expect(codex).toContain("codex_check(action='poll', waitMs=300000)");
+    expect(codex).toContain("progress.activity");
 
     const codexReply = tool(tools, "codex_reply").description ?? "";
     expect(codexReply).toContain("idle");
     expect(codexReply).toContain("SESSION_BUSY");
+    expect(codexReply).toContain("codex_check(action='poll', waitMs=300000)");
 
     const codexSession = tool(tools, "codex_session").description ?? "";
     expect(codexSession).toContain("includeSensitive defaults to false");
@@ -94,6 +96,8 @@ describe("tools/list metadata", () => {
 
     const codexCheck = tool(tools, "codex_check").description ?? "";
     expect(codexCheck).toContain("waitMs");
+    expect(codexCheck).toContain("activityStandingMs");
+    expect(codexCheck).toContain("waitedMs");
     expect(codexCheck).toContain("rollout log");
     expect(codexCheck).toContain("respond_permission");
     expect(codexCheck).toContain("codex-mcp:///gotchas");

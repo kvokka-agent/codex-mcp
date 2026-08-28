@@ -3,7 +3,7 @@
   "name": "codex-mcp",
   "displayName": "Codex MCP",
   "version": "2.5.0",
-  "description": "Runs OpenAI Codex from Claude Code: the codex-mcp server, a codex subagent that drives one Codex turn to its result, and a hook that keeps the Codex tools inside that subagent.",
+  "description": "Runs OpenAI Codex from Claude Code: the codex-mcp server, a codex subagent that proxies one prompt to Codex and reports the turn's progress and answer, and a hook that keeps the Codex tools inside that subagent.",
   "author": {
     "name": "kvokka",
     "url": "https://github.com/kvokka"
