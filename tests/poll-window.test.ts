@@ -4,7 +4,7 @@
  * Every asserted number comes out of the class under test; the environment it
  * reads is the only thing supplied.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { MAX_LONG_POLL_WAIT_MS } from "../src/types.js";
 import {
   MIN_POLL_WINDOW_MS,

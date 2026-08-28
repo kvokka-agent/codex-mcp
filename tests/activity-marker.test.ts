@@ -11,7 +11,7 @@ import { EventEmitter } from "events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import {
@@ -261,16 +261,16 @@ class MockClient extends EventEmitter {
   supportsTurnOverrides = true;
   childPid: number | undefined = undefined;
 
-  start = vi.fn(async () => ({ userAgent: "mock" }));
-  threadStart = vi.fn(async () => ({ thread: { id: "thread_mock" } }));
-  threadFork = vi.fn(async () => ({ thread: { id: "thread_forked" } }));
-  threadResume = vi.fn(async () => ({ thread: { id: "thread_forked" } }));
-  threadBackgroundTerminalsClean = vi.fn(async () => ({}));
-  turnStart = vi.fn(async () => ({ turn: { id: "turn_mock" } }));
-  turnInterrupt = vi.fn(async () => {});
-  respondToServer = vi.fn();
-  respondErrorToServer = vi.fn();
-  destroy = vi.fn(async () => {});
+  start = jest.fn(async () => ({ userAgent: "mock" }));
+  threadStart = jest.fn(async () => ({ thread: { id: "thread_mock" } }));
+  threadFork = jest.fn(async () => ({ thread: { id: "thread_forked" } }));
+  threadResume = jest.fn(async () => ({ thread: { id: "thread_forked" } }));
+  threadBackgroundTerminalsClean = jest.fn(async () => ({}));
+  turnStart = jest.fn(async () => ({ turn: { id: "turn_mock" } }));
+  turnInterrupt = jest.fn(async () => {});
+  respondToServer = jest.fn();
+  respondErrorToServer = jest.fn();
+  destroy = jest.fn(async () => {});
 
   onNotification(handler: (method: string, params: unknown) => void): void {
     this.notificationHandler = handler;
@@ -329,7 +329,7 @@ describe("SessionManager and the activity marker", () => {
     manager.destroy();
     persistence.destroy();
     rmSync(root, { recursive: true, force: true });
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   it("starts the thread with the marker instruction", () => {

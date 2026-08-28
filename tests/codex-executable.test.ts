@@ -1,15 +1,17 @@
+import { mockModule } from "./helpers/mock.js";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 
-const { deniedExecute } = vi.hoisted(() => ({ deniedExecute: new Set<string>() }));
+const { deniedExecute } = { deniedExecute: new Set<string>() };
 
 // The resolver asks `fs.accessSync(file, X_OK)` whether a file carries the POSIX execute bit.
 // Windows has no such bit and answers X_OK like F_OK, so the denial is injected here instead of
 // taken from a mode: that keeps the POSIX branch measurable on every host.
-vi.mock("fs", async () => {
-  const actual = await vi.importActual<typeof import("fs")>("fs");
+const realModule1 = { ...(await import("fs")) };
+mockModule("fs", realModule1, () => {
+  const actual = realModule1;
   return {
     ...actual,
     default: actual,
@@ -87,7 +89,7 @@ afterEach(() => {
   }
   Object.assign(process.env, envBackup);
   _resetForTesting();
-  vi.restoreAllMocks();
+  jest.restoreAllMocks();
 });
 
 describe("resolveDefaultCodexExecutable", () => {
@@ -307,7 +309,7 @@ describe("getDefaultCodexExecutable", () => {
 
 describe("checkDefaultCodexExecutableAvailability", () => {
   it("names the env var that supplied the path", () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     const file = makeExecutable(root, "codex");
     process.env[CODEX_MCP_PATH] = file;
 
@@ -318,7 +320,7 @@ describe("checkDefaultCodexExecutableAvailability", () => {
   });
 
   it("names the env var that supplied the command", () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     const dir = path.join(root, "bin");
     const file = makeExecutableOnPath(dir, "codex");
     process.env[CODEX_MCP_COMMAND] = "codex";
@@ -331,7 +333,7 @@ describe("checkDefaultCodexExecutableAvailability", () => {
   });
 
   it("reports an auto-detected executable", () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     const dir = path.join(root, "bin");
     const file = makeExecutableOnPath(dir, "codex");
     process.env.PATH = dir;
@@ -341,7 +343,7 @@ describe("checkDefaultCodexExecutableAvailability", () => {
   });
 
   it("reports the fallback and how to configure it", () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     process.env.PATH = "";
 
     checkDefaultCodexExecutableAvailability();

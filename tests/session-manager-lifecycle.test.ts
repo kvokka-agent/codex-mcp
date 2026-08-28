@@ -1,8 +1,9 @@
+import { advanceAsync } from "./helpers/clock.js";
 import { EventEmitter } from "events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
@@ -24,19 +25,19 @@ class MockClient extends EventEmitter {
   /** Spawn instant reported with the "spawn" event, as the real clients report theirs. */
   spawnedAt = "2024-05-05T10:00:00.000Z";
 
-  start = vi.fn(async () => {
+  start = jest.fn(async () => {
     if (this.childPid !== undefined) this.emit("spawn", this.childPid, this.spawnedAt);
     return { userAgent: "mock" };
   });
-  threadStart = vi.fn(async () => this.threadStartResult);
-  threadFork = vi.fn(async () => ({ thread: { id: "thread_forked" } }));
-  threadResume = vi.fn(async () => ({ thread: { id: "thread_forked" } }));
-  threadBackgroundTerminalsClean = vi.fn(async (_params: { threadId: string }) => ({}));
-  turnStart = vi.fn(async (_params: unknown) => this.turnStartResult);
-  turnInterrupt = vi.fn(async () => {});
-  respondToServer = vi.fn((_id: number, _result: unknown) => {});
-  respondErrorToServer = vi.fn((_id: number, _code: number, _message: string) => {});
-  destroy = vi.fn(async () => {});
+  threadStart = jest.fn(async () => this.threadStartResult);
+  threadFork = jest.fn(async () => ({ thread: { id: "thread_forked" } }));
+  threadResume = jest.fn(async () => ({ thread: { id: "thread_forked" } }));
+  threadBackgroundTerminalsClean = jest.fn(async (_params: { threadId: string }) => ({}));
+  turnStart = jest.fn(async (_params: unknown) => this.turnStartResult);
+  turnInterrupt = jest.fn(async () => {});
+  respondToServer = jest.fn((_id: number, _result: unknown) => {});
+  respondErrorToServer = jest.fn((_id: number, _code: number, _message: string) => {});
+  destroy = jest.fn(async () => {});
 
   onNotification(handler: (method: string, params: unknown) => void): void {
     this.notificationHandler = handler;
@@ -124,7 +125,7 @@ describe("SessionManager long-poll waiters", () => {
 
   afterEach(() => {
     manager.destroy();
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   it("wakes every waiter when the turn ends", async () => {
@@ -249,7 +250,7 @@ describe("SessionManager recovered sessions", () => {
 
   afterEach(() => {
     manager.destroy();
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   it("marks a session whose owner died mid-turn as abandoned, not failed", () => {
@@ -278,7 +279,7 @@ describe("SessionManager recovered sessions", () => {
   });
 
   it("leaves a session another running server holds out of memory", () => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errors = jest.spyOn(console, "error").mockImplementation(() => {});
     manager.ingestRecovered([
       recovered({
         sessionId: "sess_held",
@@ -407,7 +408,7 @@ describe("SessionManager recovered sessions", () => {
   });
 
   it("skips a recovered session whose metadata records no lastActiveAt", () => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errors = jest.spyOn(console, "error").mockImplementation(() => {});
 
     manager.ingestRecovered([
       recovered({ sessionId: "sess_undated", meta: { lastActiveAt: undefined } as never }),
@@ -450,7 +451,7 @@ describe("SessionManager recovered sessions", () => {
     const stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-recover-"));
     const persistence = new SessionPersistence(stateDir);
     const recoverManager = new SessionManager({ disableCleanup: true, persistence });
-    const setNextSeq = vi.spyOn(persistence, "setEventLogNextSeq");
+    const setNextSeq = jest.spyOn(persistence, "setEventLogNextSeq");
     try {
       recoverManager.ingestRecovered([recovered({ sessionId: "sess_seq", lastSeq: 7 })]);
       expect(setNextSeq).toHaveBeenCalledWith("sess_seq", 8);
@@ -485,7 +486,7 @@ describe("SessionManager session operations", () => {
     manager.destroy();
     persistence.destroy();
     rmSync(stateDir, { recursive: true, force: true });
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   it("cleans background terminals and records the request as an event", async () => {
@@ -505,7 +506,7 @@ describe("SessionManager session operations", () => {
 
   it("pushes no event when the client refuses to clean background terminals", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
-    client.threadBackgroundTerminalsClean = vi.fn(async () => {
+    client.threadBackgroundTerminalsClean = jest.fn(async () => {
       throw new Error("Error [EXEC_NOT_SUPPORTED]: not supported in exec mode");
     });
 
@@ -643,7 +644,7 @@ describe("SessionManager session operations", () => {
       persistence,
       createClient: () => queue.shift()! as unknown as AppServerClient,
     });
-    const writePid = vi.spyOn(persistence, "writePidInfo");
+    const writePid = jest.spyOn(persistence, "writePidInfo");
     try {
       const started = await forkManager.createSession(
         "hi",
@@ -721,7 +722,7 @@ describe("SessionManager session operations", () => {
   });
 
   it("surfaces a friendly error when the effort fallback retry also fails", async () => {
-    client.turnStart = vi.fn(async () => {
+    client.turnStart = jest.fn(async () => {
       throw new Error("minimal reasoning effort is incompatible with web_search");
     });
 
@@ -779,7 +780,7 @@ describe("SessionManager session operations", () => {
       persistence,
       createClient: () => client as unknown as AppServerClient,
     });
-    const writeMeta = vi.spyOn(persistence, "writeSessionMeta");
+    const writeMeta = jest.spyOn(persistence, "writeSessionMeta");
     try {
       const started = await persistManager.createSession("hi", workspace, {}, "medium");
       const afterStart = writeMeta.mock.calls.length;
@@ -809,10 +810,10 @@ describe("SessionManager persistence failures", () => {
   let stateDir: string;
   let persistence: SessionPersistence;
   let manager: SessionManager;
-  let errors: ReturnType<typeof vi.spyOn>;
+  let errors: ReturnType<typeof jest.spyOn>;
 
   beforeEach(() => {
-    errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    errors = jest.spyOn(console, "error").mockImplementation(() => {});
     client = new MockClient();
     stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-persist-fail-"));
     persistence = new SessionPersistence(stateDir);
@@ -827,7 +828,7 @@ describe("SessionManager persistence failures", () => {
     manager.destroy();
     persistence.destroy();
     rmSync(stateDir, { recursive: true, force: true });
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   function loggedOnce(fragment: string, cause: string): number {
@@ -838,7 +839,7 @@ describe("SessionManager persistence failures", () => {
 
   it("reports a pid.json that could not be written, naming the pid left unreaped", async () => {
     client.childPid = 9911;
-    vi.spyOn(persistence, "writePidInfo").mockImplementation(() => {
+    jest.spyOn(persistence, "writePidInfo").mockImplementation(() => {
       throw new Error("EDQUOT: quota exceeded");
     });
 
@@ -851,7 +852,7 @@ describe("SessionManager persistence failures", () => {
 
   it("reports every spawn whose pid.json could not be written", async () => {
     client.childPid = 9911;
-    vi.spyOn(persistence, "writePidInfo").mockImplementation(() => {
+    jest.spyOn(persistence, "writePidInfo").mockImplementation(() => {
       throw new Error("EDQUOT: quota exceeded");
     });
 
@@ -862,7 +863,7 @@ describe("SessionManager persistence failures", () => {
   });
 
   it("reports the first metadata write that could not create the session directory", async () => {
-    vi.spyOn(persistence, "writeSessionMeta").mockImplementation(() => {
+    jest.spyOn(persistence, "writeSessionMeta").mockImplementation(() => {
       throw new Error("EACCES: create boom");
     });
 
@@ -874,7 +875,7 @@ describe("SessionManager persistence failures", () => {
 
   it("reports a status change that could not be written and keeps the session running", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
-    vi.spyOn(persistence, "writeSessionMeta").mockImplementation(() => {
+    jest.spyOn(persistence, "writeSessionMeta").mockImplementation(() => {
       throw new Error("EACCES: status boom");
     });
 
@@ -890,7 +891,7 @@ describe("SessionManager persistence failures", () => {
   });
 
   it("reports a turn result that could not be written", async () => {
-    vi.spyOn(persistence, "writeResult").mockImplementation(() => {
+    jest.spyOn(persistence, "writeResult").mockImplementation(() => {
       throw new Error("ENOSPC: result boom");
     });
 
@@ -919,7 +920,7 @@ describe("SessionManager unapplied turn overrides", () => {
 
   afterEach(() => {
     manager.destroy();
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   async function idleSession(): Promise<string> {
@@ -1054,7 +1055,7 @@ describe("SessionManager notification handling", () => {
     manager.destroy();
     persistence.destroy();
     rmSync(stateDir, { recursive: true, force: true });
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   it("adopts the thread id the thread/started notification carries", async () => {
@@ -1528,7 +1529,7 @@ describe("SessionManager notification handling", () => {
 describe("SessionManager server-initiated requests", () => {
   let client: MockClient;
   let manager: SessionManager;
-  let errors: ReturnType<typeof vi.spyOn>;
+  let errors: ReturnType<typeof jest.spyOn>;
   let persistence: SessionPersistence;
   let stateDir: string;
 
@@ -1541,19 +1542,19 @@ describe("SessionManager server-initiated requests", () => {
       persistence,
       createClient: () => client as unknown as AppServerClient,
     });
-    errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    errors = jest.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
     manager.destroy();
     persistence.destroy();
     rmSync(stateDir, { recursive: true, force: true });
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   it("reports a dynamic tool call whose refusal cannot be sent and runs on", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
-    client.respondToServer = vi.fn(() => {
+    client.respondToServer = jest.fn(() => {
       throw new Error("stdin closed");
     });
 
@@ -1572,7 +1573,7 @@ describe("SessionManager server-initiated requests", () => {
 
   it("reports an unhandled server request whose error reply cannot be sent", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
-    client.respondErrorToServer = vi.fn(() => {
+    client.respondErrorToServer = jest.fn(() => {
       throw new Error("stdin closed");
     });
 
@@ -1591,7 +1592,7 @@ describe("SessionManager server-initiated requests", () => {
   it("reports a terminal session's refusal that cannot be delivered", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
     await manager.cancelSession(started.sessionId, "by test");
-    client.respondToServer = vi.fn(() => {
+    client.respondToServer = jest.fn(() => {
       throw new Error("stdin closed");
     });
 
@@ -1688,7 +1689,7 @@ describe("SessionManager server-initiated requests", () => {
       turnId: "turn_1",
       questions: [{ id: "q1", question: "which?" }],
     });
-    client.respondToServer = vi.fn(() => {
+    client.respondToServer = jest.fn(() => {
       throw new Error("pipe closed");
     });
 
@@ -1706,22 +1707,22 @@ describe("SessionManager server-initiated requests", () => {
 describe("SessionManager approval timeouts", () => {
   let client: MockClient;
   let manager: SessionManager;
-  let errors: ReturnType<typeof vi.spyOn>;
+  let errors: ReturnType<typeof jest.spyOn>;
 
   beforeEach(() => {
-    vi.useFakeTimers();
+    jest.useFakeTimers();
     client = new MockClient();
     manager = new SessionManager({
       disableCleanup: true,
       createClient: () => client as unknown as AppServerClient,
     });
-    errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    errors = jest.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
     manager.destroy();
-    vi.useRealTimers();
-    vi.restoreAllMocks();
+    jest.useRealTimers();
+    jest.restoreAllMocks();
   });
 
   it("auto-declines a file change approval and lets the turn run on", async () => {
@@ -1736,7 +1737,7 @@ describe("SessionManager approval timeouts", () => {
     });
     expect(manager.getSession(started.sessionId).status).toBe("waiting_approval");
 
-    await vi.advanceTimersByTimeAsync(1000);
+    await advanceAsync(1000);
 
     expect(client.respondToServer).toHaveBeenCalledWith(40, { decision: "decline" });
     const info = manager.getSession(started.sessionId);
@@ -1756,11 +1757,11 @@ describe("SessionManager approval timeouts", () => {
       command: "echo hi",
       cwd: workspace,
     });
-    client.respondToServer = vi.fn(() => {
+    client.respondToServer = jest.fn(() => {
       throw new Error("pipe closed");
     });
 
-    await vi.advanceTimersByTimeAsync(1000);
+    await advanceAsync(1000);
 
     expect(
       errors.mock.calls.some((call) =>
@@ -1779,11 +1780,11 @@ describe("SessionManager approval timeouts", () => {
       threadId: started.threadId,
       turnId: "turn_1",
     });
-    client.respondToServer = vi.fn(() => {
+    client.respondToServer = jest.fn(() => {
       throw new Error("pipe closed");
     });
 
-    await vi.advanceTimersByTimeAsync(1000);
+    await advanceAsync(1000);
 
     expect(
       errors.mock.calls.some((call) =>
@@ -1802,11 +1803,11 @@ describe("SessionManager approval timeouts", () => {
       turnId: "turn_1",
       questions: [{ id: "q1", question: "which?" }],
     });
-    client.respondToServer = vi.fn(() => {
+    client.respondToServer = jest.fn(() => {
       throw new Error("pipe closed");
     });
 
-    await vi.advanceTimersByTimeAsync(1000);
+    await advanceAsync(1000);
 
     expect(
       errors.mock.calls.some((call) =>
@@ -1831,7 +1832,7 @@ describe("SessionManager approval decision validation", () => {
 
   afterEach(() => {
     manager.destroy();
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   async function openCommandApproval(

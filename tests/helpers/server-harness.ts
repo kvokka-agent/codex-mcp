@@ -47,8 +47,7 @@ export function ensureServerBuilt(): void {
   if (built) return;
   const bundle = statSync(SERVER_ENTRY, { throwIfNoEntry: false });
   if (!bundle || bundle.mtimeMs < newestMtimeMs(join(REPO_ROOT, "src"))) {
-    // shell: npm is a .cmd shim on Windows, which execFile cannot spawn.
-    execFileSync("npm", ["run", "build"], { cwd: REPO_ROOT, stdio: "pipe", shell: true });
+    execFileSync("bun", ["run", "build"], { cwd: REPO_ROOT, stdio: "pipe" });
   }
   built = true;
 }
@@ -86,7 +85,11 @@ export class ServerProcess {
   constructor(opts: ServerOptions = {}) {
     ensureServerBuilt();
     this.stateDir = opts.stateDir ?? mkdtempSync(join(tmpdir(), "codex-mcp-e2e-"));
-    this.child = spawn(process.execPath, [SERVER_ENTRY], {
+    // `node`, named rather than taken from `process.execPath`: the package ships
+    // a Node bundle behind a `#!/usr/bin/env node` line, and that is the runtime
+    // these tests measure. `process.execPath` is whatever runs the test file,
+    // which under `bun test` is bun.
+    this.child = spawn("node", [SERVER_ENTRY], {
       cwd: REPO_ROOT,
       env: {
         ...process.env,

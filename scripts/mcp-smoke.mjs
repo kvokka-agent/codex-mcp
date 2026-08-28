@@ -13,11 +13,11 @@ import {
 function usage(exitCode = 0) {
   const msg = [
     "Usage:",
-    "  node scripts/mcp-smoke.mjs [--npx] [--cwd <path>] [--verbose] [-- <command> <...args>]",
+    "  node scripts/mcp-smoke.mjs [--bunx] [--cwd <path>] [--verbose] [-- <command> <...args>]",
     "",
     "Defaults:",
     "  (no args) -> spawns: node dist/index.js",
-    "  --npx     -> spawns: npx -y @kvokka/codex-mcp",
+    "  --bunx    -> spawns: bunx @kvokka/codex-mcp",
     "  --        -> overrides command/args explicitly",
     "",
   ].join("\n");
@@ -28,7 +28,7 @@ function usage(exitCode = 0) {
 
 function parseArgs(argv) {
   const out = {
-    useNpx: false,
+    useBunx: false,
     cwd: process.cwd(),
     verbose: false,
     overrideCommand: null,
@@ -42,8 +42,8 @@ function parseArgs(argv) {
   for (let i = 0; i < main.length; i++) {
     const a = main[i];
     if (a === "--help" || a === "-h") usage(0);
-    if (a === "--npx") {
-      out.useNpx = true;
+    if (a === "--bunx") {
+      out.useBunx = true;
       continue;
     }
     if (a === "--verbose") {
@@ -77,13 +77,13 @@ async function main() {
 
   const command = args.overrideCommand
     ? args.overrideCommand
-    : args.useNpx
-      ? "npx"
+    : args.useBunx
+      ? "bunx"
       : "node";
   const cmdArgs = args.overrideCommand
     ? args.overrideArgs
-    : args.useNpx
-      ? ["-y", "@kvokka/codex-mcp"]
+    : args.useBunx
+      ? ["@kvokka/codex-mcp"]
       : ["dist/index.js"];
 
   // StdioClientTransport hands the child only its own allowlist of variables, so

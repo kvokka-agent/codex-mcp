@@ -3,11 +3,11 @@ repos:
     hooks:
       - id: prettier
         name: prettier
-        entry: npx prettier --write
+        entry: bunx prettier --write
         language: system
         files: \.ts$
       - id: rumdl
         name: rumdl
-        entry: npx rumdl check
+        entry: bunx rumdl check
         language: system
         files: \.md$

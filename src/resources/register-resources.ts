@@ -246,6 +246,7 @@ function buildGotchasText(): string {
     "- No event stream reaches the caller. Codex writes the turn's own history to its rollout log under `~/.codex/sessions/`, and codex-mcp does not repeat it.",
     `- \`waitMs\` (max ${MAX_LONG_POLL_WAIT_MS}) holds the call until the status changes, an action arrives or the turn ends. Reasoning, command output and token counters do not end the wait.`,
     `- **Check frequency guidance**: pass \`waitMs: ${MAX_LONG_POLL_WAIT_MS}\` and call again only when the answer says something happened. A wait that reports nothing new means the MCP client would not hold the call any longer, not that the poll was too long. Without \`waitMs\` the call answers at once and you are polling on a timer, which spends a round trip per tick.`,
+    "- **A caller nobody can see**: `notifications/progress` reaches the MCP client, and a client renders it under the call it made itself, so a call made inside a subagent shows the person watching nothing. A caller in that position asks for a `waitMs` of about 300000 instead and writes `progress.activity` out itself after each round — the new line when it changed, the old one with how long it has stood when it did not.",
     "",
     "## Approval behavior",
     "",

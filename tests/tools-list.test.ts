@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createServer } from "../src/server.js";
 import { RESOURCE_URIS } from "../src/resources/register-resources.js";
 

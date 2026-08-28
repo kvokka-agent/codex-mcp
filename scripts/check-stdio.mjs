@@ -9,14 +9,14 @@ function usage(exitCode = 0) {
   console.error(
     [
       "Usage:",
-      "  node scripts/check-stdio.mjs [--npx] [--mode <auto|strict|off>] [--cwd <path>] [--timeout-ms <n>] [--report-json <path>] [-- <command> <...args>]",
+      "  node scripts/check-stdio.mjs [--bunx] [--mode <auto|strict|off>] [--cwd <path>] [--timeout-ms <n>] [--report-json <path>] [-- <command> <...args>]",
       "",
       "Checks that the MCP server does NOT write anything to stdout before a client connects.",
       "Any non-empty stdout output is treated as a failure (stdio transport requires stdout to be JSON-RPC only).",
       "",
       "Defaults:",
       "  (no args) -> spawns: node dist/index.js",
-      "  --npx     -> spawns: npx -y @kvokka/codex-mcp",
+      "  --bunx    -> spawns: bunx @kvokka/codex-mcp",
       "  --mode    -> sets CODEX_MCP_STDIO_MODE for child process (default: auto)",
       "",
     ].join("\n")
@@ -26,7 +26,7 @@ function usage(exitCode = 0) {
 
 function parseArgs(argv) {
   const out = {
-    useNpx: false,
+    useBunx: false,
     cwd: process.cwd(),
     timeoutMs: 2000,
     stdioMode: "auto",
@@ -42,8 +42,8 @@ function parseArgs(argv) {
   for (let i = 0; i < main.length; i++) {
     const a = main[i];
     if (a === "--help" || a === "-h") usage(0);
-    if (a === "--npx") {
-      out.useNpx = true;
+    if (a === "--bunx") {
+      out.useBunx = true;
       continue;
     }
     if (a === "--cwd") {
@@ -95,12 +95,12 @@ function wait(ms) {
 
 function getFixHints(platform) {
   const generic = [
-    "Prefer MCP config launch: command='npx', args=['-y', '@kvokka/codex-mcp']",
+    "Prefer MCP config launch: command='bunx', args=['@kvokka/codex-mcp']",
     "Ensure stdout remains JSON-RPC only; route diagnostics to stderr.",
   ];
   if (platform === "win32") {
     return [
-      'If shell wrapping is required, use: pwsh -NoProfile -Command "npx -y @kvokka/codex-mcp"',
+      'If shell wrapping is required, use: pwsh -NoProfile -Command "bunx @kvokka/codex-mcp"',
       ...generic,
     ];
   }
@@ -110,11 +110,11 @@ function getFixHints(platform) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
-  const command = args.overrideCommand ? args.overrideCommand : args.useNpx ? "npx" : "node";
+  const command = args.overrideCommand ? args.overrideCommand : args.useBunx ? "bunx" : "node";
   const cmdArgs = args.overrideCommand
     ? args.overrideArgs
-    : args.useNpx
-      ? ["-y", "@kvokka/codex-mcp"]
+    : args.useBunx
+      ? ["@kvokka/codex-mcp"]
       : ["dist/index.js"];
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mcp-stdio-"));

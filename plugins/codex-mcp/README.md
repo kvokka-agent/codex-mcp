@@ -30,8 +30,9 @@ To enable it for a whole project without typing the commands, put this in
 }
 ```
 
-The server needs the Codex CLI on `PATH` and an OpenAI login. Where a session
-will not start, the subagent runs `codex_setup` and reports what it said.
+The server needs `bun`, which starts it, the Codex CLI on `PATH`, and an OpenAI
+login. Where a session will not start, the subagent runs `codex_setup` and
+reports what it said.
 
 ## Use
 
@@ -54,12 +55,17 @@ the work in place of the answer.
 
 ## Watching a turn that has not finished
 
-The subagent holds one `codex_check` call open for as long as the client allows,
-so a turn of any length is a handful of calls rather than a poll on a timer. The
-server does not leave that call silent: each activity line Codex writes goes to
-the client as an MCP `notifications/progress` while the call is still held, and
-the client shows it under the running tool call. Nothing has to be asked for
-beyond the `_meta.progressToken` an MCP client already sends.
+The subagent polls in rounds of five minutes and writes one line after each: the
+new `codex: <activity>` when Codex moved on to something else, and the standing
+one with how long it has held — `codex: <activity> — 15+ min` — when it did not.
+A turn of any length reads as a running list of what the work is on.
+
+The server also pushes each activity line to the MCP client as
+`notifications/progress` while a poll is held, which is what a client driving
+the tools itself renders under the running call. That path ends at the client:
+a notification sent under a subagent's tool call reaches nobody watching the
+subagent, so the round, not the notification, is what puts the line in front of
+the person.
 
 ## Why the hook
 
@@ -128,7 +134,7 @@ Two things this cannot do:
 ```text
 plugins/codex-mcp/
 ├── .claude-plugin/plugin.json          the manifest
-├── .mcp.json                           the codex-mcp server
+├── .mcp.json                           the codex-mcp server, at its pinned version
 ├── agents/codex.md                     the subagent
 └── hooks/
     ├── hooks.json                      registers the hook on the Codex tools
@@ -136,7 +142,17 @@ plugins/codex-mcp/
 ```
 
 The MCP server is pinned to the exact published version rather than `latest`, so
-a given plugin release always runs the server it was written against. A release
-moves `package.json`, `plugins/codex-mcp/.claude-plugin/plugin.json`, the
-marketplace entry in `.claude-plugin/marketplace.json` and the pin in
-`.mcp.json` to the same number.
+a given plugin release always runs the server it was written against.
+`.mcp.json` starts it with `bunx @kvokka/codex-mcp@<version>`.
+
+`npx` in that place starts nothing where the package is already in the tree. npm
+exec answers the request from the tree of the directory the client started the
+server in, so a project that carries the package at that version — the server's
+own checkout, or anything depending on it — makes npm exec skip the fetch and
+run the bare name `codex-mcp`, which no `PATH` answers to: the process exits 127
+before writing a frame and the client reads `CONNECTION_CLOSED`. bunx fetches
+the version it was asked for whatever the surrounding tree holds.
+
+A release moves `package.json`, `plugins/codex-mcp/.claude-plugin/plugin.json`,
+the marketplace entry in `.claude-plugin/marketplace.json`, the pin in
+`.mcp.json` and the version this README names to the same number.

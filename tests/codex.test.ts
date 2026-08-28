@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { afterEach, describe, expect, it, jest } from "bun:test";
 import type { SessionManager } from "../src/session/manager.js";
 import { executeCodex } from "../src/tools/codex.js";
 
@@ -18,7 +18,7 @@ describe("executeCodex", () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), "codex-tool-"));
     tempDirs.push(cwd);
 
-    const createSession = vi.fn(async () => ({
+    const createSession = jest.fn(async () => ({
       sessionId: "sess_1",
       threadId: "thread_1",
       status: "running" as const,
@@ -55,7 +55,7 @@ describe("executeCodex", () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), "codex-tool-"));
     tempDirs.push(cwd);
 
-    const createSession = vi.fn(async () => ({
+    const createSession = jest.fn(async () => ({
       sessionId: "sess_2",
       threadId: "thread_2",
       status: "running" as const,

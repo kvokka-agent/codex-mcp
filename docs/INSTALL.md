@@ -3,8 +3,9 @@
 The server runs on the same machine as the MCP client and talks to it over
 stdio. Terms are defined in [GLOSSARY.md](GLOSSARY.md).
 
-Before anything else: Node.js >= 18, and a Codex CLI that answers
-`codex --version` and has had `codex login` run. Without a login the server
+Before anything else: `bun`, which starts the server, Node.js >= 18, which runs
+it, and a Codex CLI that answers `codex --version` and has had `codex login`
+run. Without a login the server
 still starts and `codex_setup` reports `auth.state: unauthenticated` — enough to
 check the protocol, not enough to run a turn.
 
@@ -20,14 +21,14 @@ hook with it. [../plugins/codex-mcp/README.md](../plugins/codex-mcp/README.md)
 describes the three pieces and how to enable them for a whole project from
 `.claude/settings.json`.
 
-## Any MCP client, through npx
+## Any MCP client, through bunx
 
 ```json
 {
   "mcpServers": {
     "codex-mcp": {
-      "command": "npx",
-      "args": ["-y", "@kvokka/codex-mcp"]
+      "command": "bunx",
+      "args": ["@kvokka/codex-mcp"]
     }
   }
 }
@@ -36,13 +37,20 @@ describes the three pieces and how to enable them for a whole project from
 Claude Code registers the same thing from the command line:
 
 ```bash
-claude mcp add codex-mcp -- npx -y @kvokka/codex-mcp
+claude mcp add codex-mcp -- bunx @kvokka/codex-mcp
 ```
+
+`npx` in place of `bunx` starts nothing in a directory whose tree already
+carries `@kvokka/codex-mcp` — the server's own checkout, or a project depending
+on it. npm exec answers the request from that tree, finds the package there,
+skips the fetch and runs the bare name `codex-mcp`, which `PATH` answers to only
+after a global install: the server exits 127 before writing a frame and the
+client reports `CONNECTION_CLOSED`. bunx fetches the package it was asked for.
 
 ## A global install
 
 ```bash
-npm install -g @kvokka/codex-mcp
+bun install -g @kvokka/codex-mcp
 ```
 
 The package installs the `codex-mcp` binary, so a client's `command` becomes
@@ -55,7 +63,7 @@ handshake, and a PowerShell profile banner is the usual culprit. Launch the
 server with the profile off:
 
 ```powershell
-pwsh -NoProfile -Command "npx -y @kvokka/codex-mcp"
+pwsh -NoProfile -Command "bunx @kvokka/codex-mcp"
 ```
 
 If command output inside a turn comes back as mojibake, set the shell to UTF-8:
@@ -80,8 +88,8 @@ client's own configuration when the default is not the one you want:
 {
   "mcpServers": {
     "codex-mcp": {
-      "command": "npx",
-      "args": ["-y", "@kvokka/codex-mcp"],
+      "command": "bunx",
+      "args": ["@kvokka/codex-mcp"],
       "env": { "CODEX_MCP_COMMAND": "codex-internal" }
     }
   }

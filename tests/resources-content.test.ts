@@ -1,23 +1,25 @@
+import { mockModule } from "./helpers/mock.js";
 import { EventEmitter } from "node:events";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 
 /**
  * `detectCodexCliVersion` shells out to `codex --version`; the stub keeps the suite off the
  * real CLI and lets each test choose what the binary answered.
  */
-const spawnState = vi.hoisted(() => ({
+const spawnState = {
   calls: [] as Array<{ command: string; args: string[] }>,
   impl: (() => ({ status: 0, stdout: "codex-cli 0.52.0", stderr: "" })) as (
     command: string,
     args: string[]
   ) => unknown,
-}));
+};
 
-vi.mock("child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("child_process")>();
+const realModule1 = { ...(await import("child_process")) };
+mockModule("child_process", realModule1, () => {
+  const actual = realModule1;
   return {
     ...actual,
     default: actual,
@@ -667,6 +669,14 @@ describe("resource documents served over MCP", () => {
     expect(configText).toContain(`(default \`${DEFAULT_APPROVAL_TIMEOUT_MS}\` ms)`);
     expect(configText).toContain(`maximum \`${MAX_LONG_POLL_WAIT_MS}\``);
     expect(guide).toContain(`Default approval timeout is ${DEFAULT_APPROVAL_TIMEOUT_MS}ms`);
+  });
+
+  it("tells a caller whose progress notifications reach nobody to write the activity out", () => {
+    const gotchas = docs.get(RESOURCE_URIS.gotchas)!;
+
+    expect(gotchas).toContain("A caller nobody can see");
+    expect(gotchas).toContain("`progress.activity`");
+    expect(gotchas).toContain("`waitMs` of about 300000");
   });
 
   it("states cleanup windows as whole minutes derived from the cleanup constants", () => {

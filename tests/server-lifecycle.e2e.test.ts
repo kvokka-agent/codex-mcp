@@ -2,13 +2,13 @@
  * What a codex-mcp process does with its own lifetime and its own state
  * directory, measured on the built server rather than on an import of it.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { pollUntil } from "./helpers/clock.js";
+import { afterEach, describe, expect, it } from "bun:test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HARNESS_RUNS_HERE, ServerProcess } from "./helpers/server-harness.js";
-import { pollUntil } from "./helpers/clock.js";
 
 const servers: ServerProcess[] = [];
 const strays: ChildProcess[] = [];

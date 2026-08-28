@@ -85,7 +85,7 @@ An interface change touches every one of these, or states why it does not:
 - `CHANGELOG.md`
 - the matching `tests/*.test.ts`
 
-Then `npm run check`.
+Then `bun run check`.
 
 ## Latest run
 

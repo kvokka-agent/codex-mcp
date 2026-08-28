@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { redactPaths } from "../src/utils/redact.js";
 
 describe("redactPaths", () => {

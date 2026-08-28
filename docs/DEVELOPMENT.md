@@ -10,12 +10,15 @@ working tree's `dist/index.js` is the whole trick.
 ```bash
 git clone https://github.com/kvokka/codex-mcp.git
 cd codex-mcp
-npm ci
-npm run build
+bun install --frozen-lockfile
+bun run build
 ```
 
-`dist/` is not committed. `npm run build` bundles the whole server into the
+`dist/` is not committed. `bun run build` bundles the whole server into the
 single file `dist/index.js`, and that file is what every step below launches.
+
+`bun` builds and tests; `node` runs what is built, which is what the two
+runtime checks of the gate measure.
 
 The server drives the Codex CLI, so `codex --version` must answer and
 `codex login` must have run. Without a login the server still starts and
@@ -87,7 +90,7 @@ session, so a rebuilt `dist/index.js` changes nothing until the process is
 replaced.
 
 1. Edit `src/`.
-2. `npm run build`, or leave `npm run dev` running and let tsup rebuild on save.
+2. `bun run build`.
 3. In the Claude Code session, `/mcp` → `codex-mcp` → **Reconnect**.
 
 Reconnect kills the child and spawns the command again, which reads the new
@@ -103,21 +106,21 @@ processes the old one left behind.
 ## Run the checks
 
 ```bash
-npm run check
+bun run check
 ```
 
 That is the CI gate in one command: `lint`, `format:check`, `typecheck`, `test`,
 `build`, then `check:stdio`, `smoke:mcp` and `lint:md`. `check:stdio` proves
 stdout carries nothing but JSON-RPC before the handshake, and `smoke:mcp` drives
 a real MCP client against the built server and asserts the five tools and the
-resources are there. Both accept `--npx` to run the published package instead of
+resources are there. Both accept `--bunx` to run the published package instead of
 `dist/`, and take a command after `--`.
 
 Both start a real server, and both put its state directory in a fresh temporary
 one unless `CODEX_MCP_STATE_DIR` says otherwise, so a check run never disturbs
 the sessions of an installed server.
 
-The end-to-end suite inside `npm test` — `tests/server-lifecycle.e2e.test.ts` —
+The end-to-end suite inside `bun test` — `tests/server-lifecycle.e2e.test.ts` —
 spawns the built server and hands it `tests/helpers/fake-codex.mjs` as the codex
 binary. It skips itself on Windows, which spawns an executable by its extension
 and does not run a `.mjs`. What it measures — a startup that serves MCP while an
@@ -140,7 +143,7 @@ claude --plugin-dir /absolute/path/to/codex-mcp/plugins/codex-mcp \
 ```
 
 `--strict-mcp-config` is what makes this a test of the local build. The
-plugin's own `.mcp.json` pins the published `npx -y @kvokka/codex-mcp@X.Y.Z`;
+plugin's own `.mcp.json` pins the published `bunx @kvokka/codex-mcp@X.Y.Z`;
 strict mode drops every server the flags did not name, leaving the agent and
 the hook from the working tree wired to the `codex-mcp` of your `.mcp.json`.
 

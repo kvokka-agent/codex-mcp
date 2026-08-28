@@ -1,7 +1,8 @@
+import { mockModule } from "./helpers/mock.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 
 /**
  * `detectCodexCliVersion` runs the resolved executable with `--version` under a
@@ -9,12 +10,13 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
  * a runner slow enough to miss that budget turns the version into null; the stub
  * decides what the binary answered instead.
  */
-const cliVersionRun = vi.hoisted(() => ({
+const cliVersionRun = {
   result: { status: 0, stdout: "codex-cli 0.52.0", stderr: "" } as unknown,
-}));
+};
 
-vi.mock("child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("child_process")>();
+const realModule1 = { ...(await import("child_process")) };
+mockModule("child_process", realModule1, () => {
+  const actual = realModule1;
   return {
     ...actual,
     default: actual,

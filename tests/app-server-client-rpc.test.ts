@@ -6,15 +6,18 @@
  * The child process is a stand-in driven by hand, so every asserted value is
  * one the client itself produced on its stdin or handed back to a caller.
  */
+import { advanceAsync } from "./helpers/clock.js";
+import { mockModule } from "./helpers/mock.js";
 import { EventEmitter } from "events";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { Methods } from "../src/app-server/protocol.js";
 import type { AppServerSpawnOptions } from "../src/app-server/lifecycle.js";
 
-const spawnMock = vi.fn();
+const spawnMock = jest.fn();
 
-vi.mock("child_process", async () => {
-  const actual = await vi.importActual<typeof import("child_process")>("child_process");
+const realModule1 = { ...(await import("child_process")) };
+mockModule("child_process", realModule1, () => {
+  const actual = realModule1;
   return { ...actual, spawn: spawnMock };
 });
 
@@ -23,7 +26,7 @@ class MockStdin extends EventEmitter {
   writes: string[] = [];
   writeReturn = true;
   throwOnWrite: Error | null = null;
-  end = vi.fn();
+  end = jest.fn();
 
   write(chunk: unknown): boolean {
     if (this.throwOnWrite) throw this.throwOnWrite;
@@ -39,7 +42,7 @@ class MockProc extends EventEmitter {
   killed = false;
   exitCode: number | null = null;
   pid = 4242;
-  kill = vi.fn((): boolean => {
+  kill = jest.fn((): boolean => {
     this.killed = true;
     return true;
   });
@@ -55,22 +58,22 @@ interface RpcLine {
 
 describe("AppServerClient JSON-RPC", () => {
   let proc: MockProc;
-  let killSpy: ReturnType<typeof vi.spyOn>;
-  let errorLog: ReturnType<typeof vi.spyOn>;
+  let killSpy: ReturnType<typeof jest.spyOn>;
+  let errorLog: ReturnType<typeof jest.spyOn>;
   let AppServerClient: typeof import("../src/app-server/client.js").AppServerClient;
 
   beforeEach(async () => {
     proc = new MockProc();
     spawnMock.mockReset();
     spawnMock.mockReturnValue(proc);
-    killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-    errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    killSpy = jest.spyOn(process, "kill").mockImplementation(() => true);
+    errorLog = jest.spyOn(console, "error").mockImplementation(() => {});
     ({ AppServerClient } = await import("../src/app-server/client.js"));
   });
 
   afterEach(() => {
-    vi.useRealTimers();
-    vi.restoreAllMocks();
+    jest.useRealTimers();
+    jest.restoreAllMocks();
     spawnMock.mockReset();
   });
 
@@ -503,9 +506,14 @@ describe("AppServerClient JSON-RPC", () => {
     proc.stdin.writeReturn = false;
     const inFlight = client.threadFork({ threadId: "thread_1" });
     const queuedRequest = client.threadResume({ threadId: "thread_1" });
+    // The drain below rejects both, and the assertions come after it: without a
+    // handler already on each promise the rejection is an unhandled one, which
+    // the runner reports against whichever test is running.
+    const settled = Promise.allSettled([inFlight, queuedRequest]);
 
     proc.stdin.writable = false;
     proc.stdin.emit("drain");
+    await settled;
 
     await expect(queuedRequest).rejects.toThrow("WRITE_QUEUE_DROPPED");
     await expect(queuedRequest).rejects.toThrow("stdin is not writable while flushing");
@@ -518,9 +526,11 @@ describe("AppServerClient JSON-RPC", () => {
     proc.stdin.writeReturn = false;
     const inFlight = client.threadFork({ threadId: "thread_1" });
     const queuedRequest = client.threadResume({ threadId: "thread_1" });
+    const settled = Promise.allSettled([inFlight, queuedRequest]);
 
     proc.stdin.throwOnWrite = new Error("stream exploded mid-flush");
     proc.stdin.emit("drain");
+    await settled;
 
     await expect(queuedRequest).rejects.toThrow("stream exploded mid-flush");
     await expect(inFlight).rejects.toThrow("stream exploded mid-flush");
@@ -607,10 +617,10 @@ describe("AppServerClient JSON-RPC", () => {
 
   it("escalates to SIGKILL when the child outlives the grace period", async () => {
     const client = await startClient();
-    vi.useFakeTimers();
+    jest.useFakeTimers();
 
     const destroying = client.destroy();
-    await vi.advanceTimersByTimeAsync(5000);
+    await advanceAsync(5000);
 
     if (process.platform !== "win32") {
       expect(killSpy).toHaveBeenCalledWith(-4242, "SIGKILL");
@@ -618,7 +628,7 @@ describe("AppServerClient JSON-RPC", () => {
 
     proc.emit("exit", 0, null);
     await destroying;
-    vi.useRealTimers();
+    jest.useRealTimers();
   });
 
   it("logs when even the direct kill fails", async () => {

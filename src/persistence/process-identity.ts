@@ -204,12 +204,20 @@ function readProcStat(pid: number): LiveProcess | null {
   };
 }
 
-/** Run `ps -p PID -o FORMAT` and return its trimmed output, or null on failure. */
+/**
+ * Run `ps -p PID -o FORMAT` at UTC and return its trimmed output, or null on
+ * failure.
+ *
+ * `ps` prints `lstart` as the wall clock of the zone its own process runs in,
+ * so the zone is named here rather than inherited: it is the other half of
+ * `parseLstartMs`, which reads those fields as UTC.
+ */
 function runPs(pid: number, format: string): string | null {
   try {
     const output = execSync(`ps -p ${pid} -o ${format}`, {
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 5000,
+      env: { ...process.env, TZ: "UTC" },
     })
       .toString()
       .trim();
@@ -217,6 +225,37 @@ function runPs(pid: number, format: string): string | null {
   } catch {
     return null;
   }
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** `ps -o lstart=`: "Fri Aug 28 14:53:13 2026", the day space-padded. */
+const LSTART = /^\w{3}\s+(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/;
+
+/**
+ * Epoch milliseconds of one `ps -o lstart=` reading, whose fields `runPs` put
+ * at UTC.
+ *
+ * Handing the string to `new Date` reads it in the zone of whichever runtime
+ * parses it, and that zone is not always the one the reading was printed in:
+ * under `bun test` the runtime stands at UTC while the child `ps` prints
+ * +07:00, which dated every process seven hours late and made this server's own
+ * sessions read as another server's. Returns null for a reading in any other
+ * shape, which leaves the identity unknown rather than wrong.
+ */
+export function parseLstartMs(lstart: string): number | null {
+  const match = LSTART.exec(lstart.trim());
+  if (!match) return null;
+  const month = MONTHS.indexOf(match[1]!);
+  if (month < 0) return null;
+  return Date.UTC(
+    Number(match[6]),
+    month,
+    Number(match[2]),
+    Number(match[3]),
+    Number(match[4]),
+    Number(match[5])
+  );
 }
 
 /**
@@ -235,15 +274,15 @@ export function readPosixProcess(pid: number): LiveProcess | null {
   if (combined !== null) {
     const match = /^(\d+)\s+(\S.*)$/.exec(combined);
     if (match) {
-      const startMs = new Date(match[2]!).getTime();
-      if (!isNaN(startMs)) return { startMs, pgid: Number(match[1]) };
+      const startMs = parseLstartMs(match[2]!);
+      if (startMs !== null) return { startMs, pgid: Number(match[1]) };
     }
   }
 
   const lstart = runPs(pid, "lstart=");
   if (lstart !== null) {
-    const startMs = new Date(lstart).getTime();
-    if (!isNaN(startMs)) return { startMs, pgid: null };
+    const startMs = parseLstartMs(lstart);
+    if (startMs !== null) return { startMs, pgid: null };
   }
 
   return readProcStat(pid);

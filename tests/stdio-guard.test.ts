@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { resolveStdioMode, runStdioPreflight } from "../src/utils/stdio-guard.js";
 
 describe("stdio guard", () => {

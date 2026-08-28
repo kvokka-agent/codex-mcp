@@ -17,7 +17,38 @@ on:
     branches: [main, master]
 
 jobs:
+  # Every gate that answers the same on any host, run once.
   check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      # The end-to-end tests spawn the built server the way the package ships
+      # it, which is under node.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun run format:check
+      - run: bun run typecheck
+      # Before the tests: the end-to-end ones spawn the bundle, and a build
+      # inside a test spends that test's own window on it.
+      - run: bun run build
+      - run: bun test
+      - run: bun run lint:md
+
+  # What the published server does on the Node versions and the platforms it
+  # claims. Launching the built bundle is the only thing that exercises the
+  # startup path: STATE_DIR lock, session recovery, orphan reaping, and a stdout
+  # kept clean until the MCP handshake. Neither script needs the codex binary —
+  # the server resolves it lazily and falls back to exec mode when PATH carries
+  # none.
+  runtime:
     strategy:
       fail-fast: false
       matrix:
@@ -46,36 +77,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      # The bundle is built by bun and run by node: `node-version` is the version
+      # under test, and the two scripts below spawn `node dist/index.js`.
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
-          cache: npm
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run format:check
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-      # Launching the built server is the only thing that exercises the startup path:
-      # STATE_DIR lock, session recovery, orphan reaping, and a stdout kept clean until
-      # the MCP handshake. Neither script needs the codex binary — the server resolves it
-      # lazily and falls back to exec mode when it is absent from PATH.
-      - run: npm run check:stdio
-      - run: npm run smoke:mcp
-
-  markdown:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-      # rumdl ships as a Rust binary, and the npm package carries the prebuilt one for
-      # every platform this matrix runs on. It is a locked devDependency, so this job
-      # fetches it from the same cached `npm ci` as everything else rather than from a
-      # registry call of its own that no retry covers.
-      - run: npm ci
-      - run: npm run lint:md
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: bun run check:stdio
+      - run: bun run smoke:mcp

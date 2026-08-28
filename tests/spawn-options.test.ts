@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { buildAppServerArgs } from "../src/app-server/lifecycle.js";
 import { extractSpawnOptions } from "../src/utils/config.js";
 

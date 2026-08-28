@@ -164,7 +164,7 @@ count and total size.
 JSON-RPC risks reaching stdout, since stdout is the MCP channel.
 `CODEX_MCP_STDIO_MODE` selects `auto`, `strict` or `off`.
 
-**the gate** — `npm run check`: everything CI runs, in one command.
+**the gate** — `bun run check`: everything CI runs, in one command.
 [DEVELOPMENT.md](DEVELOPMENT.md) states what it covers.
 
 **release label** — `release:major`, `release:minor` or `release:patch` on a

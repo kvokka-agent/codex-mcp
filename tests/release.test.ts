@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 // @ts-expect-error -- the release rules are plain ESM, shared with the workflow that runs them.
@@ -62,10 +62,9 @@ describe("the files that carry the version", () => {
   const current = currentVersion() as string;
   const raised = nextVersion(current, "minor") as string;
 
-  it("names the npm package, its lock file, the plugin, the marketplace and both pins", () => {
+  it("names the package, the plugin, the marketplace and both pins", () => {
     expect(targets.map((target) => target.path)).toEqual([
       "package.json",
-      "package-lock.json",
       "plugins/codex-mcp/.claude-plugin/plugin.json",
       ".claude-plugin/marketplace.json",
       "plugins/codex-mcp/.mcp.json",
@@ -82,9 +81,7 @@ describe("the files that carry the version", () => {
       expect(hit).toContain(raised);
     }
     // Putting the old version back through the same patterns restores the file byte for
-    // byte, so the edit reached the version references and nothing around them. The lock
-    // file carries a dependency at the same number, which this catches and a plain
-    // replaceAll would not.
+    // byte, so the edit reached the version references and nothing around them.
     expect(applyVersion(after, target, current)).toBe(before);
   });
 
