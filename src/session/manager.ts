@@ -165,6 +165,20 @@ const ACTING_PROGRESS_METHODS = new Set<string>([
   Methods.TURN_PLAN_UPDATED,
 ]);
 
+/** How a pending request answers, and what it records, when its timeout fires. */
+interface PendingTimeout {
+  /** Names the action in the line a failed auto-answer logs. */
+  action: string;
+  /** Sends the answer to the app-server on the caller's behalf. */
+  respond: (result: unknown) => void;
+  /** The answer itself. */
+  response: unknown;
+  /** Recorded on the pending request; a user-input question decides nothing. */
+  decision?: string;
+  /** `approval_result` fields beyond `requestId` and `timeout`. */
+  event: Record<string, unknown>;
+}
+
 export class SessionManager {
   private sessions = new Map<string, SessionInfo>();
   private clients = new Map<string, ICodexClient>();
@@ -1726,6 +1740,48 @@ export class SessionManager {
     return client;
   }
 
+  /**
+   * Put a pending request in the session and arm its timeout.
+   *
+   * A caller that never answers gets `timeout.response` sent on its behalf, and
+   * the session drops back to `running` once nothing is pending. The send is
+   * wrapped because the client may already be destroyed by the time the timer
+   * fires.
+   */
+  private awaitPendingRequest(
+    session: SessionInfo,
+    pending: PendingRequest,
+    approvalTimeoutMs: number,
+    request: Record<string, unknown>,
+    timeout: PendingTimeout
+  ): void {
+    const { sessionId } = session;
+    const { requestId } = pending;
+
+    pending.timeoutHandle = createUnrefTimeout(() => {
+      if (pending.resolved) return;
+      pending.resolved = true;
+      if (timeout.decision !== undefined) pending.decision = timeout.decision;
+      try {
+        timeout.respond(timeout.response);
+      } catch (err) {
+        console.error(
+          `[codex-mcp] Failed to ${timeout.action} timeout: session=${sessionId} request=${requestId} error=${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+      recordEvent(session, "approval_result", { requestId, ...timeout.event, timeout: true });
+      session.pendingRequests.delete(requestId);
+      if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
+        session.status = "running";
+      }
+      this.notifyWaiters(sessionId);
+    }, approvalTimeoutMs);
+
+    session.pendingRequests.set(requestId, pending);
+    session.status = "waiting_approval";
+    recordEvent(session, "approval_request", { requestId, ...request });
+  }
+
   private registerHandlers(
     sessionId: string,
     client: ICodexClient,
@@ -2081,50 +2137,32 @@ export class SessionManager {
             respond: (result) => client.respondToServer(id, result),
           };
 
-          // Timeout
-          pending.timeoutHandle = createUnrefTimeout(() => {
-            if (!pending.resolved) {
-              pending.resolved = true;
-              pending.decision = "decline";
-              try {
-                client.respondToServer(id, { decision: "decline" } as CommandApprovalResponse);
-              } catch (err) {
-                console.error(
-                  `[codex-mcp] Failed to auto-decline command approval timeout: session=${sessionId} request=${requestId} error=${err instanceof Error ? err.message : String(err)}`
-                );
-              }
-              recordEvent(session, "approval_result", {
-                requestId,
-                kind: "command",
-                approvalId,
-                decision: "decline",
-                timeout: true,
-              });
-              session.pendingRequests.delete(requestId);
-              if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
-                session.status = "running";
-              }
-              this.notifyWaiters(sessionId);
+          this.awaitPendingRequest(
+            session,
+            pending,
+            approvalTimeoutMs,
+            {
+              kind: "command",
+              itemId: approvalParams.itemId,
+              approvalId,
+              command: approvalParams.command,
+              cwd: approvalParams.cwd,
+              reason,
+              commandActions,
+              proposedExecpolicyAmendment,
+              availableDecisions,
+              proposedNetworkPolicyAmendments,
+              additionalPermissions,
+              networkApprovalContext,
+            },
+            {
+              action: "auto-decline command approval",
+              respond: (result) => client.respondToServer(id, result),
+              response: { decision: "decline" } as CommandApprovalResponse,
+              decision: "decline",
+              event: { kind: "command", approvalId, decision: "decline" },
             }
-          }, approvalTimeoutMs);
-
-          session.pendingRequests.set(requestId, pending);
-          session.status = "waiting_approval";
-          recordEvent(session, "approval_request", {
-            requestId,
-            kind: "command",
-            itemId: approvalParams.itemId,
-            approvalId,
-            command: approvalParams.command,
-            cwd: approvalParams.cwd,
-            reason,
-            commandActions,
-            proposedExecpolicyAmendment,
-            availableDecisions,
-            proposedNetworkPolicyAmendments,
-            additionalPermissions,
-            networkApprovalContext,
-          });
+          );
           break;
         }
 
@@ -2142,39 +2180,19 @@ export class SessionManager {
             respond: (result) => client.respondToServer(id, result),
           };
 
-          pending.timeoutHandle = createUnrefTimeout(() => {
-            if (!pending.resolved) {
-              pending.resolved = true;
-              pending.decision = "decline";
-              try {
-                client.respondToServer(id, { decision: "decline" } as FileChangeApprovalResponse);
-              } catch (err) {
-                console.error(
-                  `[codex-mcp] Failed to auto-decline file-change approval timeout: session=${sessionId} request=${requestId} error=${err instanceof Error ? err.message : String(err)}`
-                );
-              }
-              recordEvent(session, "approval_result", {
-                requestId,
-                kind: "fileChange",
-                decision: "decline",
-                timeout: true,
-              });
-              session.pendingRequests.delete(requestId);
-              if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
-                session.status = "running";
-              }
-              this.notifyWaiters(sessionId);
+          this.awaitPendingRequest(
+            session,
+            pending,
+            approvalTimeoutMs,
+            { kind: "fileChange", itemId: p.itemId, reason },
+            {
+              action: "auto-decline file-change approval",
+              respond: (result) => client.respondToServer(id, result),
+              response: { decision: "decline" } as FileChangeApprovalResponse,
+              decision: "decline",
+              event: { kind: "fileChange", decision: "decline" },
             }
-          }, approvalTimeoutMs);
-
-          session.pendingRequests.set(requestId, pending);
-          session.status = "waiting_approval";
-          recordEvent(session, "approval_request", {
-            requestId,
-            kind: "fileChange",
-            itemId: p.itemId,
-            reason,
-          });
+          );
           break;
         }
 
@@ -2190,36 +2208,18 @@ export class SessionManager {
             respond: (result) => client.respondToServer(id, result),
           };
 
-          pending.timeoutHandle = createUnrefTimeout(() => {
-            if (!pending.resolved) {
-              pending.resolved = true;
-              try {
-                client.respondToServer(id, { answers: {} } as UserInputRequestResponse);
-              } catch (err) {
-                console.error(
-                  `[codex-mcp] Failed to auto-answer user-input timeout: session=${sessionId} request=${requestId} error=${err instanceof Error ? err.message : String(err)}`
-                );
-              }
-              recordEvent(session, "approval_result", {
-                requestId,
-                kind: "user_input",
-                timeout: true,
-              });
-              session.pendingRequests.delete(requestId);
-              if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
-                session.status = "running";
-              }
-              this.notifyWaiters(sessionId);
+          this.awaitPendingRequest(
+            session,
+            pending,
+            approvalTimeoutMs,
+            { kind: "user_input", questions: p.questions },
+            {
+              action: "auto-answer user-input",
+              respond: (result) => client.respondToServer(id, result),
+              response: { answers: {} } as UserInputRequestResponse,
+              event: { kind: "user_input" },
             }
-          }, approvalTimeoutMs);
-
-          session.pendingRequests.set(requestId, pending);
-          session.status = "waiting_approval";
-          recordEvent(session, "approval_request", {
-            requestId,
-            kind: "user_input",
-            questions: p.questions,
-          });
+          );
           break;
         }
 
