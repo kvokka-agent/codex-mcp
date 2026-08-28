@@ -187,8 +187,8 @@ function buildConfigGuideText(defaults: SessionDefaults): string {
   return [
     "## Top-level parameters (`codex`)",
     "",
-    "- Required: `prompt`, `approvalPolicy`, `sandbox`.",
-    `- Optional: \`effort\` (default \`${defaults.effort}\`), \`cwd\` (default server cwd), \`model\` (default ${defaults.model ? `\`${defaults.model}\`` : "config.toml"}), \`profile\` (default CLI profile), \`advanced\`.`,
+    `- Required: ${["`prompt`", defaults.approvalPolicy ? "" : "`approvalPolicy`", defaults.sandbox ? "" : "`sandbox`"].filter(Boolean).join(", ")}.`,
+    `- Optional: ${defaults.approvalPolicy ? `\`approvalPolicy\` (default \`${defaults.approvalPolicy}\`), ` : ""}${defaults.sandbox ? `\`sandbox\` (default \`${defaults.sandbox}\`), ` : ""}\`effort\` (default \`${defaults.effort}\`), \`cwd\` (default server cwd), \`model\` (default ${defaults.model ? `\`${defaults.model}\`` : "config.toml"}), \`profile\` (default CLI profile), \`advanced\`.`,
     "- Prefer passing `cwd` explicitly to avoid accidental server-cwd execution.",
     "",
     "## `advanced.*` guide",
@@ -242,8 +242,10 @@ function buildConfigGuideText(defaults: SessionDefaults): string {
     `- \`${SESSION_DEFAULT_ENV.model}\`: model a \`codex\` call that names none starts on. Default: none — the Codex CLI reads its own config.toml. Now: ${defaults.model ?? "unset"}.`,
     `- \`${SESSION_DEFAULT_ENV.effort}\`: reasoning effort a \`codex\` call that names none starts on, one of ${EFFORT_LEVELS.join(", ")}. Default: ${DEFAULT_EFFORT_LEVEL}. Now: ${defaults.effort}.`,
     `- \`${SESSION_DEFAULT_ENV.approvalTimeoutMs}\`: milliseconds a pending approval waits before it auto-declines, where the call names no \`advanced.approvalTimeoutMs\`. Default: ${DEFAULT_APPROVAL_TIMEOUT_MS}. Now: ${defaults.approvalTimeoutMs}.`,
+    `- \`${SESSION_DEFAULT_ENV.approvalPolicy}\`: approval policy a \`codex\` call that names none starts on, one of ${APPROVAL_POLICIES.join(", ")}. Default: none, which keeps \`approvalPolicy\` a required parameter. Now: ${defaults.approvalPolicy ?? "unset"}.`,
+    `- \`${SESSION_DEFAULT_ENV.sandbox}\`: sandbox a \`codex\` call that names none starts on, one of ${SANDBOX_MODES.join(", ")}. Default: none, which keeps \`sandbox\` a required parameter. Now: ${defaults.sandbox ?? "unset"}.`,
     "",
-    "A value none of those three can be read as stops the server at startup, naming the variable.",
+    "A value none of those five can be read as stops the server at startup, naming the variable.",
     "",
     "## Version compatibility note",
     "",
@@ -463,6 +465,17 @@ function buildDelegationGuideText(defaults: SessionDefaults): string {
     "**Key rule:** `read-only` sandbox already prevents writes, so `approvalPolicy: 'never'` is safe with it. Avoid `untrusted` + `read-only` — every read command triggers approval for no safety gain.",
     "",
     "## Approval policy quick guide",
+    defaults.approvalPolicy || defaults.sandbox
+      ? `A call that names neither starts on ${[
+          defaults.approvalPolicy && `\`${defaults.approvalPolicy}\``,
+          defaults.sandbox && `\`${defaults.sandbox}\``,
+        ]
+          .filter(Boolean)
+          .join(
+            " with "
+          )}, which ${SESSION_DEFAULT_ENV.approvalPolicy} and ${SESSION_DEFAULT_ENV.sandbox} set.`
+      : "A call states its own approval policy and sandbox; the server carries no default for either.",
+    "",
     "- `never`: no interactive prompts. Best for read-only review or tightly scoped trusted tasks.",
     "- `on-failure`: pragmatic default for implementation work when you still want some safety rails.",
     "- `on-request`: use when a human or outer agent will actively poll and answer approvals.",

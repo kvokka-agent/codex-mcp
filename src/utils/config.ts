@@ -16,8 +16,8 @@ export interface CodexToolParams {
   cwd?: string;
   model?: string;
   profile?: string;
-  approvalPolicy: ApprovalPolicy;
-  sandbox: SandboxMode;
+  approvalPolicy?: ApprovalPolicy;
+  sandbox?: SandboxMode;
   effort?: EffortLevel;
   advanced?: {
     baseInstructions?: string;
@@ -39,8 +39,8 @@ export function extractSpawnOptions(
   return {
     profile: params.profile,
     model: params.model ?? defaults.model,
-    approvalPolicy: params.approvalPolicy,
-    sandbox: params.sandbox,
+    approvalPolicy: params.approvalPolicy ?? defaults.approvalPolicy,
+    sandbox: params.sandbox ?? defaults.sandbox,
     config: params.advanced?.config,
   };
 }

@@ -32,6 +32,8 @@ mockModule("child_process", realModule1, () => {
 
 const { createServer } = await import("../src/server.js");
 const { Methods } = await import("../src/app-server/protocol.js");
+import type { SessionDefaults } from "../src/utils/session-defaults.js";
+
 const { registerResources, RESOURCE_URIS } = await import("../src/resources/register-resources.js");
 const { SessionManager } = await import("../src/session/manager.js");
 const {
@@ -801,6 +803,7 @@ describe("runtime metadata in server-info and compat-report", () => {
     observedModel?: string | null;
     clientMode?: string;
     diskPersistence?: boolean;
+    sessionDefaults?: SessionDefaults;
   }) {
     const reads = new Map<string, () => { contents: Array<{ text: string; mimeType: string }> }>();
     registerResources(
@@ -819,7 +822,7 @@ describe("runtime metadata in server-info and compat-report", () => {
         version: deps.version ?? "0.0.0-test",
         clientMode: deps.clientMode ?? "app-server",
         diskPersistence: deps.diskPersistence ?? true,
-        sessionDefaults: {
+        sessionDefaults: deps.sessionDefaults ?? {
           effort: DEFAULT_EFFORT_LEVEL,
           approvalTimeoutMs: DEFAULT_APPROVAL_TIMEOUT_MS,
         },
@@ -832,6 +835,7 @@ describe("runtime metadata in server-info and compat-report", () => {
     return {
       json: (uri: string) =>
         JSON.parse(reads.get(uri)!().contents[0].text) as Record<string, never>,
+      text: (uri: string) => reads.get(uri)!().contents[0].text,
     };
   }
 
@@ -972,5 +976,23 @@ describe("runtime metadata in server-info and compat-report", () => {
       (resources.json(RESOURCE_URIS.compatReport).runtime as never as { codexMcpVersion: string })
         .codexMcpVersion
     ).toBe("7.7.7-test");
+  });
+  it("names the permission level a call that states none starts on, and says when there is none", () => {
+    const configured = register({
+      sessionDefaults: {
+        effort: DEFAULT_EFFORT_LEVEL,
+        approvalTimeoutMs: DEFAULT_APPROVAL_TIMEOUT_MS,
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+      },
+    }).text(RESOURCE_URIS.delegationGuide);
+
+    expect(configured).toContain(
+      "A call that names neither starts on `never` with `danger-full-access`"
+    );
+
+    expect(register({}).text(RESOURCE_URIS.delegationGuide)).toContain(
+      "A call states its own approval policy and sandbox"
+    );
   });
 });

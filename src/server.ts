@@ -404,12 +404,26 @@ export function createServer(
         "Start a Codex session and return `{ sessionId, threadId, status, progress }` at once — the turn runs on. Follow it with `codex_check(action='poll', waitMs=300000)` in a loop until the status is terminal: that call answers the moment Codex says it is working on something new, so write its `progress.activity` out where the person waiting reads it, then call again. See `codex-mcp:///quickstart` for the loop, `codex-mcp:///config` for parameter guidance, and `codex-mcp:///delegation-guide` for approval/sandbox presets.",
       inputSchema: {
         prompt: z.string().describe("Task or question"),
-        approvalPolicy: z
-          .enum(APPROVAL_POLICIES)
-          .describe("Required enum: untrusted/on-failure/on-request/never."),
-        sandbox: z
-          .enum(SANDBOX_MODES)
-          .describe("Required enum: read-only/workspace-write/danger-full-access."),
+        approvalPolicy: sessionDefaults.approvalPolicy
+          ? z
+              .enum(APPROVAL_POLICIES)
+              .optional()
+              .describe(
+                `Optional enum: untrusted/on-failure/on-request/never (default: ${sessionDefaults.approvalPolicy}).`
+              )
+          : z
+              .enum(APPROVAL_POLICIES)
+              .describe("Required enum: untrusted/on-failure/on-request/never."),
+        sandbox: sessionDefaults.sandbox
+          ? z
+              .enum(SANDBOX_MODES)
+              .optional()
+              .describe(
+                `Optional enum: read-only/workspace-write/danger-full-access (default: ${sessionDefaults.sandbox}).`
+              )
+          : z
+              .enum(SANDBOX_MODES)
+              .describe("Required enum: read-only/workspace-write/danger-full-access."),
         effort: z
           .enum(EFFORT_LEVELS)
           .optional()

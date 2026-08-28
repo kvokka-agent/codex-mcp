@@ -19,23 +19,24 @@ Starts a session and returns as soon as the thread does. Poll it with
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `prompt` | string | yes | — |
-| `approvalPolicy` | `untrusted` \| `on-failure` \| `on-request` \| `never` | yes | — |
-| `sandbox` | `read-only` \| `workspace-write` \| `danger-full-access` | yes | — |
+| `approvalPolicy` | `untrusted` \| `on-failure` \| `on-request` \| `never` | unless `CODEX_MCP_DEFAULT_APPROVAL_POLICY` is set | that variable |
+| `sandbox` | `read-only` \| `workspace-write` \| `danger-full-access` | unless `CODEX_MCP_DEFAULT_SANDBOX` is set | that variable |
 | `effort` | `none` \| `minimal` \| `low` \| `medium` \| `high` \| `xhigh` | no | `CODEX_MCP_DEFAULT_EFFORT`, else `low` |
 | `cwd` | string | no | the server's cwd |
 | `model` | string | no | `CODEX_MCP_DEFAULT_MODEL`, else config.toml |
 | `profile` | string | no | the CLI's default profile |
 | `advanced` | object | no | — |
 
-`approvalPolicy` and `sandbox` carry no default on purpose: the caller states
-its own permission level rather than inheriting one.
+Five parameters come from the environment the client started the server in,
+where the call names none of them: `model`, `effort`, `advanced.approvalTimeoutMs`,
+`approvalPolicy` and `sandbox`, from the `CODEX_MCP_DEFAULT_*` variables listed in
+`docs/INSTALL.md`. A call that names one gets what it named.
 
-`model`, `effort` and `advanced.approvalTimeoutMs` come from the environment the
-client started the server in — `CODEX_MCP_DEFAULT_MODEL`,
-`CODEX_MCP_DEFAULT_EFFORT` and `CODEX_MCP_DEFAULT_APPROVAL_TIMEOUT_MS`, listed in
-`docs/INSTALL.md` — where the call names none. A call that names one gets what it
-named. The tool description a client reads carries the values in force, so
-`tools/list` says what a session will actually start on.
+`approvalPolicy` and `sandbox` are the permission level of the turn, so the
+server never picks one on its own: where its variable is unset the parameter
+stays required, and where it is set the schema publishes it as optional with
+that value as its default. The tool description a client reads carries the
+values in force, so `tools/list` says what a session will actually start on.
 
 `advanced`:
 

@@ -8,17 +8,27 @@ describe("resolveSessionDefaults", () => {
       model: undefined,
       effort: DEFAULT_EFFORT_LEVEL,
       approvalTimeoutMs: DEFAULT_APPROVAL_TIMEOUT_MS,
+      approvalPolicy: undefined,
+      sandbox: undefined,
     });
   });
 
-  it("reads all three from the environment", () => {
+  it("reads all five from the environment", () => {
     expect(
       resolveSessionDefaults({
         [SESSION_DEFAULT_ENV.model]: "gpt-5.6-luna",
         [SESSION_DEFAULT_ENV.effort]: "high",
         [SESSION_DEFAULT_ENV.approvalTimeoutMs]: "900000",
+        [SESSION_DEFAULT_ENV.approvalPolicy]: "never",
+        [SESSION_DEFAULT_ENV.sandbox]: "danger-full-access",
       })
-    ).toEqual({ model: "gpt-5.6-luna", effort: "high", approvalTimeoutMs: 900000 });
+    ).toEqual({
+      model: "gpt-5.6-luna",
+      effort: "high",
+      approvalTimeoutMs: 900000,
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+    });
   });
 
   it("trims what the client wrote and treats a blank value as unset", () => {
@@ -32,6 +42,8 @@ describe("resolveSessionDefaults", () => {
       model: "gpt-5.6-luna",
       effort: "medium",
       approvalTimeoutMs: DEFAULT_APPROVAL_TIMEOUT_MS,
+      approvalPolicy: undefined,
+      sandbox: undefined,
     });
   });
 
@@ -48,6 +60,18 @@ describe("resolveSessionDefaults", () => {
       ).toThrow(`${SESSION_DEFAULT_ENV.approvalTimeoutMs}="${value}"`);
     });
   }
+
+  it("refuses an approval policy the enum does not define", () => {
+    expect(() => resolveSessionDefaults({ [SESSION_DEFAULT_ENV.approvalPolicy]: "ask" })).toThrow(
+      `${SESSION_DEFAULT_ENV.approvalPolicy}="ask" is not an approval policy`
+    );
+  });
+
+  it("refuses a sandbox mode the enum does not define", () => {
+    expect(() => resolveSessionDefaults({ [SESSION_DEFAULT_ENV.sandbox]: "full" })).toThrow(
+      `${SESSION_DEFAULT_ENV.sandbox}="full" is not a sandbox mode`
+    );
+  });
 
   it("reads process.env when no environment is passed", () => {
     const key = SESSION_DEFAULT_ENV.effort;

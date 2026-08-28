@@ -113,7 +113,7 @@ mode is live.
 
 ## Environment variables
 
-A value the server cannot read for one of the three `CODEX_MCP_DEFAULT_*` variables
+A value the server cannot read for one of the five `CODEX_MCP_DEFAULT_*` variables
 stops it at startup, naming the variable: a session started on the built-in
 default instead of the configured one is shaped exactly like the configured one.
 
@@ -129,6 +129,8 @@ default instead of the configured one is shaped exactly like the configured one.
 | `CODEX_MCP_DEFAULT_MODEL` | unset | Model a `codex` call that names none starts on. Unset leaves the model to the Codex CLI's own config.toml. |
 | `CODEX_MCP_DEFAULT_EFFORT` | `low` | Reasoning effort a `codex` call that names none starts on: `none`, `minimal`, `low`, `medium`, `high` or `xhigh`. |
 | `CODEX_MCP_DEFAULT_APPROVAL_TIMEOUT_MS` | `60000` | Milliseconds a pending approval waits before it auto-declines, where the call names no `advanced.approvalTimeoutMs`. |
+| `CODEX_MCP_DEFAULT_APPROVAL_POLICY` | unset | Approval policy a `codex` call that names none starts on: `untrusted`, `on-failure`, `on-request` or `never`. Unset keeps `approvalPolicy` a required parameter. |
+| `CODEX_MCP_DEFAULT_SANDBOX` | unset | Sandbox a `codex` call that names none starts on: `read-only`, `workspace-write` or `danger-full-access`. Unset keeps `sandbox` a required parameter. |
 | `MCP_TOOL_TIMEOUT` | unset | The MCP client's own ceiling on one tool call, in ms. Set it for the client; a client hands its environment to the servers it spawns, so the server reads it and returns a `codex_check` long poll just inside it. |
 
 ## Checking the install

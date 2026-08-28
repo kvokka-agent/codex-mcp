@@ -2,16 +2,25 @@
  * How a session starts when the caller names nothing.
  *
  * The client that launches the server sets these, so the model, the reasoning
- * effort and the approval timeout of a session are a property of the
- * installation rather than of whatever the caller happened to pass.
+ * effort, the approval timeout, the approval policy and the sandbox of a
+ * session are a property of the installation rather than of whatever the caller
+ * happened to pass.
  */
-import type { EffortLevel } from "../types.js";
-import { DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_EFFORT_LEVEL, EFFORT_LEVELS } from "../types.js";
+import type { ApprovalPolicy, EffortLevel, SandboxMode } from "../types.js";
+import {
+  APPROVAL_POLICIES,
+  DEFAULT_APPROVAL_TIMEOUT_MS,
+  DEFAULT_EFFORT_LEVEL,
+  EFFORT_LEVELS,
+  SANDBOX_MODES,
+} from "../types.js";
 
 export const SESSION_DEFAULT_ENV = {
   model: "CODEX_MCP_DEFAULT_MODEL",
   effort: "CODEX_MCP_DEFAULT_EFFORT",
   approvalTimeoutMs: "CODEX_MCP_DEFAULT_APPROVAL_TIMEOUT_MS",
+  approvalPolicy: "CODEX_MCP_DEFAULT_APPROVAL_POLICY",
+  sandbox: "CODEX_MCP_DEFAULT_SANDBOX",
 } as const;
 
 export interface SessionDefaults {
@@ -19,6 +28,10 @@ export interface SessionDefaults {
   model?: string;
   effort: EffortLevel;
   approvalTimeoutMs: number;
+  /** Unset keeps `approvalPolicy` a required parameter of the `codex` tool. */
+  approvalPolicy?: ApprovalPolicy;
+  /** Unset keeps `sandbox` a required parameter of the `codex` tool. */
+  sandbox?: SandboxMode;
 }
 
 function readValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
@@ -26,15 +39,18 @@ function readValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
   return value ? value : undefined;
 }
 
-function readEffort(env: NodeJS.ProcessEnv): EffortLevel {
-  const value = readValue(env, SESSION_DEFAULT_ENV.effort);
-  if (value === undefined) return DEFAULT_EFFORT_LEVEL;
-  if (!(EFFORT_LEVELS as readonly string[]).includes(value)) {
-    throw new Error(
-      `${SESSION_DEFAULT_ENV.effort}="${value}" is not a reasoning effort. Use one of: ${EFFORT_LEVELS.join(", ")}.`
-    );
+function readOneOf<T extends string>(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  allowed: readonly T[],
+  what: string
+): T | undefined {
+  const value = readValue(env, name);
+  if (value === undefined) return undefined;
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new Error(`${name}="${value}" is not ${what}. Use one of: ${allowed.join(", ")}.`);
   }
-  return value as EffortLevel;
+  return value as T;
 }
 
 function readApprovalTimeoutMs(env: NodeJS.ProcessEnv): number {
@@ -60,7 +76,16 @@ function readApprovalTimeoutMs(env: NodeJS.ProcessEnv): number {
 export function resolveSessionDefaults(env: NodeJS.ProcessEnv = process.env): SessionDefaults {
   return {
     model: readValue(env, SESSION_DEFAULT_ENV.model),
-    effort: readEffort(env),
+    effort:
+      readOneOf(env, SESSION_DEFAULT_ENV.effort, EFFORT_LEVELS, "a reasoning effort") ??
+      DEFAULT_EFFORT_LEVEL,
     approvalTimeoutMs: readApprovalTimeoutMs(env),
+    approvalPolicy: readOneOf(
+      env,
+      SESSION_DEFAULT_ENV.approvalPolicy,
+      APPROVAL_POLICIES,
+      "an approval policy"
+    ),
+    sandbox: readOneOf(env, SESSION_DEFAULT_ENV.sandbox, SANDBOX_MODES, "a sandbox mode"),
   };
 }

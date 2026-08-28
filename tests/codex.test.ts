@@ -8,6 +8,16 @@ import type { SessionDefaults } from "../src/utils/session-defaults.js";
 
 const DEFAULTS: SessionDefaults = { effort: "low", approvalTimeoutMs: 60000 };
 
+function stubManager(sessionId: string) {
+  const createSession = jest.fn(async () => ({
+    sessionId,
+    threadId: `thread_${sessionId}`,
+    status: "running" as const,
+    pollInterval: 120000,
+  }));
+  return { createSession, sessionManager: { createSession } as unknown as SessionManager };
+}
+
 const tempDirs: string[] = [];
 
 afterEach(() => {
@@ -170,5 +180,45 @@ describe("executeCodex", () => {
       "minimal",
       { approvalTimeoutMs: 300000, ephemeral: true }
     );
+  });
+  it("starts on the environment's approval policy and sandbox when the call names neither", async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "codex-tool-"));
+    tempDirs.push(cwd);
+    const { createSession, sessionManager } = stubManager("sess_5");
+
+    await executeCodex({ prompt: "hello" }, sessionManager, cwd, {
+      ...DEFAULTS,
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+    });
+
+    expect(createSession).toHaveBeenCalledWith(
+      "hello",
+      cwd,
+      {
+        profile: undefined,
+        model: undefined,
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+        config: undefined,
+      },
+      "low",
+      { approvalTimeoutMs: 60000 }
+    );
+  });
+
+  it("refuses to start a turn whose permission level nobody stated", async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "codex-tool-"));
+    tempDirs.push(cwd);
+    const { createSession, sessionManager } = stubManager("sess_6");
+
+    await expect(
+      executeCodex({ prompt: "hello", sandbox: "read-only" }, sessionManager, cwd, DEFAULTS)
+    ).rejects.toThrow("approvalPolicy is required");
+    await expect(
+      executeCodex({ prompt: "hello", approvalPolicy: "never" }, sessionManager, cwd, DEFAULTS)
+    ).rejects.toThrow("sandbox is required");
+
+    expect(createSession).not.toHaveBeenCalled();
   });
 });

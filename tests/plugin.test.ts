@@ -7,9 +7,10 @@ import { resolveSessionDefaults } from "../src/utils/session-defaults.js";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
 
+const PLUGIN_SERVER = JSON.parse(read("plugins/codex-mcp/.mcp.json")).mcpServers["codex-mcp"];
+
 describe("the server the plugin starts", () => {
-  const config = JSON.parse(read("plugins/codex-mcp/.mcp.json"));
-  const server = config.mcpServers["codex-mcp"];
+  const server = PLUGIN_SERVER;
 
   it("is bunx on the version this repository publishes", () => {
     const version = JSON.parse(read("package.json")).version;
@@ -18,12 +19,15 @@ describe("the server the plugin starts", () => {
   });
 
   // The subagent runs on Haiku and names none of these, so the plugin is where
-  // the model, the effort and the approval timeout of every session are set.
-  it("names the model, the effort and the approval timeout a session starts on", () => {
+  // every session's model, effort, approval timeout, approval policy and
+  // sandbox are set.
+  it("names what a session starts on, down to the permission level of the turn", () => {
     expect(resolveSessionDefaults(server.env)).toEqual({
       model: "gpt-5.6-luna",
       effort: "high",
       approvalTimeoutMs: 900_000,
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
     });
   });
 
@@ -69,9 +73,21 @@ describe("the driver the plugin ships", () => {
     expect(agent).toContain("model: haiku");
   });
 
-  it("starts Codex unfenced unless the delegator fenced it", () => {
-    expect(agent).toContain("`approvalPolicy: never`");
-    expect(agent).toContain("`sandbox: danger-full-access`");
+  // `.mcp.json` is where a session's model, effort, approval timeout, approval
+  // policy and sandbox are stated. A copy in the driver's prose is a second
+  // place to change and a Haiku turn away from disagreeing with the server.
+  it("repeats none of the values .mcp.json sets", () => {
+    const defaults = resolveSessionDefaults(PLUGIN_SERVER.env);
+    const named = [
+      `model: ${defaults.model}`,
+      `effort: ${defaults.effort}`,
+      `approvalPolicy: ${defaults.approvalPolicy}`,
+      `sandbox: ${defaults.sandbox}`,
+      `approvalTimeoutMs: ${defaults.approvalTimeoutMs}`,
+    ];
+    for (const line of named) {
+      expect(agent, `the driver names ${line} itself`).not.toContain(line);
+    }
   });
 
   it("proxies every prompt to Codex rather than answering one", () => {
