@@ -8,6 +8,7 @@ import type {
   SessionStatus,
 } from "../types.js";
 import type { SessionManager } from "../session/manager.js";
+import type { ProgressReporter } from "./progress-notifier.js";
 
 const TERMINAL_STATUSES = new Set<SessionStatus>(["idle", "error", "cancelled", "abandoned"]);
 
@@ -76,7 +77,8 @@ export async function waitForCodexSessionForegroundResult(
   sessionManager: SessionManager,
   sessionId: string,
   waitForResultMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  progress?: ProgressReporter
 ): Promise<{
   status: SessionStatus;
   result?: CheckResult["result"];
@@ -86,16 +88,41 @@ export async function waitForCodexSessionForegroundResult(
 }> {
   const deadline = Date.now() + Math.min(waitForResultMs, 300_000);
 
+  // What the turn says it is doing, reported out of this held call as it
+  // happens. Everything below returns, so the unsubscribe runs in a finally.
+  let stopReporting: (() => void) | undefined;
+  if (progress) {
+    const current = sessionManager.getProgress(sessionId).activity;
+    if (current !== undefined) progress.report(current);
+    stopReporting = sessionManager.onActivity(sessionId, (activity) => progress.report(activity));
+  }
+  try {
+    return await foregroundWaitLoop(sessionManager, sessionId, deadline, signal);
+  } finally {
+    stopReporting?.();
+  }
+}
+
+async function foregroundWaitLoop(
+  sessionManager: SessionManager,
+  sessionId: string,
+  deadline: number,
+  signal?: AbortSignal
+): Promise<{
+  status: SessionStatus;
+  result?: CheckResult["result"];
+  completedAt?: string;
+  pendingActionTypes?: Array<"approval" | "user_input">;
+  fallbackReason?: ExecutionFallbackReason;
+}> {
   while (Date.now() < deadline) {
     // A session evicted mid-wait makes getSession throw SESSION_NOT_FOUND, and that reaches the
-    // caller: a status invented here would only make consumeTurnResult throw the same error one
+    // caller: a status invented here would only make terminalTurnResult throw the same error one
     // line down, and would tell the caller its turn ended when the session simply went away.
     const status = sessionManager.getSession(sessionId).status;
 
     if (TERMINAL_STATUSES.has(status)) {
-      // Consumed, not read: this call hands the answer to the caller, so a later
-      // codex_check reports the status alone rather than sending it a second time.
-      const finalResult = sessionManager.consumeTurnResult(sessionId);
+      const finalResult = sessionManager.terminalTurnResult(sessionId);
       return {
         status,
         result: finalResult,

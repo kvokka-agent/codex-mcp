@@ -8,13 +8,16 @@ import {
 } from "../src/utils/execution.js";
 import type { SessionManager } from "../src/session/manager.js";
 import { ErrorCode, type ProgressInfo, type SessionStatus } from "../src/types.js";
+import { ProgressReporter } from "../src/utils/progress-notifier.js";
 
 interface FakeManagerParts {
   statuses?: SessionStatus[];
   getSession?: (sessionId: string) => { status: SessionStatus };
-  consumeTurnResult?: (sessionId: string) => unknown;
+  terminalTurnResult?: (sessionId: string) => unknown;
   getPendingActionTypes?: (sessionId: string) => Array<"approval" | "user_input">;
   waitForChange?: (sessionId: string, timeoutMs: number, signal?: AbortSignal) => Promise<unknown>;
+  getProgress?: (sessionId: string) => Partial<ProgressInfo>;
+  onActivity?: (sessionId: string, listener: (activity: string) => void) => () => void;
 }
 
 /** Minimal stand-in for the SessionManager dependency (not the unit under test). */
@@ -24,9 +27,11 @@ function fakeManager(parts: FakeManagerParts): SessionManager {
     getSession:
       parts.getSession ??
       (() => ({ status: statuses.length > 1 ? statuses.shift()! : statuses[0]! })),
-    consumeTurnResult: parts.consumeTurnResult ?? (() => undefined),
+    terminalTurnResult: parts.terminalTurnResult ?? (() => undefined),
     getPendingActionTypes: parts.getPendingActionTypes ?? (() => []),
     waitForChange: parts.waitForChange ?? (async () => undefined),
+    getProgress: parts.getProgress ?? (() => ({})),
+    onActivity: parts.onActivity ?? (() => () => {}),
   } as unknown as SessionManager;
 }
 
@@ -144,11 +149,39 @@ describe("coerceProgressForStatus", () => {
 });
 
 describe("waitForCodexSessionForegroundResult", () => {
+  it("reports the turn's activity while it holds the foreground wait", async () => {
+    const sent: string[] = [];
+    const reporter = new ProgressReporter("tok-1", async (n) => {
+      if (n.params.message !== undefined) sent.push(n.params.message);
+    });
+    let announce: ((activity: string) => void) | undefined;
+    const manager = fakeManager({
+      statuses: ["running", "running", "idle"],
+      getProgress: () => ({ activity: "Читаю тест" }),
+      onActivity: (_sessionId, listener) => {
+        announce = listener;
+        return () => {
+          announce = undefined;
+        };
+      },
+      waitForChange: async () => {
+        announce?.("Правлю манифест");
+      },
+    });
+
+    await waitForCodexSessionForegroundResult(manager, "sess_1", 1_000, undefined, reporter);
+
+    // The line the session was already on, then the one the turn moved to. The
+    // subscription is given up when the call returns.
+    expect(sent).toEqual(["Читаю тест", "Правлю манифест"]);
+    expect(announce).toBeUndefined();
+  });
+
   it("returns the stored result as soon as the session is terminal", async () => {
     const result = { completedAt: "2024-03-03T00:00:00.000Z", text: "done" };
     const manager = fakeManager({
       statuses: ["idle"],
-      consumeTurnResult: () => result,
+      terminalTurnResult: () => result,
     });
 
     const out = await waitForCodexSessionForegroundResult(manager, "sess_1", 5_000);
@@ -160,7 +193,7 @@ describe("waitForCodexSessionForegroundResult", () => {
   });
 
   it("falls back to the current time when the result carries no completion timestamp", async () => {
-    const manager = fakeManager({ statuses: ["error"], consumeTurnResult: () => undefined });
+    const manager = fakeManager({ statuses: ["error"], terminalTurnResult: () => undefined });
     const out = await waitForCodexSessionForegroundResult(manager, "sess_1", 5_000);
     expect(out.status).toBe("error");
     expect(out.result).toBeUndefined();
@@ -168,14 +201,14 @@ describe("waitForCodexSessionForegroundResult", () => {
   });
 
   it("lets a session evicted mid-wait reach the caller as the lookup error", async () => {
-    // A status invented here would claim the turn ended, and consumeTurnResult would throw the same
+    // A status invented here would claim the turn ended, and terminalTurnResult would throw the same
     // error one line down anyway.
     const manager = fakeManager({
       getSession: () => {
         throw new Error(`Error [${ErrorCode.SESSION_NOT_FOUND}]: Session 'sess_1' not found`);
       },
-      consumeTurnResult: () => {
-        throw new Error("consumeTurnResult must not be reached for a session that is gone");
+      terminalTurnResult: () => {
+        throw new Error("terminalTurnResult must not be reached for a session that is gone");
       },
     });
 
@@ -202,7 +235,7 @@ describe("waitForCodexSessionForegroundResult", () => {
     const manager = fakeManager({
       statuses: ["running", "running", "idle"],
       waitForChange,
-      consumeTurnResult: () => ({ completedAt: "2024-04-04T00:00:00.000Z" }),
+      terminalTurnResult: () => ({ completedAt: "2024-04-04T00:00:00.000Z" }),
     });
 
     const out = await waitForCodexSessionForegroundResult(manager, "sess_1", 5_000);

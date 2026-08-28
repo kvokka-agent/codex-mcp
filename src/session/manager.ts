@@ -22,6 +22,7 @@ import {
   ActivityMarkerScanner,
   composeDeveloperInstructions,
   stripActivityMarkers,
+  stripActivityMarkersFromTurn,
 } from "./activity-marker.js";
 import {
   buildEffortFallbackWarning,
@@ -62,6 +63,7 @@ import {
   type CheckResult,
   type PendingAction,
   type TurnResult,
+  type LastTurnInfo,
   type NetworkPolicyAmendment,
   ErrorCode,
   SESSION_STATUSES,
@@ -586,7 +588,6 @@ export class SessionManager {
     // The finished turn's answer belongs to that turn: a check of the new one
     // reports the new result or none.
     session.lastResult = undefined;
-    session.resultDelivered = false;
     session.lastAgentMessageText = undefined;
 
     session.status = "running";
@@ -828,6 +829,27 @@ export class SessionManager {
     return buildProgressInfo(this.getSessionOrThrow(sessionId));
   }
 
+  /**
+   * Hear each new activity line of a session for as long as the returned
+   * function is not called.
+   *
+   * It is what a caller holding a tool call open reports upward while the turn
+   * runs. A long poll is not woken by it: the caller answers actions and
+   * statuses, and an activity line is neither.
+   */
+  onActivity(sessionId: string, listener: (activity: string) => void): () => void {
+    const session = this.getSessionOrThrow(sessionId);
+    let listeners = activityListeners.get(session);
+    if (!listeners) {
+      listeners = new Set();
+      activityListeners.set(session, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  }
+
   getPendingActionTypes(sessionId: string): Array<"approval" | "user_input"> {
     const session = this.getSessionOrThrow(sessionId);
     const actionTypes = new Set<"approval" | "user_input">();
@@ -902,9 +924,9 @@ export class SessionManager {
     // and the answer was gone from disk. The cancellation is in meta.json's
     // `cancelledAt`/`cancelledReason` and in the event log below.
     if (!session.lastResult) {
-      session.resultDelivered = false;
       session.lastResult = {
         turnId: cancelledTurnId,
+        outcome: "cancelled",
         status: "cancelled",
         error: session.cancelledReason,
         completedAt: new Date().toISOString(),
@@ -1378,11 +1400,8 @@ export class SessionManager {
    * The turn's own events are not part of it: Codex writes the whole transcript
    * to its rollout log under `~/.codex/sessions/`, and repeating it here would
    * put the run through the caller's context a second time.
-   *
-   * `consumeResult: false` reads the same payload but leaves the turn's answer
-   * undelivered, for a caller whose response the transport is going to drop.
    */
-  pollStatus(sessionId: string, options?: { consumeResult?: boolean }): CheckResult {
+  pollStatus(sessionId: string): CheckResult {
     const session = this.getSessionOrThrow(sessionId);
 
     const actions: PendingAction[] = [];
@@ -1417,22 +1436,22 @@ export class SessionManager {
         Array.from(new Set(actions.map((action) => action.type)))
       ),
       actions,
-      result: options?.consumeResult === false ? undefined : this.consumeTurnResult(sessionId),
+      result: this.terminalTurnResult(sessionId),
     };
   }
 
   /**
-   * The finished turn's answer, handed over once.
+   * The finished turn's answer, for as long as the session stands on it.
    *
-   * The caller that reads it has it; a later check of the same finished session
-   * reports the status alone rather than sending the answer through the context
-   * again.
+   * Every check of a terminal session carries it, not the first one alone. A
+   * caller that checks again — it retried, it lost the answer, its response was
+   * dropped by a transport that cut the call — reads the answer back instead of
+   * an empty result it then fills in from memory. Only the next turn replaces
+   * it.
    */
-  consumeTurnResult(sessionId: string): TurnResult | undefined {
+  terminalTurnResult(sessionId: string): TurnResult | undefined {
     const session = this.getSessionOrThrow(sessionId);
     if (!TERMINAL_SESSION_STATUSES.has(session.status)) return undefined;
-    if (!session.lastResult || session.resultDelivered) return undefined;
-    session.resultDelivered = true;
     return session.lastResult;
   }
 
@@ -1816,13 +1835,15 @@ export class SessionManager {
           const askedForSchema = this.schemaConstrainedTurns.delete(sessionId);
           session.status = "idle";
           session.activeTurnId = undefined;
-          session.resultDelivered = false;
           session.lastResult = {
             turnId: completedTurnId,
+            outcome: "completed",
             text: finalText,
             output: rawTurnOutput,
             structuredOutput: askedForSchema ? parseStructuredOutput(finalText) : undefined,
-            turn: p.turn,
+            // The turn record carries the assistant text a second time, in
+            // `output` or `items[].text`, and that copy has seen no stripping.
+            turn: stripActivityMarkersFromTurn(p.turn),
             status: turnObj?.status as string | undefined,
             turnError: turnObj?.error,
             completedAt: new Date().toISOString(),
@@ -2677,9 +2698,9 @@ function setTerminalErrorResult(session: SessionInfo, message: string): void {
   const completedAt = new Date().toISOString();
   const failedTurnId = session.activeTurnId ?? "";
   session.activeTurnId = undefined;
-  session.resultDelivered = false;
   session.lastResult = {
     turnId: failedTurnId,
+    outcome: "error",
     status: "error",
     error: message,
     completedAt,
@@ -2859,6 +2880,15 @@ const eventSinks = new WeakMap<SessionInfo, EventSink>();
 /** Marker scanner per session; a dropped session takes its carry buffer with it. */
 const activityScanners = new WeakMap<SessionInfo, ActivityMarkerScanner>();
 
+/**
+ * Who to tell when a session says what it is doing now.
+ *
+ * A caller holding a tool call open on this session subscribes here. It is not
+ * `waitForChange`: an activity line is not something the caller answers, so it
+ * must not end the wait — it only travels alongside it.
+ */
+const activityListeners = new WeakMap<SessionInfo, Set<(activity: string) => void>>();
+
 function scannerOf(session: SessionInfo): ActivityMarkerScanner {
   let scanner = activityScanners.get(session);
   if (!scanner) {
@@ -2882,6 +2912,18 @@ function recordActivity(session: SessionInfo, activity: string, itemId?: string)
   next.activity = activity;
   session.progressState = next;
   recordEvent(session, "activity", { activity, turnId: session.activeTurnId, itemId });
+  for (const listener of activityListeners.get(session) ?? []) {
+    try {
+      listener(activity);
+    } catch (err: unknown) {
+      // A listener writes to a client this server does not own. Its failure is
+      // the caller's to survive, and the turn goes on either way.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[codex-mcp] Activity listener failed for session '${session.sessionId}': ${message}`
+      );
+    }
+  }
 }
 
 function setEventSink(session: SessionInfo, sink: EventSink): void {
@@ -2928,7 +2970,26 @@ function toPublicInfo(session: SessionInfo, owner?: SessionOwnership): PublicSes
     pendingRequestCount: Array.from(session.pendingRequests.values()).filter((r) => !r.resolved)
       .length,
     activity: session.progressState?.activity,
+    lastTurn: lastTurnInfo(session),
     owner,
+  };
+}
+
+/**
+ * What the session's last turn came to, read off the result the session kept.
+ *
+ * A cancel that follows a finished turn keeps that result (`performCancelSession`),
+ * so this survives closing the session while `status` does not.
+ */
+function lastTurnInfo(session: SessionInfo): LastTurnInfo | undefined {
+  const result = session.lastResult;
+  if (!result) return undefined;
+  return {
+    turnId: result.turnId,
+    outcome: result.outcome,
+    status: result.status,
+    completedAt: result.completedAt,
+    error: result.error,
   };
 }
 

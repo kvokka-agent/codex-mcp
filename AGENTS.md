@@ -169,6 +169,12 @@ These are the patterns a change keeps, each of them written after it was broken:
 
 - Branches: `feat/<name>`, `fix/<name>`, `refactor/<name>`, `docs/<name>`.
 - Conventional Commits.
+- **`upstream/master` is the tip every branch is cut from.** `origin` here is a
+  fork such as `kvokka-agent/codex-mcp`, and its `master` is whatever the last
+  push left there — measured two releases behind. So a worktree starts with
+  `git fetch upstream && git worktree add .worktrees/<name> -b <branch> upstream/master`,
+  and a branch cut from `origin/master` is rebuilt on `upstream/master` before
+  it goes anywhere.
 - Open every pull request against `kvokka/codex-mcp`; a fork such as
   `kvokka-agent/codex-mcp` only holds the branch:
   `gh pr create --repo kvokka/codex-mcp --base master --head <fork-owner>:<branch>`.

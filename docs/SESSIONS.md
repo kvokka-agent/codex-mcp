@@ -28,8 +28,9 @@ a stretch that would otherwise be dozens of round trips. Message deltas,
 reasoning, command output and token counters move nothing the caller acts on and
 do not end the wait.
 
-One wait is capped at 120,000 ms. A turn that runs longer is carried by calling
-again: the cap bounds a single call, not a turn. A wait that reaches the cap
+One wait is capped at 3,600,000 ms, and cut further to what the MCP client will
+hold a tool call open for. A turn that runs longer is carried by calling again:
+the cap bounds a single call, not a turn. A wait that reaches the cap
 answers with the current status and no error, so a caller cannot tell a timeout
 from a quiet turn and does not need to.
 
@@ -84,6 +85,20 @@ whenever it starts something new, in the language of the request.
 Every extracted line is also appended to the session's `events.jsonl` as an
 `activity` record, so a reader of the state directory gets the sequence of what
 a session was doing without reading the raw stream around it.
+
+### While the call is still held
+
+A caller that put `_meta.progressToken` on its `tools/call` is sent each new
+activity line as `notifications/progress`, with the line as the notification's
+`message`, for as long as that call is held — a long poll of `codex_check`, or
+the foreground wait of `codex` and `codex_reply`. An MCP client renders that
+message under the running tool call, so a turn that takes an hour shows what it
+is doing instead of one silent call.
+
+It travels alongside the wait and never ends it: the caller answers statuses and
+actions, and an activity line is neither. A call that carried no progress token
+is sent nothing — the client did not ask, and the protocol has no other place to
+put the line.
 
 ## Approvals and questions
 

@@ -20,6 +20,7 @@ import {
   MAX_ACTIVITY_LENGTH,
   composeDeveloperInstructions,
   stripActivityMarkers,
+  stripActivityMarkersFromTurn,
 } from "../src/session/activity-marker.js";
 import { SessionManager } from "../src/session/manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
@@ -204,6 +205,32 @@ describe("stripActivityMarkers", () => {
   it("leaves a percent run that carries no tag", () => {
     const text = "Покрытие 90%%% строк, формат %%%s.";
     expect(stripActivityMarkers(text)).toBe(text);
+  });
+});
+
+describe("stripActivityMarkersFromTurn", () => {
+  it("cuts the markers out of the turn's own copy of the text", () => {
+    const turn = stripActivityMarkersFromTurn({
+      id: "turn_1",
+      status: "completed",
+      output: "%%%ACTIVITY: Читаю тест%%%\nответ",
+      items: [
+        { id: "i1", type: "agentMessage", text: "%%%ACTIVITY: Читаю тест%%%\nответ" },
+        { id: "i2", type: "commandExecution", command: "ls" },
+      ],
+    }) as { id: string; output: string; items: Array<Record<string, unknown>> };
+
+    expect(turn.output).toBe("ответ");
+    expect(turn.items[0].text).toBe("ответ");
+    // Everything the turn carries beyond those two fields is passed through.
+    expect(turn.id).toBe("turn_1");
+    expect(turn.items[1]).toEqual({ id: "i2", type: "commandExecution", command: "ls" });
+  });
+
+  it("leaves the turn as it came when it is not a record", () => {
+    expect(stripActivityMarkersFromTurn(undefined)).toBeUndefined();
+    expect(stripActivityMarkersFromTurn("plain")).toBe("plain");
+    expect(stripActivityMarkersFromTurn([1, 2])).toEqual([1, 2]);
   });
 });
 

@@ -23,6 +23,7 @@ import {
   recommendedNextActionForStatus,
   waitForCodexSessionForegroundResult,
 } from "../utils/execution.js";
+import type { ProgressReporter } from "../utils/progress-notifier.js";
 
 function safeGetProgress(
   sessionManager: SessionManager,
@@ -73,7 +74,8 @@ export type CodexReplyResult =
 export async function executeCodexReply(
   args: CodexReplyParams,
   sessionManager: SessionManager,
-  requestSignal?: AbortSignal
+  requestSignal?: AbortSignal,
+  progress?: ProgressReporter
 ): Promise<CodexReplyResult> {
   const startResult = await sessionManager.replyToSession(args.sessionId, args.prompt, {
     model: args.model,
@@ -110,7 +112,8 @@ export async function executeCodexReply(
     sessionManager,
     startResult.sessionId,
     waitMs,
-    requestSignal
+    requestSignal,
+    progress
   );
   return {
     sessionId: startResult.sessionId,
