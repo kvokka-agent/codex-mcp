@@ -322,9 +322,9 @@ pass as `permissions`, each with its `allowed` flag and its description. This is
 where they live because they are read out of the user's `config.toml` and the
 project layers under `cwd`: only a call to the local Codex can name them, and
 `codex-mcp:///config` and `codex-mcp:///delegation-guide` are static text built
-from the server's own defaults. Reading them rides the `codex app-server` this
-tool stands up for `account/read`, which is what makes it the slowest of the
-five. `profiles` is absent where the listing failed or was never run, which is
+from the server's own defaults. Reading them stands up a `codex app-server`, a
+second one beside the connection `account/read` uses, which is what makes this
+tool the slowest of the five. `profiles` is absent where the listing failed or was never run, which is
 not a machine that offers none; `detail` says which of the two it was, and a
 failure also reaches `warnings` and `nextSteps`.
 
