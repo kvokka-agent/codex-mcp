@@ -257,6 +257,7 @@ const MODELLED_TYPES: Record<string, string> = {
   ReasoningTextDeltaNotification: "ReasoningDeltaParams",
   TurnStartedNotification: "TurnNotificationParams",
   TurnCompletedNotification: "TurnNotificationParams",
+  PermissionProfileListParams: "PermissionProfileListParams",
   ItemGuardianApprovalReviewStartedNotification: "AutoApprovalReviewStartedParams",
   ItemGuardianApprovalReviewCompletedNotification: "AutoApprovalReviewCompletedParams",
   StrictReviewRequiredNotification: "StrictReviewRequiredParams",
@@ -308,6 +309,7 @@ const MODELLED_RESULTS: Record<string, string> = {
   ThreadForkResult: "v2/ThreadForkResponse.json",
   ThreadResumeResult: "v2/ThreadResumeResponse.json",
   TurnStartResult: "v2/TurnStartResponse.json",
+  PermissionProfileListResult: "v2/PermissionProfileListResponse.json",
 };
 
 /**

@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { executeCodexSetup } from "../src/tools/codex-setup.js";
+import type { PermissionProfileSummary } from "../src/app-server/protocol.js";
+import { executeCodexSetup, type PermissionProfileLister } from "../src/tools/codex-setup.js";
 import { isCodexCliBelowMinimum } from "../src/utils/codex-version.js";
 import { mockModule } from "./helpers/mock.js";
 
@@ -28,6 +29,14 @@ let root: string;
 let home: string;
 let serverCwd: string;
 const envBackup = { ...process.env };
+
+/** What the stubbed `permissionProfile/list` answers, or the failure it raises. */
+let profilesResult: (() => Promise<PermissionProfileSummary[]>) | null = null;
+const listProfiles: PermissionProfileLister = (cwd) => {
+  listedCwds.push(cwd);
+  return (profilesResult ?? (async () => []))();
+};
+const listedCwds: string[] = [];
 
 function makeExecutable(dir: string, name: string): string {
   mkdirSync(dir, { recursive: true });
@@ -72,6 +81,8 @@ beforeEach(() => {
   versionResult = { status: 0, stdout: "codex-cli 0.150.1", stderr: "" };
   loginStatus(0, "Logged in as tester");
   installSpawnStub();
+  profilesResult = null;
+  listedCwds.length = 0;
 
   delete process.env.CODEX_MCP_COMMAND;
   process.env.CODEX_MCP_STATE_DIR = path.join(root, "state");
@@ -91,7 +102,7 @@ afterEach(() => {
 describe("executeCodexSetup", () => {
   it("reports a ready environment", async () => {
     writeConfig(home);
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
 
     expect(result.ready).toBe(true);
     expect(result.cwd).toBe(serverCwd);
@@ -123,7 +134,7 @@ describe("executeCodexSetup", () => {
   });
 
   it("probes auth with the resolved executable", async () => {
-    await executeCodexSetup(undefined, serverCwd);
+    await executeCodexSetup(undefined, serverCwd, listProfiles);
 
     const [cmd, args, opts] = spawnSyncMock.mock.calls[0] as [
       string,
@@ -140,19 +151,19 @@ describe("executeCodexSetup", () => {
     mkdirSync(projectCwd, { recursive: true });
     writeConfig(projectCwd);
 
-    const result = await executeCodexSetup({ cwd: projectCwd }, serverCwd);
+    const result = await executeCodexSetup({ cwd: projectCwd }, serverCwd, listProfiles);
     expect(result.cwd).toBe(projectCwd);
     expect(result.projectContext).toEqual({ hasUserConfig: false, hasProjectConfig: true });
     expect(result.warnings).toEqual([]);
   });
 
   it("falls back to the server cwd for a blank input cwd", async () => {
-    const result = await executeCodexSetup({ cwd: "   " }, serverCwd);
+    const result = await executeCodexSetup({ cwd: "   " }, serverCwd, listProfiles);
     expect(result.cwd).toBe(serverCwd);
   });
 
   it("warns when no Codex config is present anywhere", async () => {
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(result.warnings).toContain(
       "No Codex config.toml was found in ~/.codex or this project."
     );
@@ -162,7 +173,7 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     loginStatus(1, "", "Not logged in. Run codex login first.");
 
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(result.auth).toEqual({
       ok: false,
       state: "unauthenticated",
@@ -178,7 +189,7 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     loginStatus(7, "unexpected output");
 
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(result.auth.state).toBe("unknown");
     expect(result.auth.ok).toBe(false);
     expect(result.ready).toBe(false);
@@ -190,7 +201,7 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     loginStatus(0, "", "");
 
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(result.auth.detail).toBe("Authenticated.");
   });
 
@@ -198,7 +209,7 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     authResult = { status: null, error: new Error("spawn ENOENT") };
 
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(result.auth).toEqual({
       ok: false,
       state: "unknown",
@@ -212,7 +223,7 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     process.env.CODEX_MCP_PATH = makeExecutable(path.join(root, "bin"), "codex-internal");
 
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(spawnSyncMock.mock.calls.map(([, args]) => args)).toEqual([["--version"]]);
     expect(result.auth.ok).toBe(true);
     expect(result.auth.state).toBe("unknown");
@@ -227,7 +238,7 @@ describe("executeCodexSetup", () => {
     delete process.env.CODEX_MCP_PATH;
     process.env.PATH = "";
 
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(result.executable.ok).toBe(false);
     expect(result.executable.source).toBe("default");
     expect(result.executable.detail).toContain("No codex executable was auto-detected");
@@ -254,7 +265,7 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     process.env.CODEX_MCP_COMMAND = "codex";
 
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(result.executable.source).toBe("error");
     expect(result.executable.ok).toBe(false);
     expect(result.executable.command).toBeUndefined();
@@ -271,7 +282,7 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     versionResult = { status: 0, stdout: "codex-cli 0.100.0", stderr: "" };
 
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(result.backend.ok).toBe(false);
     expect(result.backend.cliVersion).toBe("0.100.0");
     expect(result.warnings).toContain(
@@ -286,7 +297,7 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     versionResult = { status: 1, stdout: "", stderr: "error: unrecognized argument '--version'\n" };
 
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(result.backend).toEqual({
       ok: false,
       cliVersion: null,
@@ -301,18 +312,18 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     versionResult = { status: 0, stdout: "codex-cli 0.101.0", stderr: "" };
 
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(result.backend.ok).toBe(true);
     expect(result.ready).toBe(true);
   });
 
   it("defaults the state dir under the home directory", async () => {
     delete process.env.CODEX_MCP_STATE_DIR;
-    const result = await executeCodexSetup(undefined, serverCwd);
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(result.runtime.stateDir).toBe(path.join(home, ".codex-mcp", "state"));
 
     process.env.CODEX_MCP_STATE_DIR = "   ";
-    const blank = await executeCodexSetup(undefined, serverCwd);
+    const blank = await executeCodexSetup(undefined, serverCwd, listProfiles);
     expect(blank.runtime.stateDir).toBe(path.join(home, ".codex-mcp", "state"));
   });
 });
@@ -335,5 +346,80 @@ describe("isCodexCliBelowMinimum", () => {
     // own branch — never as an old CLI this ranked and refused.
     expect(isCodexCliBelowMinimum("0.150")).toBe(false);
     expect(isCodexCliBelowMinimum("nightly")).toBe(false);
+  });
+});
+
+describe("executeCodexSetup permission profiles", () => {
+  it("names the ids a codex call may pass as permissions", async () => {
+    profilesResult = async () => [
+      { id: ":read-only", allowed: true, description: "Reads only" },
+      { id: ":workspace", allowed: true },
+      { id: ":danger-full-access", allowed: false },
+    ];
+
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+
+    expect(listedCwds).toEqual([serverCwd]);
+    expect(result.permissionProfiles.ok).toBe(true);
+    expect(result.permissionProfiles.profiles?.map((profile) => profile.id)).toEqual([
+      ":read-only",
+      ":workspace",
+      ":danger-full-access",
+    ]);
+    // The detail names the selectable ones only; `allowed: false` is a distinct
+    // case the profile list itself still carries.
+    expect(result.permissionProfiles.detail).toBe(
+      "Pass one of these ids as `permissions`: :read-only, :workspace."
+    );
+    expect(result.warnings).not.toContain(result.permissionProfiles.detail);
+  });
+
+  it("resolves the profiles of the cwd the call named", async () => {
+    profilesResult = async () => [];
+    const projectCwd = path.join(root, "project");
+    mkdirSync(projectCwd, { recursive: true });
+
+    const result = await executeCodexSetup({ cwd: projectCwd }, serverCwd, listProfiles);
+
+    expect(listedCwds).toEqual([projectCwd]);
+    expect(result.permissionProfiles).toEqual({
+      ok: true,
+      profiles: [],
+      detail: "This machine offers no permission profile; `permissions` has no id to name here.",
+    });
+  });
+
+  it("carries a listing that failed through instead of answering with no profiles", async () => {
+    profilesResult = async () => {
+      throw new Error("permissionProfile/list timed out after 30000ms");
+    };
+
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+
+    expect(result.permissionProfiles.ok).toBe(false);
+    expect(result.permissionProfiles.profiles).toBeUndefined();
+    expect(result.permissionProfiles.detail).toBe(
+      "Failed to list permission profiles: permissionProfile/list timed out after 30000ms"
+    );
+    expect(result.warnings).toContain(result.permissionProfiles.detail);
+    expect(result.nextSteps).toContain(
+      "Start a session with `sandbox` rather than `permissions` until the profile listing answers."
+    );
+  });
+
+  it("does not list profiles when no codex executable resolved", async () => {
+    delete process.env.CODEX_MCP_PATH;
+    process.env.PATH = "";
+    profilesResult = async () => {
+      throw new Error("this lister must not run");
+    };
+
+    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+
+    expect(listedCwds).toEqual([]);
+    expect(result.permissionProfiles).toEqual({
+      ok: false,
+      detail: "Permission profiles not listed because no codex executable was detected.",
+    });
   });
 });

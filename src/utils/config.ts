@@ -20,6 +20,7 @@ export interface CodexToolParams {
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
   approvalsReviewer?: ApprovalsReviewer;
+  permissions?: string;
   effort?: EffortLevel;
   advanced?: {
     baseInstructions?: string;
@@ -42,7 +43,11 @@ export function extractSpawnOptions(
     profile: params.profile,
     model: params.model ?? defaults.model,
     approvalPolicy: params.approvalPolicy ?? defaults.approvalPolicy,
-    sandbox: params.sandbox ?? defaults.sandbox,
+    // A call that names a profile takes no sandbox at all, the environment's
+    // default included: `thread/start` refuses the two together with
+    // `-32600 \`permissions\` cannot be combined with \`sandbox\``, and
+    // `-c sandbox_mode=` on the spawn would fight the profile besides.
+    sandbox: params.permissions === undefined ? (params.sandbox ?? defaults.sandbox) : undefined,
     config: params.advanced?.config,
   };
 }

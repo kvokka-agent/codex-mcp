@@ -161,8 +161,14 @@ function configTopLevelLines(defaults: SessionDefaults): string[] {
   return [
     "## Top-level parameters (`codex`)",
     "",
-    `- Required: ${["`prompt`", defaults.approvalPolicy ? "" : "`approvalPolicy`", defaults.sandbox ? "" : "`sandbox`"].filter(Boolean).join(", ")}.`,
-    `- Optional: ${defaults.approvalPolicy ? `\`approvalPolicy\` (default \`${defaults.approvalPolicy}\`), ` : ""}${defaults.sandbox ? `\`sandbox\` (default \`${defaults.sandbox}\`), ` : ""}\`approvalsReviewer\` (default \`user\`), \`effort\` (default \`${defaults.effort}\`), \`cwd\` (default server cwd), \`model\` (default ${defaults.model ? `\`${defaults.model}\`` : "config.toml"}), \`profile\` (default CLI profile), \`advanced\`.`,
+    `- Required: ${["`prompt`", defaults.approvalPolicy ? "" : "`approvalPolicy`"].filter(Boolean).join(", ")}.`,
+    `- Optional: ${defaults.approvalPolicy ? `\`approvalPolicy\` (default \`${defaults.approvalPolicy}\`), ` : ""}\`sandbox\`${defaults.sandbox ? ` (default \`${defaults.sandbox}\`)` : ""}, \`permissions\`, \`approvalsReviewer\` (default \`user\`), \`effort\` (default \`${defaults.effort}\`), \`cwd\` (default server cwd), \`model\` (default ${defaults.model ? `\`${defaults.model}\`` : "config.toml"}), \`profile\` (default CLI profile), \`advanced\`.`,
+    defaults.sandbox
+      ? "- Name `sandbox` or `permissions`, never both. A call that names neither starts on the sandbox `" +
+        defaults.sandbox +
+        "`."
+      : "- Name `sandbox` or `permissions`: the call carries one of the two, and never both.",
+    "- `permissions`: a named profile id such as `:read-only` or `:workspace`, from a `[permissions.<id>]` table of the Codex config. It carries the sandbox and the approval policy the profile sets, and `codex_setup` lists the ids this machine offers. An id it does not offer is refused before the thread starts, with the list of the ids it does.",
     "- Prefer passing `cwd` explicitly to avoid accidental server-cwd execution.",
     `- \`approvalsReviewer\`: who decides an approval the turn raises. \`user\` reports it in \`codex_check.actions[]\` for you to answer; \`auto_review\` hands it to a Codex subagent that decides it inside Codex, and a review that denies an action arrives as \`progress.activity\` and as an \`approval_result\` record in the session's event log.`,
     "",
@@ -192,19 +198,20 @@ function configMappingLines(): string[] {
     "- `codex.model` -> `-c model=...`",
     "- `codex.approvalPolicy` -> `-c approval_policy=...`",
     "- `codex.sandbox` -> `-c sandbox_mode=...`",
+    "- `codex.permissions` -> `thread/start.permissions`; no `-c` flag, and no `-c sandbox_mode=` is sent with it",
     "- `codex.effort` -> turn-level reasoning effort (do not encode in `advanced.config`)",
     "- `codex.profile` -> `-p ...`",
     "",
     "## `codex_reply` differences",
     "",
     "- `codex_reply.outputSchema` is top-level; `codex` takes the same schema as `advanced.outputSchema`.",
-    "- `codex_reply` can override `model`, `approvalPolicy`, `approvalsReviewer`, `sandbox`, `effort`, `summary`, `personality`, and `cwd`.",
+    "- `codex_reply` can override `model`, `approvalPolicy`, `approvalsReviewer`, `sandbox` or `permissions`, `effort`, `summary`, `personality`, and `cwd`.",
     "- `codex_reply` only works when session state is `idle` or `error`; otherwise returns `SESSION_BUSY`.",
     "- All `codex_reply` override fields default to no override when omitted.",
     "",
     "## Override persistence (`codex_reply`)",
     "",
-    "- `model`, `approvalPolicy`, `approvalsReviewer`, `sandbox`, and `cwd` update in-memory session defaults for later turns.",
+    "- `model`, `approvalPolicy`, `approvalsReviewer`, `sandbox`, `permissions`, and `cwd` update in-memory session defaults for later turns.",
     "- `effort`, `summary`, `personality`, and `outputSchema` apply to the submitted turn payload.",
     "",
   ];
@@ -482,6 +489,8 @@ function delegationTaskLines(): string[] {
     "| Network access needed | `on-request` | `danger-full-access` | Rare; avoid unless genuinely required |",
     "",
     "**Key rule:** `read-only` sandbox already prevents writes, so `approvalPolicy: 'never'` is safe with it. Avoid `untrusted` + `read-only` — every read command triggers approval for no safety gain.",
+    "",
+    "A `permissions` profile id replaces the `sandbox` column: it carries the sandbox and the approval policy its `[permissions.<id>]` table sets. Name one or the other, never both. `codex_setup` lists the ids this machine offers.",
     "",
   ];
 }

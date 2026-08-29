@@ -22,6 +22,7 @@ export interface CodexReplyParams {
   model?: string;
   approvalPolicy?: ApprovalPolicy;
   approvalsReviewer?: ApprovalsReviewer;
+  permissions?: string;
   effort?: EffortLevel;
   summary?: SummaryMode;
   personality?: Personality;
@@ -40,6 +41,7 @@ export async function executeCodexReply(
     model: args.model,
     approvalPolicy: args.approvalPolicy,
     approvalsReviewer: args.approvalsReviewer,
+    permissions: args.permissions,
     effort: args.effort,
     summary: args.summary,
     personality: args.personality,

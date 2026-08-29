@@ -58,6 +58,7 @@ interface PersistedSessionMeta {
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
   approvalsReviewer?: ApprovalsReviewer;
+  permissions?: string;
   profile?: string;
   personality?: Personality;
   effort?: EffortLevel;
@@ -164,6 +165,7 @@ export class SessionPersistence {
       approvalPolicy: session.approvalPolicy,
       sandbox: session.sandbox,
       approvalsReviewer: session.approvalsReviewer,
+      permissions: session.permissions,
       profile: session.profile,
       personality: session.personality,
       effort: session.effort,

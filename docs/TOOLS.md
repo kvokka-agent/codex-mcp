@@ -20,7 +20,8 @@ Starts a session and returns as soon as the thread does. Poll it with
 | --- | --- | --- | --- |
 | `prompt` | string | yes | — |
 | `approvalPolicy` | `untrusted` \| `on-request` \| `never` | unless `CODEX_MCP_DEFAULT_APPROVAL_POLICY` is set | that variable |
-| `sandbox` | `read-only` \| `workspace-write` \| `danger-full-access` | unless `CODEX_MCP_DEFAULT_SANDBOX` is set | that variable |
+| `sandbox` | `read-only` \| `workspace-write` \| `danger-full-access` | unless `permissions` names a profile or `CODEX_MCP_DEFAULT_SANDBOX` is set | that variable |
+| `permissions` | string, a profile id | no | — |
 | `approvalsReviewer` | `user` \| `auto_review` | no | `user` |
 | `effort` | any non-empty string; Codex 0.150.1 advertises `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | no | `CODEX_MCP_DEFAULT_EFFORT`, else `low` |
 | `cwd` | string | no | the server's cwd |
@@ -38,6 +39,26 @@ server never picks one on its own: where its variable is unset the parameter
 stays required, and where it is set the schema publishes it as optional with
 that value as its default. The tool description a client reads carries the
 values in force, so `tools/list` says what a session will actually start on.
+
+A call names `sandbox` or `permissions`, never both: a profile carries the
+sandbox its `[permissions.<id>]` table sets, and `thread/start` refuses the pair
+with `-32600 \`permissions\` cannot be combined with \`sandbox\``. The zod schema
+refuses it first, and it refuses a call that names neither where
+`CODEX_MCP_DEFAULT_SANDBOX` is unset. A call that names a profile takes no
+sandbox at all — the environment default included — and the spawn sends no
+`-c sandbox_mode=` with it.
+
+`permissions` is a profile id such as `:read-only`, `:workspace` or one of the
+`[permissions.<id>]` tables of the user's own `~/.codex/config.toml`. The id is
+held against `permissionProfile/list` before the thread starts, so an id this
+machine does not offer is refused with the ids it does, rather than reaching
+Codex as `failed to load configuration: default_permissions requires a
+\`[permissions]\` table` — a message about a TOML table the caller never wrote. A
+profile the listing marks `allowed: false` is reported as that, apart from one
+that does not exist, and a listing that itself failed is reported as a failure
+rather than taken for a pass. `codex_setup` names the ids this machine offers.
+The id is recorded on the session, so a fork and a resume restore it, and it
+replaces whatever `sandbox` the session ran under.
 
 `approvalsReviewer` says who decides an approval the turn raises. `user`, the
 default, routes it to the caller: `codex_check` reports it in `actions[]` and
@@ -81,7 +102,7 @@ Allowed while the session is `idle` or `error`. Anything else answers
 | --- | --- | --- |
 | `sessionId` | string | yes |
 | `prompt` | string | yes |
-| `model`, `approvalPolicy`, `approvalsReviewer`, `effort`, `summary`, `personality`, `sandbox`, `cwd` | as in `codex` | no |
+| `model`, `approvalPolicy`, `approvalsReviewer`, `effort`, `summary`, `personality`, `sandbox` or `permissions`, `cwd` | as in `codex` | no |
 | `outputSchema` | object | no |
 
 Returns what `codex` returns.
@@ -221,7 +242,18 @@ Takes an optional `cwd` and answers `ready`, the resolved `executable`, the
 `codex login status`), the `backend` (the Codex CLI version `codex --version`
 printed, the minimum this server drives, and whether the one found clears it),
 the `runtime` (state directory), `projectContext` (whether a user and a project
-`config.toml` exist), and `warnings` with `nextSteps`.
+`config.toml` exist), `permissionProfiles`, and `warnings` with `nextSteps`.
+
+`permissionProfiles` is `{ ok, profiles?, detail }` — the ids a `codex` call may
+pass as `permissions`, each with its `allowed` flag and its description. This is
+where they live because they are read out of the user's `config.toml` and the
+project layers under `cwd`: only a call to the local Codex can name them, and
+`codex-mcp:///config` and `codex-mcp:///delegation-guide` are static text built
+from the server's own defaults. Reading them stands up one `codex app-server`,
+which is what makes this tool the slowest of the five. `profiles` is absent
+where the listing failed or was never run, which is not a machine that offers
+none; `detail` says which of the two it was, and a failure also reaches
+`warnings` and `nextSteps`.
 
 `ready` is true only when all three clear: the executable resolves, the login
 probe answered `authenticated`, and the CLI is at or above `minimumCliVersion`.

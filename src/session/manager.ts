@@ -13,6 +13,7 @@ import {
   type FileChangeApprovalResponse,
   type LegacyApprovalResponse,
   Methods,
+  type PermissionProfileSummary,
   type RequestId,
   type TurnStartParams,
   toSandboxPolicy,
@@ -79,6 +80,10 @@ import {
   stripActivityMarkers,
   stripActivityMarkersFromTurn,
 } from "./activity-marker.js";
+import {
+  assertPermissionProfileSelectable,
+  listPermissionProfiles,
+} from "./permission-profiles.js";
 import type { PidDetails } from "./persistence.js";
 
 const AUTH_REFRESH_UNSUPPORTED_CODE = -32000;
@@ -142,6 +147,7 @@ interface CreateSessionAdvanced {
   baseInstructions?: string;
   developerInstructions?: string;
   approvalsReviewer?: ApprovalsReviewer;
+  permissions?: string;
   personality?: Personality;
   ephemeral?: boolean;
   config?: Record<string, unknown>;
@@ -513,6 +519,13 @@ export class SessionManager {
     // Start app-server subprocess
     await client.start(spawnOpts);
 
+    // An id Codex does not know fails `thread/start` with a message about a
+    // `[permissions]` TOML table the caller never wrote, so the id is held
+    // against the machine's own listing first.
+    if (session.permissions !== undefined) {
+      await assertPermissionProfileSelectable(client, session.permissions, session.cwd);
+    }
+
     // Start thread
     const threadStartResult = await client.threadStart({
       cwd: session.cwd,
@@ -525,6 +538,7 @@ export class SessionManager {
       developerInstructions: session.developerInstructions,
       config: advanced?.config,
       approvalsReviewer: session.approvalsReviewer,
+      permissions: session.permissions,
     });
     const threadId = extractThreadId(threadStartResult);
     session.threadId = threadId;
@@ -604,9 +618,18 @@ export class SessionManager {
 
     const client = this.getClientOrThrow(sessionId);
 
-    this.openReplyTurn(session);
-
     const resolvedCwd = resolveTurnCwd(session, sessionId, overrides);
+    // Held against the machine's listing before the session leaves `idle`, so a
+    // profile id nobody offers costs the caller an error and not a turn.
+    if (overrides?.permissions !== undefined) {
+      await assertPermissionProfileSelectable(
+        client,
+        overrides.permissions,
+        resolvedCwd ?? session.cwd
+      );
+    }
+
+    this.openReplyTurn(session);
 
     const turnParams = buildTurnParams(session, session.threadId, prompt, overrides, resolvedCwd);
 
@@ -653,6 +676,30 @@ export class SessionManager {
   }
 
   // ── Session Management ───────────────────────────────────────────
+
+  /**
+   * The permission profiles this machine offers for `cwd`.
+   *
+   * It stands up a codex process of its own: the listing depends on the user's
+   * `config.toml` and on the project layers under `cwd`, so no session's client
+   * answers for another cwd, and `codex_setup` runs before any session exists.
+   * A failure is carried to the caller rather than answered as an empty list.
+   */
+  async listPermissionProfiles(cwd?: string): Promise<PermissionProfileSummary[]> {
+    const client = this.createClient();
+    try {
+      await client.start({});
+      return await listPermissionProfiles(client, cwd);
+    } finally {
+      try {
+        await client.destroy();
+      } catch (err) {
+        console.error(
+          `[codex-mcp] Failed to destroy the client of a permission-profile listing: ${describeError(err)}`
+        );
+      }
+    }
+  }
 
   /** The sessions this server holds in memory. */
   listSessions(): PublicSessionInfo[] {
@@ -1066,6 +1113,7 @@ export class SessionManager {
         baseInstructions: session.baseInstructions,
         developerInstructions: session.developerInstructions,
         approvalsReviewer: session.approvalsReviewer,
+        permissions: session.permissions,
       });
       session.threadId = threadId;
       session.status = "idle";
@@ -1177,6 +1225,7 @@ export class SessionManager {
       baseInstructions: session.baseInstructions,
       developerInstructions: session.developerInstructions,
       approvalsReviewer: session.approvalsReviewer,
+      permissions: session.permissions,
     });
     const forkedThreadId = extractThreadId(forkResult);
 
@@ -1197,6 +1246,7 @@ export class SessionManager {
       approvalPolicy: session.approvalPolicy,
       sandbox: session.sandbox,
       approvalsReviewer: session.approvalsReviewer,
+      permissions: session.permissions,
       personality: session.personality,
       effort: session.effort,
       summary: session.summary,
@@ -1232,6 +1282,7 @@ export class SessionManager {
         baseInstructions: session.baseInstructions,
         developerInstructions: session.developerInstructions,
         approvalsReviewer: session.approvalsReviewer,
+        permissions: session.permissions,
       });
       newSession.threadId = forkedThreadId;
       this.persistSessionIfChanged(newSession);
@@ -2324,6 +2375,7 @@ function newSessionRecord(fields: {
     approvalPolicy: spawnOpts.approvalPolicy,
     sandbox: spawnOpts.sandbox,
     approvalsReviewer: advanced?.approvalsReviewer,
+    permissions: advanced?.permissions,
     personality: advanced?.personality,
     effort,
     summary: advanced?.summary,
@@ -2363,6 +2415,7 @@ function sessionOfRecovered(
     approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
     sandbox: rec.meta.sandbox as SandboxMode | undefined,
     approvalsReviewer: rec.meta.approvalsReviewer as ApprovalsReviewer | undefined,
+    permissions: normalizeOptionalString(rec.meta.permissions),
     personality: rec.meta.personality as Personality | undefined,
     effort: rec.meta.effort as EffortLevel | undefined,
     summary: rec.meta.summary as SummaryMode | undefined,
@@ -2931,6 +2984,7 @@ interface TurnOverrides {
   model?: string;
   approvalPolicy?: ApprovalPolicy;
   approvalsReviewer?: ApprovalsReviewer;
+  permissions?: string;
   effort?: EffortLevel;
   summary?: SummaryMode;
   personality?: Personality;
@@ -2976,10 +3030,20 @@ function applyTurnOverrides(
     session.approvalPolicy = overrides.approvalPolicy as ApprovalPolicy;
   }
   if (overrides?.approvalsReviewer) session.approvalsReviewer = overrides.approvalsReviewer;
+  // A session records one of the two, never both: `thread/resume` sends the
+  // profile and the spawn sends `-c sandbox_mode=`, and a session carrying both
+  // would put a profile and a sandbox on one restored thread.
+  if (overrides?.permissions) {
+    session.permissions = overrides.permissions;
+    session.sandbox = undefined;
+  }
   if (overrides?.effort) session.effort = overrides.effort;
   if (overrides?.summary) session.summary = overrides.summary;
   if (overrides?.personality) session.personality = overrides.personality;
-  if (overrides?.sandbox) session.sandbox = overrides.sandbox as SandboxMode;
+  if (overrides?.sandbox) {
+    session.sandbox = overrides.sandbox as SandboxMode;
+    session.permissions = undefined;
+  }
 }
 
 /** The cwd a reply's override asks the turn to run in, or nothing when it names none. */
@@ -3021,6 +3085,10 @@ function buildTurnParams(
     summary: overrides?.summary ?? session.summary,
     personality: overrides?.personality ?? session.personality,
     approvalsReviewer: overrides?.approvalsReviewer ?? session.approvalsReviewer,
+    // Only what this turn named. The thread already carries the session's own
+    // profile, and re-sending it beside a `sandboxPolicy` the same reply asked
+    // for is the pair `turn/start` refuses.
+    permissions: overrides?.permissions,
     cwd: resolvedCwd,
     outputSchema: overrides?.outputSchema,
   };

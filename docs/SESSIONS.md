@@ -148,8 +148,13 @@ Three layers, and the first two are the caller's to set on every `codex` call.
 | Layer | What it is | Values |
 | --- | --- | --- |
 | Approval policy | How often Codex asks before acting | `untrusted`, `on-request`, `never` |
-| Sandbox | What Codex may touch | `read-only`, `workspace-write`, `danger-full-access` |
+| Sandbox | What Codex may touch | `read-only`, `workspace-write`, `danger-full-access`, or a `permissions` profile id in place of one |
 | Arbitration | Who answers each request | `approvalsReviewer: "user"` — the caller, through `codex_check`, within `approvalTimeoutMs`; `"auto_review"` — a Codex subagent, and the caller reads the outcome |
+
+A `permissions` profile is the third form of the second layer: it names a
+`[permissions.<id>]` table of the user's own Codex config, which carries the
+sandbox and the approval policy the profile sets. A call names `sandbox` or
+`permissions`, never both, and `codex_setup` lists the ids this machine offers.
 
 ## Who holds a session
 

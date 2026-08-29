@@ -341,6 +341,34 @@ export interface ThreadBackgroundTerminalsCleanParams {
   threadId: string;
 }
 
+// ── Permission profiles ────────────────────────────────────────────
+
+/** permissionProfile/list — schema v2/PermissionProfileListParams.json. */
+export interface PermissionProfileListParams {
+  /** Working directory whose project config layers are resolved. */
+  cwd?: string | null;
+  /** Opaque cursor from a previous call. */
+  cursor?: string | null;
+  /** Page size. Omitted answers the full result set. */
+  limit?: number | null;
+}
+
+/** One profile of a `permissionProfile/list` page. */
+export interface PermissionProfileSummary {
+  /** Available permission profile identifier, such as `:read-only`. */
+  id: string;
+  /** Whether the effective requirements allow selecting this profile. */
+  allowed: boolean;
+  description?: string | null;
+}
+
+/** permissionProfile/list response — schema v2/PermissionProfileListResponse.json. */
+export interface PermissionProfileListResult {
+  data: PermissionProfileSummary[];
+  /** Cursor for the next page. Null means the listing is exhausted. */
+  nextCursor?: string | null;
+}
+
 /** thread/delete — schema v2/ThreadDeleteParams.json. The response is empty. */
 export interface ThreadDeleteParams {
   threadId: string;
@@ -780,6 +808,7 @@ export const Methods = {
   THREAD_FORK: "thread/fork",
   THREAD_BACKGROUND_TERMINALS_CLEAN: "thread/backgroundTerminals/clean",
   THREAD_DELETE: "thread/delete",
+  PERMISSION_PROFILE_LIST: "permissionProfile/list",
   TURN_START: "turn/start",
   TURN_INTERRUPT: "turn/interrupt",
   TURN_STEER: "turn/steer",

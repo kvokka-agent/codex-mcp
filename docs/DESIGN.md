@@ -42,6 +42,10 @@ codex app-server
   -p <profile>                    ← profile
 ```
 
+`permissions` takes no flag: it is a `thread/start` parameter, and a call that
+names it sends no `-c sandbox_mode=` at all — the environment default included —
+because a profile and a sandbox mode would each decide the same thing.
+
 `advanced.config` values serialize by type: a primitive through `String()`, an
 object or array through `JSON.stringify()`. The CLI then loads
 `~/.codex/config.toml`, applies the profile, and applies the `-c` overrides on
@@ -550,6 +554,28 @@ app-server hangs the turn when one goes unanswered.
 
 `prompt` becomes `input: [{ type: "text", text: prompt }]`, and each entry of
 `advanced.images` appends `{ type: "localImage", path }`.
+
+### Checking a permissions profile before the thread starts
+
+`thread/start` answers an id Codex does not know with
+`-32600 failed to load configuration: default_permissions requires a
+\`[permissions]\` table`, which names a TOML table the caller never wrote. So
+`permissionProfile/list` runs first, on the client that is already up, for the
+cwd of the session: the id is either in the listing and `allowed`, or the caller
+is told which ids exist. `codex_reply` runs the same check before the session
+leaves `idle`, so a bad id costs an error and not a turn.
+
+Three answers are told apart. An id no entry carries does not exist here. An
+entry carrying `allowed: false` exists and cannot be selected. A listing that
+raised, answered no `data` array, carried an entry without a string `id` and a
+boolean `allowed`, or handed back more than twenty pages without exhausting its
+cursor, is a listing that says nothing about which profiles exist — it surfaces
+as `INTERNAL` naming the reason, and the id is not sent on the guess that it is
+fine.
+
+`codex_setup` runs the same listing over a `codex app-server` of its own,
+because it answers before any session exists and the ids depend on the `cwd` it
+was given.
 
 ### Reading ids out of responses
 

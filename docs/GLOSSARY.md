@@ -120,7 +120,12 @@ file, when the approval policy asks for one. The caller answers it with
 caller states its own permission level rather than inheriting a default.
 
 **sandbox** — what Codex may touch: `read-only`, `workspace-write` or
-`danger-full-access`. Required on every `codex` call.
+`danger-full-access`. Every `codex` call names this or a `permissions` profile.
+
+**permissions profile** — a named `[permissions.<id>]` table of the user's Codex
+config, passed as `permissions`. It carries the sandbox, so it replaces
+`sandbox` rather than joining it, and `codex_setup` lists the ids a machine
+offers.
 
 **approvals reviewer** — who decides an approval, set with `approvalsReviewer`.
 `user` routes it to the caller; `auto_review` routes it to a Codex subagent, and

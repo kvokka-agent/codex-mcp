@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { resolveCodexInvocation } from "../app-server/codex-bin.js";
+import type { PermissionProfileSummary } from "../app-server/protocol.js";
 import {
   type CodexExecutableInfo,
   resolveDefaultCodexExecutable,
@@ -17,6 +18,15 @@ import {
 export interface CodexSetupInput {
   cwd?: string;
 }
+
+/**
+ * Reads the permission profiles of a working directory.
+ *
+ * The ids come from the user's own `config.toml` and from the project layers
+ * under that directory, so only the local Codex can name them; every caller
+ * hands one in, and the one that ships stands up a `codex app-server` for it.
+ */
+export type PermissionProfileLister = (cwd: string) => Promise<PermissionProfileSummary[]>;
 
 type AuthState = "authenticated" | "unauthenticated" | "unknown";
 
@@ -53,6 +63,19 @@ export interface CodexSetupResult {
   projectContext: {
     hasUserConfig: boolean;
     hasProjectConfig: boolean;
+  };
+  /**
+   * The ids a `codex` or `codex_reply` call may pass as `permissions`.
+   *
+   * `profiles` is absent unless the listing answered: a listing that failed, or
+   * one that was never run because no executable resolved, says nothing about
+   * which profiles exist, and an empty array there would read as a machine that
+   * offers none.
+   */
+  permissionProfiles: {
+    ok: boolean;
+    profiles?: PermissionProfileSummary[];
+    detail: string;
   };
   warnings: string[];
   nextSteps: string[];
@@ -213,7 +236,8 @@ function probeCodexEnvironment(): CodexProbe {
 
 function collectSetupAdvice(
   probe: CodexProbe,
-  projectContext: CodexSetupResult["projectContext"]
+  projectContext: CodexSetupResult["projectContext"],
+  permissionProfiles: CodexSetupResult["permissionProfiles"]
 ): Pick<CodexSetupResult, "warnings" | "nextSteps"> {
   const warnings: string[] = [];
   const nextSteps: string[] = [];
@@ -240,23 +264,66 @@ function collectSetupAdvice(
     warnings.push(probe.backend.detail);
     nextSteps.push(`Upgrade the Codex CLI to ${MIN_CODEX_CLI_VERSION} or newer.`);
   }
+  if (!permissionProfiles.ok && probe.executable.ok) {
+    warnings.push(permissionProfiles.detail);
+    nextSteps.push(
+      "Start a session with `sandbox` rather than `permissions` until the profile listing answers."
+    );
+  }
 
   return { warnings, nextSteps };
 }
 
-export function executeCodexSetup(
+/** What the machine answered about its permission profiles, or what went wrong asking. */
+async function probePermissionProfiles(
+  probe: CodexProbe,
+  cwd: string,
+  listProfiles: PermissionProfileLister
+): Promise<CodexSetupResult["permissionProfiles"]> {
+  if (!probe.executable.ok) {
+    return {
+      ok: false,
+      detail: "Permission profiles not listed because no codex executable was detected.",
+    };
+  }
+  try {
+    const profiles = await listProfiles(cwd);
+    return {
+      ok: true,
+      profiles,
+      detail:
+        profiles.length === 0
+          ? "This machine offers no permission profile; `permissions` has no id to name here."
+          : `Pass one of these ids as \`permissions\`: ${profiles
+              .filter((profile) => profile.allowed)
+              .map((profile) => profile.id)
+              .join(", ")}.`,
+    };
+  } catch (err) {
+    // Carried through rather than answered as an empty list: a listing that
+    // failed is not a machine with no profiles.
+    return {
+      ok: false,
+      detail: `Failed to list permission profiles: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+export async function executeCodexSetup(
   input: CodexSetupInput | undefined,
-  serverCwd: string
-): CodexSetupResult {
+  serverCwd: string,
+  listProfiles: PermissionProfileLister
+): Promise<CodexSetupResult> {
   const cwd = input?.cwd && input.cwd.trim() !== "" ? input.cwd : serverCwd;
   const probe = probeCodexEnvironment();
+  const permissionProfiles = await probePermissionProfiles(probe, cwd, listProfiles);
 
   const projectContext = {
     hasUserConfig: existsSync(path.join(homedir(), ".codex", "config.toml")),
     hasProjectConfig: existsSync(path.join(cwd, ".codex", "config.toml")),
   };
 
-  const { warnings, nextSteps } = collectSetupAdvice(probe, projectContext);
+  const { warnings, nextSteps } = collectSetupAdvice(probe, projectContext, permissionProfiles);
 
   return {
     ready: probe.executable.ok && probe.auth.ok && probe.backend.ok,
@@ -269,6 +336,7 @@ export function executeCodexSetup(
       stateDir: resolveCodexStateDir(),
     },
     projectContext,
+    permissionProfiles,
     warnings,
     nextSteps,
   };

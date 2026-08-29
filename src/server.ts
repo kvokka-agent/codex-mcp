@@ -28,7 +28,11 @@ import {
 import { PollWindow } from "./utils/poll-window.js";
 import { progressReporterFor } from "./utils/progress-notifier.js";
 import { redactPaths } from "./utils/redact.js";
-import { resolveSessionDefaults, type SessionDefaults } from "./utils/session-defaults.js";
+import {
+  resolveSessionDefaults,
+  SESSION_DEFAULT_ENV,
+  type SessionDefaults,
+} from "./utils/session-defaults.js";
 import { classifyTurnCompatibilityError, compatibilityErrorMessage } from "./utils/turn-compat.js";
 
 declare const __PKG_VERSION__: string;
@@ -214,6 +218,23 @@ const setupResultShape = {
     hasUserConfig: z.boolean(),
     hasProjectConfig: z.boolean(),
   }),
+  permissionProfiles: z
+    .object({
+      ok: z.boolean(),
+      profiles: z
+        .array(
+          z.object({
+            id: z.string(),
+            allowed: z.boolean(),
+            description: z.string().optional(),
+          })
+        )
+        .optional(),
+      detail: z.string(),
+    })
+    .describe(
+      "The ids a `codex` call may pass as `permissions`. `profiles` is absent where the listing failed or was never run, which is not the same as a machine offering none."
+    ),
   warnings: z.array(z.string()),
   nextSteps: z.array(z.string()),
 };
@@ -583,16 +604,21 @@ function codexInputShape(sessionDefaults: SessionDefaults) {
             `Optional enum: untrusted/on-request/never (default: ${sessionDefaults.approvalPolicy}).`
           )
       : z.enum(APPROVAL_POLICIES).describe("Required enum: untrusted/on-request/never."),
-    sandbox: sessionDefaults.sandbox
-      ? z
-          .enum(SANDBOX_MODES)
-          .optional()
-          .describe(
-            `Optional enum: read-only/workspace-write/danger-full-access (default: ${sessionDefaults.sandbox}).`
-          )
-      : z
-          .enum(SANDBOX_MODES)
-          .describe("Required enum: read-only/workspace-write/danger-full-access."),
+    sandbox: z
+      .enum(SANDBOX_MODES)
+      .optional()
+      .describe(
+        sessionDefaults.sandbox
+          ? `Enum: read-only/workspace-write/danger-full-access (default: ${sessionDefaults.sandbox}). Name this or \`permissions\`, never both.`
+          : "Enum: read-only/workspace-write/danger-full-access. Name this or `permissions` — the call must carry one of the two."
+      ),
+    permissions: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Named permission profile id from a `[permissions.<id>]` table of the Codex config, such as `:read-only` or `:workspace`. It carries the sandbox, so name it instead of `sandbox` and never alongside it. `codex_setup` lists the ids this machine offers; an id it does not offer is refused here with that list."
+      ),
     effort: z
       .string()
       .min(1)
@@ -616,6 +642,50 @@ function codexInputShape(sessionDefaults: SessionDefaults) {
   };
 }
 
+/** What the permission refinements of `codex` and `codex_reply` read. */
+interface PermissionSurfaceInput {
+  sandbox?: string | undefined;
+  permissions?: string | undefined;
+}
+
+/**
+ * `sandbox` and `permissions` name the same thing two ways, so a call names one.
+ *
+ * The pair is refused here rather than by the backend, which answers
+ * `-32600 \`permissions\` cannot be combined with \`sandbox\`` after the child
+ * process is already up.
+ */
+function rejectSandboxWithPermissions(
+  value: PermissionSurfaceInput,
+  addIssue: (path: string, message: string) => void
+): void {
+  if (value.sandbox !== undefined && value.permissions !== undefined) {
+    addIssue(
+      "permissions",
+      'Name `sandbox` or `permissions`, not both: a named profile carries the sandbox, and Codex refuses the pair with "`permissions` cannot be combined with `sandbox`".'
+    );
+  }
+}
+
+function codexInputSchema(sessionDefaults: SessionDefaults) {
+  return z.object(codexInputShape(sessionDefaults)).superRefine((value, ctx) => {
+    const addIssue = (path: string, message: string) => {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+    };
+    rejectSandboxWithPermissions(value, addIssue);
+    if (
+      value.sandbox === undefined &&
+      value.permissions === undefined &&
+      !sessionDefaults.sandbox
+    ) {
+      addIssue(
+        "sandbox",
+        `Name a sandbox — ${SANDBOX_MODES.join("/")} — or a \`permissions\` profile id. The call named neither and ${SESSION_DEFAULT_ENV.sandbox} sets none.`
+      );
+    }
+  });
+}
+
 // ── Tool 1: codex — Start a new Codex agent session ──────────────
 
 function registerCodexTool(ctx: ToolContext): void {
@@ -626,7 +696,7 @@ function registerCodexTool(ctx: ToolContext): void {
       title: "Start Codex Session",
       description:
         "Start a Codex session and return `{ sessionId, threadId, status, progress }` at once — the turn runs on. Follow it with `codex_check(action='poll', waitMs=300000)` in a loop until the status is terminal: that call answers the moment Codex says it is working on something new, so write its `progress.activity` out where the person waiting reads it, then call again. See `codex-mcp:///quickstart` for the loop, `codex-mcp:///config` for parameter guidance, and `codex-mcp:///delegation-guide` for approval/sandbox presets.",
-      inputSchema: codexInputShape(sessionDefaults),
+      inputSchema: codexInputSchema(sessionDefaults),
       outputSchema: sessionStartOutputShape,
       annotations: {
         title: "Start Codex Session",
@@ -640,6 +710,50 @@ function registerCodexTool(ctx: ToolContext): void {
   );
 }
 
+const codexReplyInputSchema = z
+  .object({
+    sessionId: z.string().describe("Session ID from codex tool"),
+    prompt: z.string().describe("Follow-up message"),
+    model: z.string().optional().describe("Override model."),
+    approvalPolicy: z.enum(APPROVAL_POLICIES).optional().describe("Override approval policy."),
+    approvalsReviewer: z
+      .enum(APPROVALS_REVIEWERS)
+      .optional()
+      .describe(
+        "Override who decides an approval this turn raises: `user` routes it to you, `auto_review` to a Codex subagent. The override sticks for later turns."
+      ),
+    effort: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        `Override effort. Codex 0.150.1 advertises ${ADVERTISED_EFFORT_LEVELS.join("/")}, and each model advertises its own set — Codex refuses one the chosen model does not.`
+      ),
+    summary: z.enum(SUMMARY_MODES).optional().describe("Override summary."),
+    personality: z.enum(PERSONALITIES).optional().describe("Override personality."),
+    sandbox: z
+      .enum(SANDBOX_MODES)
+      .optional()
+      .describe("Override sandbox. Name this or `permissions`, never both."),
+    permissions: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Override the permission profile of the turn by id, such as `:read-only`. It carries the sandbox, so name it instead of `sandbox` and never alongside it. The id is recorded on the session, so a resume and a fork restore it, and an id this machine does not offer is refused with the list of the ids it does."
+      ),
+    cwd: z.string().optional().describe("Override cwd."),
+    outputSchema: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe("Structured output schema override (top-level in codex_reply)."),
+  })
+  .superRefine((value, ctx) => {
+    rejectSandboxWithPermissions(value, (path, message) => {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+    });
+  });
+
 // ── Tool 2: codex_reply — Continue an existing session ───────────
 
 function registerCodexReplyTool(ctx: ToolContext): void {
@@ -650,33 +764,7 @@ function registerCodexReplyTool(ctx: ToolContext): void {
       title: "Continue Codex Session",
       description:
         "Continue existing session. Allowed in `idle`/`error`; otherwise `SESSION_BUSY`. Returns at once and the turn runs on; follow it with the same `codex_check(action='poll', waitMs=300000)` loop as `codex`.",
-      inputSchema: {
-        sessionId: z.string().describe("Session ID from codex tool"),
-        prompt: z.string().describe("Follow-up message"),
-        model: z.string().optional().describe("Override model."),
-        approvalPolicy: z.enum(APPROVAL_POLICIES).optional().describe("Override approval policy."),
-        approvalsReviewer: z
-          .enum(APPROVALS_REVIEWERS)
-          .optional()
-          .describe(
-            "Override who decides an approval this turn raises: `user` routes it to you, `auto_review` to a Codex subagent. The override sticks for later turns."
-          ),
-        effort: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(
-            `Override effort. Codex 0.150.1 advertises ${ADVERTISED_EFFORT_LEVELS.join("/")}, and each model advertises its own set — Codex refuses one the chosen model does not.`
-          ),
-        summary: z.enum(SUMMARY_MODES).optional().describe("Override summary."),
-        personality: z.enum(PERSONALITIES).optional().describe("Override personality."),
-        sandbox: z.enum(SANDBOX_MODES).optional().describe("Override sandbox."),
-        cwd: z.string().optional().describe("Override cwd."),
-        outputSchema: z
-          .record(z.string(), z.unknown())
-          .optional()
-          .describe("Structured output schema override (top-level in codex_reply)."),
-      },
+      inputSchema: codexReplyInputSchema,
       outputSchema: sessionStartOutputShape,
       annotations: {
         title: "Continue Codex Session",
@@ -691,13 +779,13 @@ function registerCodexReplyTool(ctx: ToolContext): void {
 }
 
 function registerCodexSetupTool(ctx: ToolContext): void {
-  const { server, serverCwd } = ctx;
+  const { server, serverCwd, sessionManager } = ctx;
   server.registerTool(
     "codex_setup",
     {
       title: "Codex Setup",
       description:
-        "Run local readiness checks for codex-mcp: executable resolution, login status, Codex CLI version against the minimum this server drives, and project config. Use this before starting a session when setup is uncertain.",
+        "Run local readiness checks for codex-mcp: executable resolution, login status, Codex CLI version against the minimum this server drives, project config, and the permission profile ids this machine offers as `permissions`. Use this before starting a session when setup is uncertain, or to learn which profile ids exist here.",
       inputSchema: {
         cwd: z
           .string()
@@ -713,7 +801,10 @@ function registerCodexSetupTool(ctx: ToolContext): void {
         openWorldHint: false,
       },
     },
-    (args) => toolEnvelope(executeCodexSetup(args, serverCwd), false)
+    (args) =>
+      runTool(() =>
+        executeCodexSetup(args, serverCwd, (cwd) => sessionManager.listPermissionProfiles(cwd))
+      )
   );
 }
 

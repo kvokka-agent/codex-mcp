@@ -227,6 +227,12 @@ export interface SessionInfo {
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
   /**
+   * Named permission profile of this thread, from a `[permissions.<id>]` table
+   * of the user's Codex config. It replaces `sandbox`, which cannot be combined
+   * with it, and the same profile is restored on a fork and on a resume.
+   */
+  permissions?: string;
+  /**
    * Who reviews the approval requests of this thread. Thread state: `thread/start`
    * sets it, and `thread/fork` and `thread/resume` carry it so a forked or
    * resumed session keeps the reviewer it ran under.
