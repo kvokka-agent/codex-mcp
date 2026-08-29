@@ -1,0 +1,30 @@
+# Both this repository and the fork the pull requests come from are forks
+# themselves, and Dependabot stays off on a fork until its owner switches it on
+# under Settings → Code security.
+version: 2
+
+multi-ecosystem-groups:
+  weekly:
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:20"
+      timezone: Etc/UTC
+    labels: ["dependencies"]
+
+updates:
+  # `bun` reads package.json against the committed bun.lock, and one entry covers
+  # dependencies and devDependencies alike.
+  - package-ecosystem: bun
+    directory: "/"
+    patterns: ["*"]
+    multi-ecosystem-group: weekly
+
+  # `/` covers all of .github/**, reusable workflows included.
+  - package-ecosystem: github-actions
+    directory: "/"
+    patterns: ["*"]
+    multi-ecosystem-group: weekly
+
+  # .pre-commit-config.yaml holds local hooks only, so it pins no `rev:` for a
+  # pre-commit entry to raise.
