@@ -180,6 +180,8 @@ log at `data.method`.
 | `item/reasoning/textDelta`, `…/summaryTextDelta`, `…/summaryPartAdded` | progress | |
 | `item/plan/delta` | progress | Experimental |
 | `item/mcpToolCall/progress` | progress | |
+| `item/autoApprovalReview/started`, `autoApprovalReview/strictReviewRequired` | progress | The `auto_review` reviewer opening a decision |
+| `item/autoApprovalReview/completed` | approval_result | The decision, with the `review.status` it carried; a status other than `approved` also becomes the activity line |
 | `turn/started` | progress | The source of `activeTurnId` |
 | `turn/completed` | result | |
 | `turn/diff/updated`, `turn/plan/updated` | progress | |
@@ -272,6 +274,28 @@ them: a call that blocks for an hour reports nothing while it blocks, which is
 the failure the poll loop exists to fix.
 
 ## Approval arbitration
+
+`approvalsReviewer` decides who arbitrates. Under `user`, the schema default,
+the flow below runs. Under `auto_review` a Codex subagent decides instead, and
+this server reports the outcome rather than answering it — `thread/start`,
+`thread/fork`, `thread/resume` and every `turn/start` carry the field, and
+`meta.json` records it so a resume restores it.
+
+The two are not exclusive on the wire: whether a command that would raise
+`item/commandExecution/requestApproval` under `user` still reaches this server
+under `auto_review` is not settled here. Both paths hold — the request is
+answered exactly as it is below where one arrives, and the review notifications
+are reported whether or not one does.
+
+`item/autoApprovalReview/completed` carries `review.status`, one of
+`inProgress`, `approved`, `denied`, `timedOut` and `aborted`. That field is the
+only one read: the schema marks `GuardianApprovalReview` `[UNSTABLE]` — "This
+shape is expected to change soon" — so `rationale`, `riskLevel` and
+`userAuthorization` reach `events.jsonl` with the rest of the raw params and
+nothing branches on them. A status other than `approved` becomes the session's
+activity line, so the next poll says why the turn did what it did.
+
+Under `user`:
 
 1. app-server sends a server-initiated request:
    `item/commandExecution/requestApproval`,

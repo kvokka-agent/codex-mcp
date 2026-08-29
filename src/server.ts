@@ -14,6 +14,7 @@ import {
   ADVERTISED_EFFORT_LEVELS,
   ALL_DECISIONS,
   APPROVAL_POLICIES,
+  APPROVALS_REVIEWERS,
   CHECK_ACTIONS,
   CLEANABLE_STATUSES,
   ErrorCode,
@@ -599,6 +600,12 @@ function codexInputShape(sessionDefaults: SessionDefaults) {
       .describe(
         `Reasoning effort (default: ${sessionDefaults.effort}). Codex 0.150.1 advertises ${ADVERTISED_EFFORT_LEVELS.join("/")}, and each model advertises its own set — Codex refuses one the chosen model does not.`
       ),
+    approvalsReviewer: z
+      .enum(APPROVALS_REVIEWERS)
+      .optional()
+      .describe(
+        "Who decides an approval this turn raises. `user` (the default) routes it to you: `codex_check` reports it in `actions[]` and `respond_permission` answers it. `auto_review` hands it to a Codex subagent that gathers context and applies a risk-based decision framework, so an unattended run needs no answer from you — and a review that denies an action arrives as `progress.activity`."
+      ),
     cwd: z.string().optional().describe("Working directory (default: server cwd)."),
     model: z
       .string()
@@ -648,6 +655,12 @@ function registerCodexReplyTool(ctx: ToolContext): void {
         prompt: z.string().describe("Follow-up message"),
         model: z.string().optional().describe("Override model."),
         approvalPolicy: z.enum(APPROVAL_POLICIES).optional().describe("Override approval policy."),
+        approvalsReviewer: z
+          .enum(APPROVALS_REVIEWERS)
+          .optional()
+          .describe(
+            "Override who decides an approval this turn raises: `user` routes it to you, `auto_review` to a Codex subagent. The override sticks for later turns."
+          ),
         effort: z
           .string()
           .min(1)

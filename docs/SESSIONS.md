@@ -129,6 +129,15 @@ Answering several open actions at once is allowed, and a response that arrives
 after the request was already resolved answers `REQUEST_NOT_FOUND`. Answering
 them one at a time avoids that entirely.
 
+`approvalsReviewer: "auto_review"` moves the decision inside Codex: a subagent
+gathers context and decides, and nothing arrives in `actions[]` for the caller
+to answer. What the caller reads is the outcome. A review that denies, times out
+or is aborted overwrites `progress.activity` — "Approval auto-review denied an
+action of this turn" — and lands in the session's event log as an
+`approval_result` record carrying its `reviewId` and its status, so the next
+poll says why the turn did what it did. An approved review leaves the activity
+line the turn wrote alone.
+
 `denyMessage` is recorded in the event log for the person reading it later; it
 is not sent to Codex.
 
@@ -140,7 +149,7 @@ Three layers, and the first two are the caller's to set on every `codex` call.
 | --- | --- | --- |
 | Approval policy | How often Codex asks before acting | `untrusted`, `on-request`, `never` |
 | Sandbox | What Codex may touch | `read-only`, `workspace-write`, `danger-full-access` |
-| Arbitration | Who answers each request | the caller, through `codex_check`, within `approvalTimeoutMs` |
+| Arbitration | Who answers each request | `approvalsReviewer: "user"` — the caller, through `codex_check`, within `approvalTimeoutMs`; `"auto_review"` — a Codex subagent, and the caller reads the outcome |
 
 ## Who holds a session
 

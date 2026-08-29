@@ -4,6 +4,7 @@
 import type { AppServerSpawnOptions } from "../app-server/lifecycle.js";
 import type {
   ApprovalPolicy,
+  ApprovalsReviewer,
   EffortLevel,
   Personality,
   SandboxMode,
@@ -18,6 +19,7 @@ export interface CodexToolParams {
   profile?: string;
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
+  approvalsReviewer?: ApprovalsReviewer;
   effort?: EffortLevel;
   advanced?: {
     baseInstructions?: string;

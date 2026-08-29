@@ -40,6 +40,7 @@ export async function executeCodex(
   const advanced = {
     ...args.advanced,
     approvalTimeoutMs: args.advanced?.approvalTimeoutMs ?? defaults.approvalTimeoutMs,
+    approvalsReviewer: args.approvalsReviewer,
   };
 
   const startResult = await sessionManager.createSession(

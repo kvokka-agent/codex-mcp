@@ -258,6 +258,7 @@ When starting a session with `codex`, these are required:
 2. `approvalPolicy`: `untrusted|on-request|never`
 3. `sandbox`: `read-only|workspace-write|danger-full-access`
 4. `effort` is optional: any non-empty string, and Codex 0.150.1 advertises `low|medium|high|xhigh|max|ultra` (default: `low`). For complex tasks, explicitly set `medium`, `high` or `xhigh`.
+5. `approvalsReviewer` is optional: `user` (default) or `auto_review`.
 
 For `codex_reply`, required:
 
@@ -611,6 +612,15 @@ Checks:
 
 1. Send `codex_check(action="poll", cursor=0)`, then the same with `maxEvents`, `responseMode`, and `pollOptions`. Each is refused with a message naming what replaced it.
 2. Send `codex_check(action="respond_permission", ..., waitMs=1000)`. It is refused: `waitMs` belongs to `poll`.
+
+## 7.4a Approval auto-review (`approvalsReviewer`)
+
+Checks:
+
+1. Start a session with `approvalPolicy: "on-request"`, `sandbox: "workspace-write"`, `approvalsReviewer: "auto_review"` and a prompt that must step outside the sandbox — reaching the network is the plainest one. Poll it. Expect `actions[]` to stay empty: the decision is made inside Codex and no approval reaches this server.
+2. Where the review denies, expect `progress.activity` to read "Approval auto-review denied an action of this turn", and `<STATE_DIR>/sessions/<sessionId>/events.jsonl` to carry an `approval_result` record with `method: "item/autoApprovalReview/completed"`, its `reviewId` and `status: "denied"`.
+3. Run the same prompt with `approvalsReviewer: "user"` and the same policy. Expect the approval to arrive in `actions[]` for you to answer, which is what the two settings differ in.
+4. Resume the `auto_review` session in a second server (`codex_session(action="resume")`) and reply on it. Expect the reviewer to still be `auto_review`: it is recorded in `meta.json` and goes back on `thread/resume`.
 
 ## 7.5 Long Polling (`waitMs`)
 

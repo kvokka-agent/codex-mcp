@@ -152,15 +152,9 @@ const UNMODELED_SERVER_METHODS: Record<string, string> = {
   "serverRequest/resolved":
     "tells one client that another answered a shared server request; codex-mcp is the only client of the app-server it spawned",
 
-  // The auto_review approvals reviewer, which codex-mcp never selects.
-  "item/autoApprovalReview/started":
-    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
-  "item/autoApprovalReview/completed":
-    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
-  "autoApprovalReview/strictReviewRequired":
-    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
+  // The auto_review approvals reviewer, whose three review notifications are modelled.
   guardianWarning:
-    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
+    "free-text display warning of the auto_review reviewer; the tool output carries the review's own status and no field for a display warning",
 
   // Advisory payloads with no field in this server's tool output.
   "model/verification": "model-side verification metadata; codex-mcp reports the turn's answer",
@@ -263,6 +257,9 @@ const MODELLED_TYPES: Record<string, string> = {
   ReasoningTextDeltaNotification: "ReasoningDeltaParams",
   TurnStartedNotification: "TurnNotificationParams",
   TurnCompletedNotification: "TurnNotificationParams",
+  ItemGuardianApprovalReviewStartedNotification: "AutoApprovalReviewStartedParams",
+  ItemGuardianApprovalReviewCompletedNotification: "AutoApprovalReviewCompletedParams",
+  StrictReviewRequiredNotification: "StrictReviewRequiredParams",
 };
 
 /**

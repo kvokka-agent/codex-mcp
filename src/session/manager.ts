@@ -28,6 +28,7 @@ import {
 } from "../persistence/index.js";
 import {
   type ApprovalPolicy,
+  type ApprovalsReviewer,
   type CheckResult,
   CLEANUP_INTERVAL_MS,
   type CleanableStatus,
@@ -136,10 +137,11 @@ export interface SessionManagerOptions {
   persistence?: import("./persistence.js").SessionPersistence;
 }
 
-/** What `createSession` may be given beyond the session's own spawn options. */
+/** What `createSession` may be given beyond its prompt and its spawn options. */
 interface CreateSessionAdvanced {
   baseInstructions?: string;
   developerInstructions?: string;
+  approvalsReviewer?: ApprovalsReviewer;
   personality?: Personality;
   ephemeral?: boolean;
   config?: Record<string, unknown>;
@@ -192,6 +194,8 @@ const PLAIN_PROGRESS_METHODS = new Set<string>([
   Methods.REASONING_SUMMARY_PART_ADDED,
   Methods.PLAN_DELTA,
   Methods.MCP_TOOL_PROGRESS,
+  Methods.AUTO_APPROVAL_REVIEW_STARTED,
+  Methods.AUTO_APPROVAL_REVIEW_STRICT_REQUIRED,
   Methods.TURN_DIFF_UPDATED,
   Methods.TURN_PLAN_UPDATED,
   Methods.MODEL_REROUTED,
@@ -520,6 +524,7 @@ export class SessionManager {
       baseInstructions: advanced?.baseInstructions,
       developerInstructions: session.developerInstructions,
       config: advanced?.config,
+      approvalsReviewer: session.approvalsReviewer,
     });
     const threadId = extractThreadId(threadStartResult);
     session.threadId = threadId;
@@ -544,6 +549,7 @@ export class SessionManager {
       effort: session.effort,
       summary: advanced?.summary,
       outputSchema: advanced?.outputSchema,
+      approvalsReviewer: session.approvalsReviewer,
     });
     const turnStartResult = turnStart.turnStartResult;
 
@@ -1059,6 +1065,7 @@ export class SessionManager {
         personality: session.personality,
         baseInstructions: session.baseInstructions,
         developerInstructions: session.developerInstructions,
+        approvalsReviewer: session.approvalsReviewer,
       });
       session.threadId = threadId;
       session.status = "idle";
@@ -1169,6 +1176,7 @@ export class SessionManager {
       threadId: session.threadId,
       baseInstructions: session.baseInstructions,
       developerInstructions: session.developerInstructions,
+      approvalsReviewer: session.approvalsReviewer,
     });
     const forkedThreadId = extractThreadId(forkResult);
 
@@ -1188,6 +1196,7 @@ export class SessionManager {
       profile: session.profile,
       approvalPolicy: session.approvalPolicy,
       sandbox: session.sandbox,
+      approvalsReviewer: session.approvalsReviewer,
       personality: session.personality,
       effort: session.effort,
       summary: session.summary,
@@ -1222,6 +1231,7 @@ export class SessionManager {
         personality: session.personality,
         baseInstructions: session.baseInstructions,
         developerInstructions: session.developerInstructions,
+        approvalsReviewer: session.approvalsReviewer,
       });
       newSession.threadId = forkedThreadId;
       this.persistSessionIfChanged(newSession);
@@ -1829,6 +1839,10 @@ export class SessionManager {
         this.onThreadStatusChanged(session, method, p);
         break;
 
+      case Methods.AUTO_APPROVAL_REVIEW_COMPLETED:
+        onAutoApprovalReviewCompleted(session, method, p);
+        break;
+
       default:
         // Ignore other notifications (account, config, etc.)
         break;
@@ -2309,6 +2323,7 @@ function newSessionRecord(fields: {
     profile: spawnOpts.profile,
     approvalPolicy: spawnOpts.approvalPolicy,
     sandbox: spawnOpts.sandbox,
+    approvalsReviewer: advanced?.approvalsReviewer,
     personality: advanced?.personality,
     effort,
     summary: advanced?.summary,
@@ -2347,6 +2362,7 @@ function sessionOfRecovered(
     profile: normalizeOptionalString(rec.meta.profile),
     approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
     sandbox: rec.meta.sandbox as SandboxMode | undefined,
+    approvalsReviewer: rec.meta.approvalsReviewer as ApprovalsReviewer | undefined,
     personality: rec.meta.personality as Personality | undefined,
     effort: rec.meta.effort as EffortLevel | undefined,
     summary: rec.meta.summary as SummaryMode | undefined,
@@ -2914,6 +2930,7 @@ function scannerOf(session: SessionInfo): ActivityMarkerScanner {
 interface TurnOverrides {
   model?: string;
   approvalPolicy?: ApprovalPolicy;
+  approvalsReviewer?: ApprovalsReviewer;
   effort?: EffortLevel;
   summary?: SummaryMode;
   personality?: Personality;
@@ -2958,6 +2975,7 @@ function applyTurnOverrides(
   if (overrides?.approvalPolicy) {
     session.approvalPolicy = overrides.approvalPolicy as ApprovalPolicy;
   }
+  if (overrides?.approvalsReviewer) session.approvalsReviewer = overrides.approvalsReviewer;
   if (overrides?.effort) session.effort = overrides.effort;
   if (overrides?.summary) session.summary = overrides.summary;
   if (overrides?.personality) session.personality = overrides.personality;
@@ -3002,6 +3020,7 @@ function buildTurnParams(
     effort: overrides?.effort ?? session.effort,
     summary: overrides?.summary ?? session.summary,
     personality: overrides?.personality ?? session.personality,
+    approvalsReviewer: overrides?.approvalsReviewer ?? session.approvalsReviewer,
     cwd: resolvedCwd,
     outputSchema: overrides?.outputSchema,
   };
@@ -3085,6 +3104,47 @@ function onItemNotification(
     item: p.item,
     status,
   });
+}
+
+/**
+ * The line a poll reports for a review that did not approve, keyed by status.
+ *
+ * `approved` is absent: the action went through, and overwriting the turn's own
+ * activity line to say so would bury what the work is on.
+ */
+const AUTO_REVIEW_ACTIVITY: Record<string, string> = {
+  denied: "Approval auto-review denied an action of this turn",
+  timedOut: "Approval auto-review timed out on an action of this turn",
+  aborted: "Approval auto-review was aborted on an action of this turn",
+};
+
+/**
+ * `item/autoApprovalReview/completed` — the auto_review subagent decided an
+ * approval this server never saw.
+ *
+ * Only `review.status` is read. The schema marks `GuardianApprovalReview`
+ * `[UNSTABLE]`, "This shape is expected to change soon", so `rationale`,
+ * `riskLevel` and `userAuthorization` reach `events.jsonl` with the rest of the
+ * raw params and no branch here depends on them.
+ *
+ * A status other than `approved` is why the turn did what it did, so it becomes
+ * the activity line a poll answers with as well as an `approval_result` record.
+ */
+function onAutoApprovalReviewCompleted(
+  session: SessionInfo,
+  method: string,
+  p: Record<string, unknown>
+): void {
+  const review = p.review as Record<string, unknown> | undefined;
+  const status = normalizeOptionalString(review?.status);
+  recordEvent(session, "approval_result", {
+    method,
+    ...p,
+    reviewer: "auto_review",
+    status,
+  });
+  const line = status === undefined ? undefined : AUTO_REVIEW_ACTIVITY[status];
+  if (line) recordActivity(session, line);
 }
 
 function recordActivity(session: SessionInfo, activity: string, itemId?: string): void {

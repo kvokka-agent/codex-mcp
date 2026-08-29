@@ -122,6 +122,14 @@ caller states its own permission level rather than inheriting a default.
 **sandbox** — what Codex may touch: `read-only`, `workspace-write` or
 `danger-full-access`. Required on every `codex` call.
 
+**approvals reviewer** — who decides an approval, set with `approvalsReviewer`.
+`user` routes it to the caller; `auto_review` routes it to a Codex subagent, and
+the caller reads the decision rather than making it.
+
+**review** — one decision the `auto_review` reviewer made. Its status is
+`inProgress`, `approved`, `denied`, `timedOut` or `aborted`; anything but
+`approved` becomes the session's activity line.
+
 **approval timeout** — how long an unanswered approval waits before the server
 declines it for the caller, set per session with `advanced.approvalTimeoutMs`.
 

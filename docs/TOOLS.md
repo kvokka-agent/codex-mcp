@@ -21,6 +21,7 @@ Starts a session and returns as soon as the thread does. Poll it with
 | `prompt` | string | yes | — |
 | `approvalPolicy` | `untrusted` \| `on-request` \| `never` | unless `CODEX_MCP_DEFAULT_APPROVAL_POLICY` is set | that variable |
 | `sandbox` | `read-only` \| `workspace-write` \| `danger-full-access` | unless `CODEX_MCP_DEFAULT_SANDBOX` is set | that variable |
+| `approvalsReviewer` | `user` \| `auto_review` | no | `user` |
 | `effort` | any non-empty string; Codex 0.150.1 advertises `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | no | `CODEX_MCP_DEFAULT_EFFORT`, else `low` |
 | `cwd` | string | no | the server's cwd |
 | `model` | string | no | `CODEX_MCP_DEFAULT_MODEL`, else config.toml |
@@ -37,6 +38,17 @@ server never picks one on its own: where its variable is unset the parameter
 stays required, and where it is set the schema publishes it as optional with
 that value as its default. The tool description a client reads carries the
 values in force, so `tools/list` says what a session will actually start on.
+
+`approvalsReviewer` says who decides an approval the turn raises. `user`, the
+default, routes it to the caller: `codex_check` reports it in `actions[]` and
+`respond_permission` answers it. `auto_review` routes it to a Codex subagent
+that gathers context and applies a risk-based decision framework, so a run
+nobody watches can step outside its sandbox where the review approves — which
+`approvalPolicy: "never"` refuses rather than grants. The reviewer travels on
+`thread/start` and on every `turn/start`, and a fork or a resume carries it, so
+a session keeps the reviewer it ran under. A review that does not approve
+becomes `progress.activity` and an `approval_result` record in the session's
+event log; see [SESSIONS.md](SESSIONS.md#approvals-and-questions).
 
 `advanced`:
 
@@ -69,7 +81,7 @@ Allowed while the session is `idle` or `error`. Anything else answers
 | --- | --- | --- |
 | `sessionId` | string | yes |
 | `prompt` | string | yes |
-| `model`, `approvalPolicy`, `effort`, `summary`, `personality`, `sandbox`, `cwd` | as in `codex` | no |
+| `model`, `approvalPolicy`, `approvalsReviewer`, `effort`, `summary`, `personality`, `sandbox`, `cwd` | as in `codex` | no |
 | `outputSchema` | object | no |
 
 Returns what `codex` returns.

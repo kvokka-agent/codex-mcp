@@ -24,6 +24,7 @@ import {
 
 import type {
   ApprovalPolicy,
+  ApprovalsReviewer,
   EffortLevel,
   Personality,
   SandboxMode,
@@ -56,6 +57,7 @@ interface PersistedSessionMeta {
   cwd?: string;
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
+  approvalsReviewer?: ApprovalsReviewer;
   profile?: string;
   personality?: Personality;
   effort?: EffortLevel;
@@ -161,6 +163,7 @@ export class SessionPersistence {
       cwd: session.cwd,
       approvalPolicy: session.approvalPolicy,
       sandbox: session.sandbox,
+      approvalsReviewer: session.approvalsReviewer,
       profile: session.profile,
       personality: session.personality,
       effort: session.effort,
