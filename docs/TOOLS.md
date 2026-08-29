@@ -249,17 +249,24 @@ the CLI answered.
 ## `codex_setup` — is this machine ready
 
 Takes an optional `cwd` and answers `ready`, the resolved `executable`, the
-`auth` state (`authenticated`, `unauthenticated` or `unknown`, from
-`codex login status`), the `backend` (the Codex CLI version `codex --version`
-printed, the minimum this server drives, and whether the one found clears it),
-the `runtime` (state directory), `projectContext` (whether a user and a project
+`auth` state, the `backend` (the Codex CLI version `codex --version` printed,
+the minimum this server drives, and whether the one found clears it), the
+`runtime` (state directory), `projectContext` (whether a user and a project
 `config.toml` exist), and `warnings` with `nextSteps`.
 
-`ready` is true only when all three clear: the executable resolves, the login
-probe answered `authenticated`, and the CLI is at or above `minimumCliVersion`.
+`auth` is what `account/read` answered. The tool starts an app server of its
+own for it, asks right after `initialize` — the call needs no thread and no
+login — and shuts it down again.
 
-A binary named `codex-internal` skips the login probe and reports
-`auth.state: "unknown"`.
+| `auth.state` | What the app server answered |
+| --- | --- |
+| `not_required` | `requiresOpenaiAuth: false`: the configured model provider carries its own credentials, so no Codex login is needed |
+| `authenticated` | an account, named by `auth.accountType` — `apiKey`, `chatgpt` or `amazonBedrock` |
+| `unauthenticated` | `requiresOpenaiAuth: true` with no account |
+| `unknown` | nothing answered: the app server did not start, or `account/read` failed. `auth.detail` carries the failure |
+
+`ready` is true when the executable resolves, `auth.state` is `authenticated`
+or `not_required`, and the CLI is at or above `minimumCliVersion`.
 
 ## Errors
 

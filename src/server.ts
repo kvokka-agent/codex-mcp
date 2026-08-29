@@ -196,7 +196,8 @@ const setupResultShape = {
   }),
   auth: z.object({
     ok: z.boolean(),
-    state: z.enum(["authenticated", "unauthenticated", "unknown"]),
+    state: z.enum(["authenticated", "unauthenticated", "not_required", "unknown"]),
+    accountType: z.enum(["apiKey", "chatgpt", "amazonBedrock"]).optional(),
     detail: z.string(),
   }),
   backend: z.object({
@@ -759,7 +760,7 @@ function registerCodexSetupTool(ctx: ToolContext): void {
     {
       title: "Codex Setup",
       description:
-        "Run local readiness checks for codex-mcp: executable resolution, login status, Codex CLI version against the minimum this server drives, and project config. Use this before starting a session when setup is uncertain.",
+        "Run local readiness checks for codex-mcp: executable resolution, the account the app server answers with, Codex CLI version against the minimum this server drives, and project config. Use this before starting a session when setup is uncertain.",
       inputSchema: {
         cwd: z
           .string()
@@ -775,7 +776,7 @@ function registerCodexSetupTool(ctx: ToolContext): void {
         openWorldHint: false,
       },
     },
-    (args) => toolEnvelope(executeCodexSetup(args, serverCwd), false)
+    (args) => runTool(() => executeCodexSetup(args, serverCwd))
   );
 }
 

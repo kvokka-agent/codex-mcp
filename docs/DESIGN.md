@@ -587,6 +587,16 @@ runs and the answer carries `cleanCalled: true` with the listing's error, so the
 caller is told the state is unknown rather than that the thread is clear. A CLI
 below 0.150.1, which serves neither `list` nor `terminate`, takes that path.
 
+### The setup probe
+
+`codex_setup` starts an app server of its own, asks it `account/read`, and shuts
+it down: what account this install signs with, and whether it needs an OpenAI
+login at all, is data the backend answers right after `initialize`, with no
+thread and no auth. `requiresOpenaiAuth: false` is an install whose configured
+model provider carries its own credentials, and the null account beside it is
+not a missing login. A connection that fails, or an `account/read` that does,
+leaves `auth.state: "unknown"` carrying the failure.
+
 ### Reading ids out of responses
 
 `thread/start`, `thread/fork` and `thread/resume` answer `{ thread: Thread }`,

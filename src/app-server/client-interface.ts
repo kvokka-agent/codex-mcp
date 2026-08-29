@@ -7,6 +7,8 @@
  */
 import type { AppServerSpawnOptions } from "./lifecycle.js";
 import type {
+  GetAccountParams,
+  GetAccountResult,
   InitializeResult,
   RequestId,
   ThreadBackgroundTerminalsCleanParams,
@@ -61,6 +63,12 @@ export interface ICodexClient {
 
   /** Delete a thread and the history Codex keeps for it. */
   threadDelete(params: ThreadDeleteParams): Promise<Record<string, never>>;
+
+  /**
+   * What account this install signs Codex requests with, and whether it needs
+   * an OpenAI login at all. Answered right after `initialize`, with no thread.
+   */
+  accountRead(params?: GetAccountParams): Promise<GetAccountResult>;
 
   /** Start a new agent turn within a thread. */
   turnStart(params: TurnStartParams, timeout?: number): Promise<TurnStartResult>;

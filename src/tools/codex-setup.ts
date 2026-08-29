@@ -1,8 +1,8 @@
-import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { resolveCodexInvocation } from "../app-server/codex-bin.js";
+import { AppServerClient } from "../app-server/client.js";
+import type { Account, GetAccountResult } from "../app-server/protocol.js";
 import {
   type CodexExecutableInfo,
   resolveDefaultCodexExecutable,
@@ -18,12 +18,14 @@ export interface CodexSetupInput {
   cwd?: string;
 }
 
-type AuthState = "authenticated" | "unauthenticated" | "unknown";
-
-function isCodexInternalExecutable(info: CodexExecutableInfo): boolean {
-  const ext = path.extname(info.command);
-  return path.basename(info.command, ext).toLowerCase() === "codex-internal";
-}
+/**
+ * What the app server answered about authentication.
+ *
+ * `not_required` is an install whose model provider carries its own
+ * credentials: `account/read` answers `requiresOpenaiAuth: false` there, and a
+ * null account is not a missing login. `unknown` is the state nothing answered.
+ */
+type AuthState = "authenticated" | "unauthenticated" | "not_required" | "unknown";
 
 export interface CodexSetupResult {
   ready: boolean;
@@ -38,6 +40,8 @@ export interface CodexSetupResult {
   auth: {
     ok: boolean;
     state: AuthState;
+    /** The credential the account signs with, as `account/read` named it. */
+    accountType?: Account["type"];
     detail: string;
   };
   backend: {
@@ -58,55 +62,99 @@ export interface CodexSetupResult {
   nextSteps: string[];
 }
 
-function classifyAuthResult(status: number | null, combined: string): AuthState {
-  if (status === 0) return "authenticated";
-  if (/(not (logged|authenticated)|login required|run\s+codex\s+login)/i.test(combined)) {
-    return "unauthenticated";
-  }
-  return "unknown";
-}
-
 function resolveCodexStateDir(): string {
   const configured = process.env.CODEX_MCP_STATE_DIR?.trim();
   return configured && configured !== "" ? configured : path.join(homedir(), ".codex-mcp", "state");
 }
 
-function probeCodexAuth(info: CodexExecutableInfo): CodexSetupResult["auth"] {
-  if (isCodexInternalExecutable(info)) {
+/** What the app server answered, or what went wrong asking it. */
+interface AppServerProbe {
+  auth: CodexSetupResult["auth"];
+}
+
+function accountDetail(account: Account): string {
+  switch (account.type) {
+    case "apiKey":
+      return "`account/read` answered an API key account.";
+    case "chatgpt":
+      return `\`account/read\` answered a ChatGPT account on the ${account.planType} plan.`;
+    case "amazonBedrock":
+      return "`account/read` answered an Amazon Bedrock account.";
+  }
+}
+
+/** The three branches of `account/read`, each read off the answer rather than guessed. */
+function readAuth(answer: GetAccountResult): CodexSetupResult["auth"] {
+  if (answer.account) {
     return {
       ok: true,
-      state: "unknown",
-      detail:
-        "Using a codex-internal executable; auth/login readiness is not probed and does not block setup readiness.",
+      state: "authenticated",
+      accountType: answer.account.type,
+      detail: accountDetail(answer.account),
     };
   }
-
-  const invocation = resolveCodexInvocation(["login", "status"], {
-    codexCommand: info.command,
-    codexIsPath: info.isPath,
-  });
-  const run = spawnSync(invocation.cmd, invocation.args, {
-    encoding: "utf8",
-    timeout: 5000,
-    windowsHide: true,
-  });
-  const combined = `${run.stdout ?? ""}\n${run.stderr ?? ""}`.trim();
-  if (run.error) {
+  if (!answer.requiresOpenaiAuth) {
     return {
-      ok: false,
-      state: "unknown",
-      detail: `Failed to probe auth status: ${run.error.message}`,
+      ok: true,
+      state: "not_required",
+      detail:
+        "`account/read` answered `requiresOpenaiAuth: false`: the configured model provider carries its own credentials, so this install needs no Codex login.",
     };
   }
-  const state = classifyAuthResult(run.status, combined);
   return {
-    // Only an answer the probe classified as authenticated clears this gate: an output no
-    // pattern matched says nothing about login state, and reporting it as ok would let a
-    // caller start a session that fails on authentication.
-    ok: state === "authenticated",
-    state,
-    detail: combined || (state === "authenticated" ? "Authenticated." : "Auth status unknown."),
+    ok: false,
+    state: "unauthenticated",
+    detail:
+      "`account/read` answered `requiresOpenaiAuth: true` with no account: this install has no Codex login.",
   };
+}
+
+/** An auth state nothing answered, carrying the failure that stopped the question. */
+function unreadAuth(detail: string): CodexSetupResult["auth"] {
+  return { ok: false, state: "unknown", detail };
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Ask the running app server what the login scrape used to guess at.
+ *
+ * The connection costs one spawn plus `initialize` plus one request — measured
+ * at 52, 37 and 41 ms on Codex CLI 0.150.1 — and needs no thread.
+ */
+async function probeAppServer(): Promise<AppServerProbe> {
+  const client = new AppServerClient();
+  // An `error` event with no listener is thrown, and the spawn of a missing
+  // executable emits one, so the listener goes on before `start`.
+  client.on("error", () => {});
+  try {
+    try {
+      await client.start({});
+    } catch (err: unknown) {
+      return {
+        auth: unreadAuth(
+          `\`codex app-server\` did not start, so the auth state was not read: ${messageOf(err)}`
+        ),
+      };
+    }
+
+    let answer: GetAccountResult;
+    try {
+      answer = await client.accountRead();
+    } catch (err: unknown) {
+      return {
+        auth: unreadAuth(
+          `\`account/read\` failed, so the auth state was not read: ${messageOf(err)}`
+        ),
+      };
+    }
+
+    return { auth: readAuth(answer) };
+  } finally {
+    await client.destroy();
+  }
 }
 
 /** What the local machine answered about Codex, or what went wrong asking. */
@@ -114,7 +162,6 @@ interface CodexProbe {
   executable: CodexSetupResult["executable"];
   auth: CodexSetupResult["auth"];
   backend: CodexSetupResult["backend"];
-  internalExecutable: boolean;
 }
 
 /** What the CLI answered about its own version, and whether that clears the floor. */
@@ -146,69 +193,47 @@ function probeCodexBackend(): CodexSetupResult["backend"] {
   };
 }
 
-function probeCodexEnvironment(): CodexProbe {
-  let internalExecutable = false;
+function unprobedBackend(reason: string): CodexSetupResult["backend"] {
+  return {
+    ok: false,
+    cliVersion: null,
+    minimumCliVersion: MIN_CODEX_CLI_VERSION,
+    detail: `Codex CLI version not checked because ${reason}.`,
+  };
+}
+
+async function probeCodexEnvironment(): Promise<CodexProbe> {
+  let info: CodexExecutableInfo;
   try {
-    const info = resolveDefaultCodexExecutable();
-    const available = info.source !== "default";
-    internalExecutable = isCodexInternalExecutable(info);
-    const executable: CodexSetupResult["executable"] = {
-      ok: available,
-      source: info.source,
-      command: info.command,
-      isPath: info.isPath,
-      detail:
-        info.source === "default"
-          ? "No codex executable was auto-detected; the server would fall back to `codex` and let process spawn fail later."
-          : `Codex resolves via ${info.source}.`,
-    };
-
-    if (!available) {
-      return {
-        executable,
-        auth: {
-          ok: false,
-          state: "unknown",
-          detail: "Auth status not checked because no codex executable was detected.",
-        },
-        backend: {
-          ok: false,
-          cliVersion: null,
-          minimumCliVersion: MIN_CODEX_CLI_VERSION,
-          detail: "Codex CLI version not checked because no codex executable was detected.",
-        },
-        internalExecutable,
-      };
-    }
-
-    return {
-      executable,
-      auth: probeCodexAuth(info),
-      backend: probeCodexBackend(),
-      internalExecutable,
-    };
+    info = resolveDefaultCodexExecutable();
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
     return {
-      executable: {
-        ok: false,
-        source: "error",
-        detail: message,
-      },
-      auth: {
-        ok: false,
-        state: "unknown",
-        detail: "Auth status not checked because executable resolution failed.",
-      },
-      backend: {
-        ok: false,
-        cliVersion: null,
-        minimumCliVersion: MIN_CODEX_CLI_VERSION,
-        detail: "Codex CLI version not checked because executable resolution failed.",
-      },
-      internalExecutable,
+      executable: { ok: false, source: "error", detail: messageOf(err) },
+      auth: unreadAuth("Auth state not read because executable resolution failed."),
+      backend: unprobedBackend("executable resolution failed"),
     };
   }
+
+  const available = info.source !== "default";
+  const executable: CodexSetupResult["executable"] = {
+    ok: available,
+    source: info.source,
+    command: info.command,
+    isPath: info.isPath,
+    detail: available
+      ? `Codex resolves via ${info.source}.`
+      : "No codex executable was auto-detected; the server would fall back to `codex` and let process spawn fail later.",
+  };
+
+  if (!available) {
+    return {
+      executable,
+      auth: unreadAuth("Auth state not read because no codex executable was detected."),
+      backend: unprobedBackend("no codex executable was detected"),
+    };
+  }
+
+  return { executable, backend: probeCodexBackend(), ...(await probeAppServer()) };
 }
 
 function collectSetupAdvice(
@@ -227,11 +252,8 @@ function collectSetupAdvice(
   if (probe.auth.state === "unauthenticated") {
     warnings.push(probe.auth.detail);
     nextSteps.push("Run `codex login` and rerun `codex_setup`.");
-  } else if (probe.auth.state === "unknown" && !probe.internalExecutable) {
+  } else if (probe.auth.state === "unknown" && probe.executable.ok) {
     warnings.push(probe.auth.detail);
-    nextSteps.push(
-      "Verify Codex authentication explicitly (for example with `codex login status`) before relying on this environment."
-    );
   }
   if (!projectContext.hasUserConfig && !projectContext.hasProjectConfig) {
     warnings.push("No Codex config.toml was found in ~/.codex or this project.");
@@ -240,16 +262,15 @@ function collectSetupAdvice(
     warnings.push(probe.backend.detail);
     nextSteps.push(`Upgrade the Codex CLI to ${MIN_CODEX_CLI_VERSION} or newer.`);
   }
-
   return { warnings, nextSteps };
 }
 
-export function executeCodexSetup(
+export async function executeCodexSetup(
   input: CodexSetupInput | undefined,
   serverCwd: string
-): CodexSetupResult {
+): Promise<CodexSetupResult> {
   const cwd = input?.cwd && input.cwd.trim() !== "" ? input.cwd : serverCwd;
-  const probe = probeCodexEnvironment();
+  const probe = await probeCodexEnvironment();
 
   const projectContext = {
     hasUserConfig: existsSync(path.join(homedir(), ".codex", "config.toml")),

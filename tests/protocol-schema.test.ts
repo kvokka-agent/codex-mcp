@@ -231,6 +231,7 @@ const MODELLED_TYPES: Record<string, string> = {
   ThreadBackgroundTerminalsListParams: "ThreadBackgroundTerminalsListParams",
   ThreadBackgroundTerminalsTerminateParams: "ThreadBackgroundTerminalsTerminateParams",
   ThreadDeleteParams: "ThreadDeleteParams",
+  GetAccountParams: "GetAccountParams",
   TurnStartParams: "TurnStartParams",
   TurnSteerParams: "TurnSteerParams",
   TurnInterruptParams: "TurnInterruptParams",
@@ -314,6 +315,7 @@ const MODELLED_RESULTS: Record<string, string> = {
   TurnStartResult: "v2/TurnStartResponse.json",
   ThreadBackgroundTerminalsListResult: "v2/ThreadBackgroundTerminalsListResponse.json",
   ThreadBackgroundTerminalsTerminateResult: "v2/ThreadBackgroundTerminalsTerminateResponse.json",
+  GetAccountResult: "v2/GetAccountResponse.json",
 };
 
 /**

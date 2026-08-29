@@ -15,6 +15,8 @@ import type { ICodexClient } from "./client-interface.js";
 import { resolveCodexInvocation } from "./codex-bin.js";
 import { type AppServerSpawnOptions, buildAppServerArgs } from "./lifecycle.js";
 import {
+  type GetAccountParams,
+  type GetAccountResult,
   type InitializeParams,
   type InitializeResult,
   type JsonRpcMessage,
@@ -249,6 +251,10 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
 
   async threadDelete(params: ThreadDeleteParams): Promise<Record<string, never>> {
     return this.request<Record<string, never>>(Methods.THREAD_DELETE, params);
+  }
+
+  async accountRead(params: GetAccountParams = {}): Promise<GetAccountResult> {
+    return this.request<GetAccountResult>(Methods.ACCOUNT_READ, params);
   }
 
   async turnStart(

@@ -7,7 +7,9 @@ Before anything else: `bun` >= 1.4, which starts and runs the server, and a
 Codex CLI 0.101.0 or newer that has had `codex login` run — every session runs
 on `codex app-server`, which older builds do not carry. The package ships behind
 a `#!/usr/bin/env bun` line and asks for no Node.js.
-Without a login the server
+A login is what an install whose model provider is
+OpenAI needs; where the provider carries its own credentials, `codex_setup`
+reports `auth.state: not_required` and needs none. Without a login the server
 still starts and `codex_setup` reports `auth.state: unauthenticated` — enough to
 check the protocol, not enough to run a turn.
 
@@ -122,8 +124,7 @@ default instead of the configured one is shaped exactly like the configured one.
 
 ## Checking the install
 
-Call `codex_setup` from the client. It reports the resolved executable, whether
-`codex login status` answered, the Codex CLI version against the minimum above,
-the state directory, and whether a user or project `config.toml` is
-visible from the target directory — with a `nextSteps` line for anything that is
-not ready.
+Call `codex_setup` from the client. It reports the resolved executable, what
+`account/read` answered about this install's account, the Codex CLI version
+against the minimum above, the state directory, and whether a user or project
+`config.toml` is visible from the target directory — with a `nextSteps` line for anything that is not ready.
