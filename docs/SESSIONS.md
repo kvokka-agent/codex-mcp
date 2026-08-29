@@ -18,7 +18,8 @@ How the five tools are used together. Each tool's inputs are in
 
 A start never blocks for the result, so step 2 is the only place the caller
 waits. `codex_session(action="interrupt")` stops the current turn without ending
-the session.
+the session, and `codex_session(action="steer", prompt=…)` corrects it without
+stopping it — the turn carries on and answers once, at its end.
 
 ## Checking
 
@@ -271,6 +272,19 @@ directory a live server owns is skipped whatever its age.
 `codex_session(action="clean")` does the same on demand, filtered by `statuses`
 and `olderThanMs`, previewable with `dryRun`, and leaving the disk alone with
 `includeDisk: false`.
+
+## Steering a turn that is going the wrong way
+
+`codex_session(action="steer", sessionId, prompt)` adds to the turn already
+running: another task, a constraint, a directory it should not touch. Nothing
+already done is thrown away and no turn starts — the answer's `turnId` is the
+turn the steer joined.
+
+Codex reads the added text at the turn's next model round trip, so a steer sent
+as the turn ends misses it and answers `SESSION_NOT_RUNNING` rather than
+reporting a steer that landed. Steer as soon as a poll shows the turn going
+wrong, and read the answer.
+[TOOLS.md](TOOLS.md#steering-the-turn-that-is-running) is the field list.
 
 ## Background terminals
 

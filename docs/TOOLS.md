@@ -228,6 +228,7 @@ single read.
 | `resume` | `sessionId` | `{ sessionId, threadId, status: "idle", pollInterval, progress }` |
 | `cancel` | `sessionId` | `{ success, message }` — terminal |
 | `interrupt` | `sessionId` | `{ success, message }` — stops the current turn, session stays usable |
+| `steer` | `sessionId`, `prompt` | `{ sessionId, threadId, turnId, status, message }` — adds to the turn already running |
 | `fork` | `sessionId` | `{ sessionId, threadId, status: "idle", pollInterval }` for the copy; the source is untouched |
 | `clean` | — | `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }` |
 | `clean_background_terminals` | `sessionId` | `{ sessionId, backgroundTerminals }` |
@@ -258,6 +259,22 @@ that ended, absent until one does. `status` says what the session is now and
 `cancel` rewrites it; `lastTurn` says what the work came to and `cancel` leaves
 it alone, so a session closed after it answered reads `status: "cancelled"` with
 `lastTurn.outcome: "completed"`.
+
+### Steering the turn that is running
+
+`steer` sends `turn/steer` with the running turn's id as `expectedTurnId`. It
+starts no turn: `turnId` is the turn the steer joined, `status` is the status the
+session was already on, and the turn writes its one result at its end, so the
+caller carries on polling.
+
+Codex reads the added text at the turn's next model round trip rather than on
+arrival — measured on `codex-cli 0.150.1`, a steer sent 2 s into an 8 s turn
+reached the model at +8232 ms as a `userMessage` item, and the app server made a
+second upstream request inside the same turn carrying it. A steer sent as a turn
+ends therefore reaches a turn that is over, which answers `SESSION_NOT_RUNNING`
+naming the turn, with the backend's own sentence: `no active turn to steer` when
+the turn had ended, `expected active turn id X but found Y` when the session had
+moved on to another turn.
 
 ### The background terminals of a thread
 

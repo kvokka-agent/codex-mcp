@@ -283,7 +283,7 @@ const sessionToolInputShape = {
     .string()
     .optional()
     .describe(
-      "Required for get/resume/cancel/interrupt/fork/clean_background_terminals/terminate_background_terminal"
+      "Required for get/resume/cancel/interrupt/steer/fork/clean_background_terminals/terminate_background_terminal"
     ),
   includeSensitive: z
     .boolean()
@@ -310,6 +310,13 @@ const sessionToolInputShape = {
     .optional()
     .describe(
       "For terminate_background_terminal only. The processId clean_background_terminals reported for that terminal."
+    ),
+  prompt: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "For steer only. What to add to the turn already running — a correction, a constraint, an extra task."
     ),
 };
 
@@ -393,6 +400,12 @@ const sessionToolOutputShape = {
     .optional()
     .describe(
       "Recommended minimum delay before next poll (ms): running >=120000, waiting_approval ~=1000."
+    ),
+  turnId: z
+    .string()
+    .optional()
+    .describe(
+      "For steer: the turn the steer joined. It is the turn that was already running, not a new one."
     ),
   matchedSessionIds: z.array(z.string()).optional(),
   removedSessionIds: z.array(z.string()).optional(),
@@ -912,13 +925,14 @@ function registerCodexSessionTool(ctx: ToolContext): void {
     "codex_session",
     {
       title: "Manage Sessions",
-      description: `Session actions: list, get, resume, cancel, interrupt, fork, clean, clean_background_terminals, terminate_background_terminal.
+      description: `Session actions: list, get, resume, cancel, interrupt, steer, fork, clean, clean_background_terminals, terminate_background_terminal.
 
 - list: every session of the state directory, this server's and every other server's. Each carries \`activity\` — what it last said it was doing — and \`owner\`, the process holding it. A session with status \`abandoned\` and no \`owner\` was cut off when its server went away and can be resumed.
 - get: details. includeSensitive defaults to false; true adds threadId/cwd/profile/config.
 - resume: pick an \`abandoned\` session back up and drive it from here. Codex restores the thread from its rollout log, including the turn it was interrupted in; continue with codex_reply. A session another running server holds is refused.
 - cancel: terminal.
-- interrupt: stop current turn.
+- interrupt: stop current turn, throwing away what it had done.
+- steer: add to the turn already running instead of stopping it. Takes prompt. No turn starts: turnId is the turn the steer joined, status stays running, and the turn's one result still comes at its end — carry on polling. Codex reads the added text at the turn's next model round trip, so a steer sent as a turn ends can miss it, and that answers SESSION_NOT_RUNNING naming the turn rather than reporting a steer that landed.
 - fork: clone current thread into a new session; source remains unchanged.
 - clean: batch-remove idle/error/cancelled sessions, optionally from disk too. Pass statuses:["abandoned"] to drop cut-off sessions instead of resuming them.
 - clean_background_terminals: terminate every background terminal of this thread and answer what happened. backgroundTerminals.terminals lists what was there, each with terminated — what Codex answered for that process — and gone, measured by listing the thread again afterwards. backgroundTerminals.survivors is what was still standing at the end. A listing that failed leaves listError and no measurement, never a claim that the thread is clear.

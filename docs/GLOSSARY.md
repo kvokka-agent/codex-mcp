@@ -42,6 +42,11 @@ this server entirely.
 result, an error, a cancellation, or the death of the process driving it. Only
 one turn of a session runs at a time; different sessions run at once.
 
+**steer** — adding input to the turn that is already running, through
+`codex_session(action="steer")`. No turn starts and nothing already done is
+thrown away: Codex reads the added text at the turn's next model round trip and
+the turn answers once, at its end.
+
 **result** — what a finished turn answers with: the final assistant text,
 structured output when the caller asked for a schema, the turn's status and its
 outcome. Every `codex_check` of a terminal session carries it, so a caller that

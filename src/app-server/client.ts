@@ -40,6 +40,8 @@ import {
   type TurnInterruptParams,
   type TurnStartParams,
   type TurnStartResult,
+  type TurnSteerParams,
+  type TurnSteerResult,
 } from "./protocol.js";
 
 declare const __PKG_VERSION__: string;
@@ -268,6 +270,10 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
 
   async turnInterrupt(params: TurnInterruptParams): Promise<void> {
     await this.request<void>(Methods.TURN_INTERRUPT, params);
+  }
+
+  async turnSteer(params: TurnSteerParams): Promise<TurnSteerResult> {
+    return this.request<TurnSteerResult>(Methods.TURN_STEER, params);
   }
 
   // ── Low-level JSON-RPC ─────────────────────────────────────────

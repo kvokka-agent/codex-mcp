@@ -27,7 +27,7 @@ Minimum pass target:
 2. `codex` and `codex_reply` are asynchronous (return immediately, then progress via polling).
 3. Approval flow works (`respond_permission`) and session state changes correctly.
 4. A real coding task closes the loop: test fails -> agent fixes -> test passes.
-5. Session management works (`list/get/resume/cancel/interrupt/fork/clean/clean_background_terminals/terminate_background_terminal`).
+5. Session management works (`list/get/resume/cancel/interrupt/steer/fork/clean/clean_background_terminals/terminate_background_terminal`).
 6. A session whose server went away comes back as `abandoned` and `resume` carries its thread on.
 
 Optional but recommended:
@@ -463,6 +463,7 @@ Validate:
 7. `action="clean"` batch-removes terminal sessions. Run it first with `dryRun: true` and confirm `matchedSessionIds` lists only `idle`/`error`/`cancelled` sessions, then run it for real and confirm `removedCount` matches and `codex_session(action="list")` no longer shows them.
 8. `action="clean_background_terminals"` answers `backgroundTerminals` and does not crash the session. On a thread that ran no background command it reads `terminals: []`, `survivors: []`, `truncated: false`. Start one (`codex_reply` with a prompt that runs a command in the background) and confirm the same call then lists it, carries `terminated` for it, and reports it in `survivors` or as `gone: true`.
 9. `action="terminate_background_terminal"` with a `processId` from step 8 answers `terminals: [{ processId, terminated }]`. A `processId` no longer running answers `terminated: false` rather than an error.
+10. `action="steer"` on a running turn answers `turnId` equal to the `activeTurnId` the previous poll reported, and `status: "running"`. Use the slow prompt below, poll once to confirm `running`, then steer with `"Also list the file sizes"`. The session stays on the same turn — no new `turnId` appears — and the final `result` covers what the steer asked for. Steering an `idle` session answers `SESSION_NOT_RUNNING`; steering with no `prompt` answers `INVALID_ARGUMENT`.
 
 **Note:** `thread/backgroundTerminals/list` and `…/terminate` arrived in Codex CLI 0.150; the floor this server drives is 0.101.0. codex-mcp asks for the `experimentalApi` capability during `initialize`, so a build that carries these methods serves them. A build that does not answers `Error [INTERNAL]`: `clean_background_terminals` falls back to `thread/backgroundTerminals/clean` and reports `cleanCalled: true` with `listError.stage: "before"`, and `terminate_background_terminal` raises the error. Record which of the two you saw and continue.
 
@@ -473,7 +474,12 @@ Example payload:
 { "action": "clean", "statuses": ["cancelled"], "olderThanMs": 0 }
 { "action": "clean_background_terminals", "sessionId": "<SESSION_ID>" }
 { "action": "terminate_background_terminal", "sessionId": "<SESSION_ID>", "processId": "<PROCESS_ID>" }
+{ "action": "steer", "sessionId": "<SESSION_ID>", "prompt": "Also list the file sizes" }
 ```
+
+The `steer` action needs the same `running` window the `interrupt` trigger below
+creates, so run both against that session: steer it first, confirm the turn
+carried on, then interrupt it.
 
 Interrupt trigger strategy:
 
@@ -503,6 +509,7 @@ Pass criteria:
 3. `interrupt` successfully stops a running turn (or is documented as missed due to timing).
 4. `clean` reports `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }`, and the dry run removes nothing.
 5. `clean_background_terminals` returns `{ sessionId, backgroundTerminals }` whose `terminals` and `survivors` match what the thread actually ran, and `terminate_background_terminal` returns the `terminated` the CLI answered — never `Error [INTERNAL]` on a CLI at 0.150 or above (see the note under step 9 for one below it).
+6. `steer` answers the running turn's own id and the turn carries on to one result covering the steered request; a steer that arrives after the turn ended answers `SESSION_NOT_RUNNING` carrying `no active turn to steer`, and is recorded as that rather than as a steer that landed.
 
 ## TC6 (Optional): Structured Output
 

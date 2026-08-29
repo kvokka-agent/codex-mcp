@@ -70,6 +70,51 @@ describe("executeCodexSession", () => {
     );
   });
 
+  it("steers a session and answers with the turn the steer joined", async () => {
+    const steerSession = jest.fn(async () => ({
+      sessionId: "sess_2",
+      threadId: "thread_2",
+      turnId: "turn_running",
+      status: "running" as const,
+      message: "Steered turn turn_running, which was already running: no turn started.",
+    }));
+    const sessionManager = { steerSession } as unknown as SessionManager;
+
+    await expect(
+      executeCodexSession(
+        { action: "steer", sessionId: "sess_2", prompt: "not that directory" },
+        sessionManager
+      )
+    ).resolves.toEqual({
+      sessionId: "sess_2",
+      threadId: "thread_2",
+      turnId: "turn_running",
+      status: "running",
+      message: "Steered turn turn_running, which was already running: no turn started.",
+    });
+    expect(steerSession).toHaveBeenCalledWith("sess_2", "not that directory");
+  });
+
+  it("returns INVALID_ARGUMENT when steer names no prompt or no session", async () => {
+    const steerSession = jest.fn();
+    const sessionManager = { steerSession } as unknown as SessionManager;
+
+    await expect(
+      executeCodexSession({ action: "steer", sessionId: "sess_2" }, sessionManager)
+    ).resolves.toEqual(
+      expect.objectContaining({
+        isError: true,
+        error: expect.stringContaining("prompt required for 'steer'"),
+      })
+    );
+    await expect(
+      executeCodexSession({ action: "steer", prompt: "go left" }, sessionManager)
+    ).resolves.toEqual(
+      expect.objectContaining({ isError: true, error: expect.stringContaining("INVALID_ARGUMENT") })
+    );
+    expect(steerSession).not.toHaveBeenCalled();
+  });
+
   it("returns INVALID_ARGUMENT when terminate_background_terminal names no processId", async () => {
     const terminateBackgroundTerminal = jest.fn();
     const sessionManager = { terminateBackgroundTerminal } as unknown as SessionManager;
