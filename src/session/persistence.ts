@@ -200,18 +200,16 @@ export class SessionPersistence {
    * event, so the log dates it by when it happened rather than when it was flushed.
    */
   appendEvent(sessionId: string, type: SessionEventType, data: unknown, timestamp: string): void {
-    let log = this.eventLogs.get(sessionId);
-    if (!log) {
-      const dir = join(this.sessionsDir, sessionId);
-      mkdirSync(dir, { recursive: true });
-      log = new EventLog({ filePath: join(dir, "events.jsonl") });
-      this.eventLogs.set(sessionId, log);
-    }
-    log.append({ type, data, timestamp }, eventCriticality(type));
+    this.eventLogFor(sessionId).append({ type, data, timestamp }, eventCriticality(type));
   }
 
   /** Set the next sequence number for a recovered session's event log. */
   setEventLogNextSeq(sessionId: string, seq: number): void {
+    this.eventLogFor(sessionId).setNextSeq(seq);
+  }
+
+  /** The session's event log, with its directory, created on first use. */
+  private eventLogFor(sessionId: string): EventLog {
     let log = this.eventLogs.get(sessionId);
     if (!log) {
       const dir = join(this.sessionsDir, sessionId);
@@ -219,7 +217,7 @@ export class SessionPersistence {
       log = new EventLog({ filePath: join(dir, "events.jsonl") });
       this.eventLogs.set(sessionId, log);
     }
-    log.setNextSeq(seq);
+    return log;
   }
 
   /** Persist the final result. */
