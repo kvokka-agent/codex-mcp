@@ -183,7 +183,7 @@ function msToMinutes(ms: number): number {
   return Math.floor(ms / 60_000);
 }
 
-function buildConfigGuideText(defaults: SessionDefaults): string {
+function configTopLevelLines(defaults: SessionDefaults): string[] {
   return [
     "## Top-level parameters (`codex`)",
     "",
@@ -202,6 +202,11 @@ function buildConfigGuideText(defaults: SessionDefaults): string {
     `- \`advanced.approvalTimeoutMs\`: auto-decline timeout for approval/user-input requests (default \`${defaults.approvalTimeoutMs}\` ms).`,
     "- `advanced.outputSchema`: JSON Schema for structured output from `codex` turns (default: none).",
     "",
+  ];
+}
+
+function configMappingLines(): string[] {
+  return [
     "## `advanced.config` mapping",
     "",
     "Forwarded as `-c key=value` flags to `codex app-server`.",
@@ -227,6 +232,11 @@ function buildConfigGuideText(defaults: SessionDefaults): string {
     "- `model`, `approvalPolicy`, `sandbox`, and `cwd` update in-memory session defaults for later turns.",
     "- `effort`, `summary`, `personality`, and `outputSchema` apply to the submitted turn payload.",
     "",
+  ];
+}
+
+function configEnvironmentLines(defaults: SessionDefaults): string[] {
+  return [
     "## Environment variables",
     "",
     "Read by the codex-mcp process at startup; the MCP client sets them where it launches the server.",
@@ -247,6 +257,11 @@ function buildConfigGuideText(defaults: SessionDefaults): string {
     "",
     "A value none of those five can be read as stops the server at startup, naming the variable.",
     "",
+  ];
+}
+
+function configReferenceLines(): string[] {
+  return [
     "## Version compatibility note",
     "",
     "Available `advanced.config` keys depend on installed Codex CLI version.",
@@ -259,6 +274,15 @@ function buildConfigGuideText(defaults: SessionDefaults): string {
     "- `progress` is included on `codex`, `codex_reply`, and `codex_check` responses.",
     "- `advanced.developerInstructions` is appended after the server's activity-marker instruction, not instead of it.",
     "",
+  ];
+}
+
+function buildConfigGuideText(defaults: SessionDefaults): string {
+  return [
+    ...configTopLevelLines(defaults),
+    ...configMappingLines(),
+    ...configEnvironmentLines(defaults),
+    ...configReferenceLines(),
   ].join("\n");
 }
 
@@ -321,7 +345,7 @@ function buildGotchasText(defaults: SessionDefaults): string {
   ].join("\n");
 }
 
-function buildQuickstartText(defaults: SessionDefaults): string {
+function quickstartStartLines(): string[] {
   return [
     "## Minimal flow",
     "",
@@ -350,6 +374,11 @@ function buildQuickstartText(defaults: SessionDefaults): string {
     "}",
     "```",
     "",
+  ];
+}
+
+function quickstartCheckLines(defaults: SessionDefaults): string[] {
+  return [
     "2. Check where it stands (`codex_check`)",
     "",
     "```json",
@@ -367,6 +396,11 @@ function buildQuickstartText(defaults: SessionDefaults): string {
     "- `waiting_approval` is the exception: poll/answer around 1000ms to avoid timeout.",
     `- A pending approval auto-declines after ${defaults.approvalTimeoutMs}ms. Under \`untrusted\` or \`on-request\`, that has to outlive the gap between two polls: raise \`advanced.approvalTimeoutMs\` to at least 300000 where it does not.`,
     "",
+  ];
+}
+
+function quickstartRespondLines(): string[] {
+  return [
     "3. If `actions[]` contains an approval request, respond:",
     "",
     "```json",
@@ -396,6 +430,11 @@ function buildQuickstartText(defaults: SessionDefaults): string {
     "5. Keep checking until terminal status (`idle`, `error`, or `cancelled`); the check that first sees it carries `result`.",
     "6. Read `progress.phase` / `progress.tokens` for a coarse execution snapshot, and `progress.activity` for what Codex says it is doing right now.",
     "",
+  ];
+}
+
+function quickstartClosingLines(): string[] {
+  return [
     "## What the person waiting sees",
     "",
     "The line the caller writes between two polls is the whole of it. A client renders `notifications/progress` under the call that asked for it — the server sends one per activity line and a heartbeat every 30s while a poll is held — but only for the caller that made the call. A caller whose calls nobody watches, a subagent driving a turn for a delegator, writes each round's line into its own output under a marker its delegator reads.",
@@ -412,6 +451,15 @@ function buildQuickstartText(defaults: SessionDefaults): string {
     "- `codex-mcp:///delegation-guide`: task presets for approvalPolicy/sandbox selection.",
     "- `codex-mcp:///gotchas`: checking, approval timeout, and exec-mode failure modes.",
     "",
+  ];
+}
+
+function buildQuickstartText(defaults: SessionDefaults): string {
+  return [
+    ...quickstartStartLines(),
+    ...quickstartCheckLines(defaults),
+    ...quickstartRespondLines(),
+    ...quickstartClosingLines(),
   ].join("\n");
 }
 
@@ -441,7 +489,7 @@ function buildErrorsText(): string {
   return lines.join("\n");
 }
 
-function buildDelegationGuideText(defaults: SessionDefaults): string {
+function delegationTaskLines(): string[] {
   return [
     "# Codex Delegation Guide",
     "",
@@ -464,6 +512,11 @@ function buildDelegationGuideText(defaults: SessionDefaults): string {
     "",
     "**Key rule:** `read-only` sandbox already prevents writes, so `approvalPolicy: 'never'` is safe with it. Avoid `untrusted` + `read-only` — every read command triggers approval for no safety gain.",
     "",
+  ];
+}
+
+function delegationPolicyLines(defaults: SessionDefaults): string[] {
+  return [
     "## Approval policy quick guide",
     defaults.approvalPolicy || defaults.sandbox
       ? `A call that names neither starts on ${[
@@ -496,6 +549,11 @@ function buildDelegationGuideText(defaults: SessionDefaults): string {
     "",
     "**`minimal` and web search:** some Codex CLI builds reject `effort: 'minimal'` when the `web_search` tool is enabled. codex-mcp retries that turn at `low` and reports the switch in `compatWarnings` on the response.",
     "",
+  ];
+}
+
+function delegationTroubleshootingLines(): string[] {
+  return [
     "## Troubleshooting",
     "",
     "**Empty polls:** Pass `waitMs`; stop when status is terminal. See `codex-mcp:///gotchas`.",
@@ -515,6 +573,14 @@ function buildDelegationGuideText(defaults: SessionDefaults): string {
     "- `danger-full-access` allows network and system access — treat as root-equivalent",
     "- Persisted session data (events, results) may contain code snippets and file paths — stored in `~/.codex-mcp/state/`, or in `CODEX_MCP_STATE_DIR` when that variable is set (see `codex-mcp:///config`)",
     "",
+  ];
+}
+
+function buildDelegationGuideText(defaults: SessionDefaults): string {
+  return [
+    ...delegationTaskLines(),
+    ...delegationPolicyLines(defaults),
+    ...delegationTroubleshootingLines(),
   ].join("\n");
 }
 
@@ -573,6 +639,54 @@ function buildCompatReport(deps: ResourceDeps, codexCliVersion: string | null): 
   );
 }
 
+function buildServerInfoJson(deps: ResourceDeps, getCodexCliVersion: () => string | null): string {
+  const observedModel = deps.sessionManager.getObservedDefaultModel();
+  return JSON.stringify(
+    {
+      name: "codex-mcp",
+      version: deps.version,
+      codexCliVersion: getCodexCliVersion(),
+      clientMode: deps.clientMode,
+      runtime: describeRuntime(),
+      platform: process.platform,
+      arch: process.arch,
+      stdioMode: resolveStdioMode().mode,
+      supportedApprovalPolicies: APPROVAL_POLICIES,
+      supportedSandboxModes: SANDBOX_MODES,
+      supportedEffortLevels: EFFORT_LEVELS,
+      activeSessions: deps.sessionManager.getActiveSessionCount(),
+      defaultModel: observedModel,
+      defaultModelSource: observedModel ? "session-default" : "unknown",
+      resources: RESOURCE_CATALOG.map((entry) => ({
+        uri: RESOURCE_URIS[entry.key],
+        title: entry.title,
+        mimeType: entry.mimeType,
+        description: entry.description,
+      })),
+    },
+    null,
+    2
+  );
+}
+
+function registerCatalogResource(
+  server: Pick<McpServer, "registerResource">,
+  entry: ResourceCatalogEntry,
+  read: (uri: URL) => ReadResourceResult
+): void {
+  const uri = new URL(RESOURCE_URIS[entry.key]);
+  server.registerResource(
+    entry.name,
+    uri.toString(),
+    {
+      title: entry.title,
+      description: entry.description,
+      mimeType: entry.mimeType,
+    },
+    () => read(uri)
+  );
+}
+
 export function registerResources(
   server: Pick<McpServer, "registerResource">,
   deps: ResourceDeps
@@ -586,136 +700,31 @@ export function registerResources(
 
   const byKey = new Map(RESOURCE_CATALOG.map((entry) => [entry.key, entry]));
 
-  const serverInfoMeta = byKey.get("serverInfo")!;
-  const serverInfoUri = new URL(RESOURCE_URIS.serverInfo);
-  server.registerResource(
-    serverInfoMeta.name,
-    serverInfoUri.toString(),
-    {
-      title: serverInfoMeta.title,
-      description: serverInfoMeta.description,
-      mimeType: serverInfoMeta.mimeType,
-    },
-    () => {
-      const observedModel = deps.sessionManager.getObservedDefaultModel();
-      return asTextResource(
-        serverInfoUri,
-        JSON.stringify(
-          {
-            name: "codex-mcp",
-            version: deps.version,
-            codexCliVersion: getCodexCliVersion(),
-            clientMode: deps.clientMode,
-            runtime: describeRuntime(),
-            platform: process.platform,
-            arch: process.arch,
-            stdioMode: resolveStdioMode().mode,
-            supportedApprovalPolicies: APPROVAL_POLICIES,
-            supportedSandboxModes: SANDBOX_MODES,
-            supportedEffortLevels: EFFORT_LEVELS,
-            activeSessions: deps.sessionManager.getActiveSessionCount(),
-            defaultModel: observedModel,
-            defaultModelSource: observedModel ? "session-default" : "unknown",
-            resources: RESOURCE_CATALOG.map((entry) => ({
-              uri: RESOURCE_URIS[entry.key],
-              title: entry.title,
-              mimeType: entry.mimeType,
-              description: entry.description,
-            })),
-          },
-          null,
-          2
-        ),
-        "application/json"
-      );
-    }
+  registerCatalogResource(server, byKey.get("serverInfo")!, (uri) =>
+    asTextResource(uri, buildServerInfoJson(deps, getCodexCliVersion), "application/json")
   );
 
-  const compatReportMeta = byKey.get("compatReport")!;
-  const compatReportUri = new URL(RESOURCE_URIS.compatReport);
-  server.registerResource(
-    compatReportMeta.name,
-    compatReportUri.toString(),
-    {
-      title: compatReportMeta.title,
-      description: compatReportMeta.description,
-      mimeType: compatReportMeta.mimeType,
-    },
-    () =>
-      asTextResource(
-        compatReportUri,
-        buildCompatReport(deps, getCodexCliVersion()),
-        "application/json"
-      )
+  registerCatalogResource(server, byKey.get("compatReport")!, (uri) =>
+    asTextResource(uri, buildCompatReport(deps, getCodexCliVersion()), "application/json")
   );
 
-  const configMeta = byKey.get("config")!;
-  const configUri = new URL(RESOURCE_URIS.config);
-  server.registerResource(
-    configMeta.name,
-    configUri.toString(),
-    {
-      title: configMeta.title,
-      description: configMeta.description,
-      mimeType: configMeta.mimeType,
-    },
-    () => asTextResource(configUri, buildConfigGuideText(deps.sessionDefaults), "text/markdown")
+  registerCatalogResource(server, byKey.get("config")!, (uri) =>
+    asTextResource(uri, buildConfigGuideText(deps.sessionDefaults), "text/markdown")
   );
 
-  const gotchasMeta = byKey.get("gotchas")!;
-  const gotchasUri = new URL(RESOURCE_URIS.gotchas);
-  server.registerResource(
-    gotchasMeta.name,
-    gotchasUri.toString(),
-    {
-      title: gotchasMeta.title,
-      description: gotchasMeta.description,
-      mimeType: gotchasMeta.mimeType,
-    },
-    () => asTextResource(gotchasUri, buildGotchasText(deps.sessionDefaults), "text/markdown")
+  registerCatalogResource(server, byKey.get("gotchas")!, (uri) =>
+    asTextResource(uri, buildGotchasText(deps.sessionDefaults), "text/markdown")
   );
 
-  const quickstartMeta = byKey.get("quickstart")!;
-  const quickstartUri = new URL(RESOURCE_URIS.quickstart);
-  server.registerResource(
-    quickstartMeta.name,
-    quickstartUri.toString(),
-    {
-      title: quickstartMeta.title,
-      description: quickstartMeta.description,
-      mimeType: quickstartMeta.mimeType,
-    },
-    () => asTextResource(quickstartUri, buildQuickstartText(deps.sessionDefaults), "text/markdown")
+  registerCatalogResource(server, byKey.get("quickstart")!, (uri) =>
+    asTextResource(uri, buildQuickstartText(deps.sessionDefaults), "text/markdown")
   );
 
-  const errorsMeta = byKey.get("errors")!;
-  const errorsUri = new URL(RESOURCE_URIS.errors);
-  server.registerResource(
-    errorsMeta.name,
-    errorsUri.toString(),
-    {
-      title: errorsMeta.title,
-      description: errorsMeta.description,
-      mimeType: errorsMeta.mimeType,
-    },
-    () => asTextResource(errorsUri, buildErrorsText(), "text/markdown")
+  registerCatalogResource(server, byKey.get("errors")!, (uri) =>
+    asTextResource(uri, buildErrorsText(), "text/markdown")
   );
 
-  const delegationGuideMeta = byKey.get("delegationGuide")!;
-  const delegationGuideUri = new URL(RESOURCE_URIS.delegationGuide);
-  server.registerResource(
-    delegationGuideMeta.name,
-    delegationGuideUri.toString(),
-    {
-      title: delegationGuideMeta.title,
-      description: delegationGuideMeta.description,
-      mimeType: delegationGuideMeta.mimeType,
-    },
-    () =>
-      asTextResource(
-        delegationGuideUri,
-        buildDelegationGuideText(deps.sessionDefaults),
-        "text/markdown"
-      )
+  registerCatalogResource(server, byKey.get("delegationGuide")!, (uri) =>
+    asTextResource(uri, buildDelegationGuideText(deps.sessionDefaults), "text/markdown")
   );
 }
