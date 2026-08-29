@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mockModule } from "./helpers/mock.js";
+import { present } from "./helpers/present.js";
 
 /**
  * `detectCodexCliVersion` shells out to `codex --version`; the stub keeps the suite off the
@@ -274,8 +275,10 @@ async function openServer(options: Parameters<typeof createServer>[1]): Promise<
     }
   ).server._requestHandlers;
 
-  const call = async <T>(method: string, params: Record<string, unknown>): Promise<T> =>
-    (await handlers.get(method)!({ jsonrpc: "2.0", id: 1, method, params }, {})) as unknown as T;
+  const call = async <T>(method: string, params: Record<string, unknown>): Promise<T> => {
+    const handler = present(handlers.get(method), `the ${method} request handler`);
+    return (await handler({ jsonrpc: "2.0", id: 1, method, params }, {})) as unknown as T;
+  };
 
   const resourceList = await call<{ resources: Array<Record<string, unknown>> }>(
     "resources/list",
@@ -334,7 +337,8 @@ describe("resource documents served over MCP", () => {
   });
 
   it("lists in server-info exactly the resources the server registered", () => {
-    const info = JSON.parse(docs.get(RESOURCE_URIS.serverInfo)!) as {
+    const serverInfo = present(docs.get(RESOURCE_URIS.serverInfo), "the server-info resource");
+    const info = JSON.parse(serverInfo) as {
       resources: Array<Record<string, unknown>>;
     };
 
@@ -359,7 +363,11 @@ describe("resource documents served over MCP", () => {
   });
 
   it("counts in the compat report the tools the server actually exposes", () => {
-    const compat = JSON.parse(docs.get(RESOURCE_URIS.compatReport)!) as {
+    const compatReport = present(
+      docs.get(RESOURCE_URIS.compatReport),
+      "the compat-report resource"
+    );
+    const compat = JSON.parse(compatReport) as {
       toolCounts: { core: number };
       runtimeWarnings: string[];
       runtime: { codexMcpVersion: string; codexCliVersion: string | null };
@@ -380,8 +388,8 @@ describe("resource documents served over MCP", () => {
   });
 
   it("documents error codes that match the ErrorCode enum one-for-one", () => {
-    const errorsText = docs.get(RESOURCE_URIS.errors)!;
-    const codesSection = errorsText.split("## Codes")[1]!.split("## Recovery basics")[0]!;
+    const errorsText = present(docs.get(RESOURCE_URIS.errors), "the errors resource");
+    const codesSection = errorsText.split("## Codes")[1].split("## Recovery basics")[0];
     const documented = Array.from(codesSection.matchAll(/^- `([A-Z_]+)`: (.+)$/gm));
 
     expect(documented.map((m) => m[1])).toEqual(Object.values(ErrorCode));
@@ -399,8 +407,8 @@ describe("resource documents served over MCP", () => {
   });
 
   it("documents in the config guide every CODEX_MCP_* variable the source carries", () => {
-    const configText = docs.get(RESOURCE_URIS.config)!;
-    const section = configText.split("## Environment variables")[1]!.split("\n## ")[0]!;
+    const configText = present(docs.get(RESOURCE_URIS.config), "the config resource");
+    const section = configText.split("## Environment variables")[1].split("\n## ")[0];
     const documented = collectMatches(section, /^- `(CODEX_MCP_[A-Z_]+)`: (.+)$/gm);
 
     expect(SRC_ENV_VARS.size).toBeGreaterThan(0);
@@ -411,23 +419,33 @@ describe("resource documents served over MCP", () => {
   });
 
   it("points at the state-directory variable where the delegation guide names the path", () => {
-    const guide = docs.get(RESOURCE_URIS.delegationGuide)!;
-    const stateDirLine = guide.match(/^- Persisted session data .+$/m)![0];
+    const guide = present(docs.get(RESOURCE_URIS.delegationGuide), "the delegation guide resource");
+    const stateDirLine = present(
+      guide.match(/^- Persisted session data .+$/m),
+      "the persisted-session-data line of the delegation guide"
+    )[0];
 
     expect(SRC_ENV_VARS.has("CODEX_MCP_STATE_DIR")).toBe(true);
     expect(stateDirLine).toContain("`CODEX_MCP_STATE_DIR`");
   });
 
   it("describes `codex` required and optional parameters as the schema declares them", () => {
-    const configText = docs.get(RESOURCE_URIS.config)!;
-    const codexSchema = tools.get("codex")!.inputSchema!;
+    const configText = present(docs.get(RESOURCE_URIS.config), "the config resource");
+    const codexTool = present(tools.get("codex"), "the codex tool");
+    const codexSchema = present(codexTool.inputSchema, "the codex input schema");
     const required = codexSchema.required ?? [];
     const optional = Object.keys(codexSchema.properties ?? {}).filter(
       (key) => !required.includes(key)
     );
 
-    const requiredLine = configText.match(/^- Required: (.+)$/m)![1];
-    const optionalLine = configText.match(/^- Optional: (.+)$/m)![1];
+    const requiredLine = present(
+      configText.match(/^- Required: (.+)$/m),
+      "the required-parameter line of the config guide"
+    )[1];
+    const optionalLine = present(
+      configText.match(/^- Optional: (.+)$/m),
+      "the optional-parameter line of the config guide"
+    )[1];
 
     for (const key of required) {
       expect(requiredLine, `required param missing from config guide: ${key}`).toContain(
@@ -443,9 +461,10 @@ describe("resource documents served over MCP", () => {
   });
 
   it("names only real `advanced.*` fields", () => {
-    const advancedProps = Object.keys(
-      tools.get("codex")!.inputSchema!.properties!.advanced.properties ?? {}
-    );
+    const codexTool = present(tools.get("codex"), "the codex tool");
+    const codexSchema = present(codexTool.inputSchema, "the codex input schema");
+    const codexProperties = present(codexSchema.properties, "the codex input schema properties");
+    const advancedProps = Object.keys(codexProperties.advanced.properties ?? {});
     const mentioned = collectMatches(allText, /advanced\.([A-Za-z]+)/g);
 
     expect(mentioned.length).toBeGreaterThan(0);
@@ -453,8 +472,20 @@ describe("resource documents served over MCP", () => {
   });
 
   it("uses only actions that codex_check and codex_session accept", () => {
-    const checkActions = tools.get("codex_check")!.inputSchema!.properties!.action.enum ?? [];
-    const sessionActions = tools.get("codex_session")!.inputSchema!.properties!.action.enum ?? [];
+    const checkTool = present(tools.get("codex_check"), "the codex_check tool");
+    const checkSchema = present(checkTool.inputSchema, "the codex_check input schema");
+    const checkProperties = present(
+      checkSchema.properties,
+      "the codex_check input schema properties"
+    );
+    const sessionTool = present(tools.get("codex_session"), "the codex_session tool");
+    const sessionSchema = present(sessionTool.inputSchema, "the codex_session input schema");
+    const sessionProperties = present(
+      sessionSchema.properties,
+      "the codex_session input schema properties"
+    );
+    const checkActions = checkProperties.action.enum ?? [];
+    const sessionActions = sessionProperties.action.enum ?? [];
 
     const usedCheckActions = [
       ...collectMatches(allText, /codex_check\(action="([a-z_]+)"\)/g),
@@ -469,9 +500,14 @@ describe("resource documents served over MCP", () => {
   });
 
   it("keeps the `codex_reply` override list in step with its schema", () => {
-    const configText = docs.get(RESOURCE_URIS.config)!;
-    const replyProps = Object.keys(tools.get("codex_reply")!.inputSchema!.properties ?? {});
-    const overrideLine = configText.match(/^- `codex_reply` can override (.+)$/m)![1];
+    const configText = present(docs.get(RESOURCE_URIS.config), "the config resource");
+    const replyTool = present(tools.get("codex_reply"), "the codex_reply tool");
+    const replySchema = present(replyTool.inputSchema, "the codex_reply input schema");
+    const replyProps = Object.keys(replySchema.properties ?? {});
+    const overrideLine = present(
+      configText.match(/^- `codex_reply` can override (.+)$/m),
+      "the codex_reply override line of the config guide"
+    )[1];
     const claimed = collectMatches(overrideLine, /`([A-Za-z]+)`/g);
 
     expect(claimed.length).toBeGreaterThan(0);
@@ -479,12 +515,18 @@ describe("resource documents served over MCP", () => {
   });
 
   it("places outputSchema where the schemas actually put it", () => {
-    const configText = docs.get(RESOURCE_URIS.config)!;
-    const codexProps = Object.keys(tools.get("codex")!.inputSchema!.properties ?? {});
-    const codexAdvancedProps = Object.keys(
-      tools.get("codex")!.inputSchema!.properties!.advanced.properties ?? {}
+    const configText = present(docs.get(RESOURCE_URIS.config), "the config resource");
+    const codexTool = present(tools.get("codex"), "the codex tool");
+    const codexSchema = present(codexTool.inputSchema, "the codex input schema");
+    const codexSchemaProperties = present(
+      codexSchema.properties,
+      "the codex input schema properties"
     );
-    const replyProps = Object.keys(tools.get("codex_reply")!.inputSchema!.properties ?? {});
+    const replyTool = present(tools.get("codex_reply"), "the codex_reply tool");
+    const replySchema = present(replyTool.inputSchema, "the codex_reply input schema");
+    const codexProps = Object.keys(codexSchema.properties ?? {});
+    const codexAdvancedProps = Object.keys(codexSchemaProperties.advanced.properties ?? {});
+    const replyProps = Object.keys(replySchema.properties ?? {});
 
     expect(configText).toContain(
       "`codex_reply.outputSchema` is top-level; `codex` takes the same schema as `advanced.outputSchema`."
@@ -495,7 +537,7 @@ describe("resource documents served over MCP", () => {
   });
 
   it("covers every approval policy and sandbox mode in the delegation guide", () => {
-    const guide = docs.get(RESOURCE_URIS.delegationGuide)!;
+    const guide = present(docs.get(RESOURCE_URIS.delegationGuide), "the delegation guide resource");
 
     for (const policy of APPROVAL_POLICIES) {
       expect(guide, `approval policy undocumented: ${policy}`).toContain(`\`${policy}\``);
@@ -506,8 +548,8 @@ describe("resource documents served over MCP", () => {
   });
 
   it("names under 'Effort selection' every effort level the enum defines, and no other", () => {
-    const guide = docs.get(RESOURCE_URIS.delegationGuide)!;
-    const section = guide.split("## Effort selection")[1]!.split("\n##")[0]!;
+    const guide = present(docs.get(RESOURCE_URIS.delegationGuide), "the delegation guide resource");
+    const section = guide.split("## Effort selection")[1].split("\n##")[0];
     const named = collectMatches(section, /`([a-z]+)`/g);
 
     for (const level of EFFORT_LEVELS) {
@@ -519,8 +561,8 @@ describe("resource documents served over MCP", () => {
   });
 
   it("names the effort level a rejected minimal turn is actually retried at", async () => {
-    const guide = docs.get(RESOURCE_URIS.delegationGuide)!;
-    const section = guide.split("## Effort selection")[1]!.split("\n##")[0]!;
+    const guide = present(docs.get(RESOURCE_URIS.delegationGuide), "the delegation guide resource");
+    const section = guide.split("## Effort selection")[1].split("\n##")[0];
     const client = new StubCodexClient();
     client.rejectMinimalEffort = true;
     const manager = new SessionManager({
@@ -549,7 +591,11 @@ describe("resource documents served over MCP", () => {
       disableCleanup: true,
       persistence: {} as never,
     });
-    const compat = JSON.parse(withDisk.docs.get(RESOURCE_URIS.compatReport)!) as {
+    const withDiskReport = present(
+      withDisk.docs.get(RESOURCE_URIS.compatReport),
+      "the compat-report resource of the disk-backed server"
+    );
+    const compat = JSON.parse(withDiskReport) as {
       features: Record<string, boolean>;
       featureNotes: Record<string, string>;
       runtimeWarnings: string[];
@@ -603,7 +649,11 @@ describe("resource documents served over MCP", () => {
   });
 
   it("denies disk persistence when the server holds no state directory", () => {
-    const compat = JSON.parse(docs.get(RESOURCE_URIS.compatReport)!) as {
+    const compatReport = present(
+      docs.get(RESOURCE_URIS.compatReport),
+      "the compat-report resource"
+    );
+    const compat = JSON.parse(compatReport) as {
       features: Record<string, boolean>;
       featureNotes: Record<string, string>;
     };
@@ -615,9 +665,9 @@ describe("resource documents served over MCP", () => {
 
   it("names the backend the server drives instead of assuming app-server", async () => {
     // No injected factory: SessionManager builds an AppServerClient, so the mode is known.
-    expect(
-      (JSON.parse(docs.get(RESOURCE_URIS.serverInfo)!) as { clientMode: string }).clientMode
-    ).toBe("app-server");
+    const serverInfo = present(docs.get(RESOURCE_URIS.serverInfo), "the server-info resource");
+
+    expect((JSON.parse(serverInfo) as { clientMode: string }).clientMode).toBe("app-server");
 
     const injected = await openServer({
       disableCleanup: true,
@@ -630,15 +680,18 @@ describe("resource documents served over MCP", () => {
     });
 
     try {
+      const injectedInfo = present(
+        injected.docs.get(RESOURCE_URIS.serverInfo),
+        "the server-info resource of the injected-client server"
+      );
+      const declaredInfo = present(
+        declared.docs.get(RESOURCE_URIS.serverInfo),
+        "the server-info resource of the exec-mode server"
+      );
+
       // An injected factory can build any client; the server is not told which, so it says so.
-      expect(
-        (JSON.parse(injected.docs.get(RESOURCE_URIS.serverInfo)!) as { clientMode: string })
-          .clientMode
-      ).toBe("unknown");
-      expect(
-        (JSON.parse(declared.docs.get(RESOURCE_URIS.serverInfo)!) as { clientMode: string })
-          .clientMode
-      ).toBe("exec");
+      expect((JSON.parse(injectedInfo) as { clientMode: string }).clientMode).toBe("unknown");
+      expect((JSON.parse(declaredInfo) as { clientMode: string }).clientMode).toBe("exec");
     } finally {
       await injected.server.close();
       await declared.server.close();
@@ -646,7 +699,7 @@ describe("resource documents served over MCP", () => {
   });
 
   it("names the round the driver polls in, and the server's own ceiling", () => {
-    const guide = docs.get(RESOURCE_URIS.delegationGuide)!;
+    const guide = present(docs.get(RESOURCE_URIS.delegationGuide), "the delegation guide resource");
 
     expect(guide).toContain('codex_check(action="poll", waitMs=300000)');
     expect(guide).toContain("progress.activity");
@@ -654,7 +707,7 @@ describe("resource documents served over MCP", () => {
   });
 
   it("tells a caller whose progress notifications reach nobody to write the activity out", () => {
-    const gotchas = docs.get(RESOURCE_URIS.gotchas)!;
+    const gotchas = present(docs.get(RESOURCE_URIS.gotchas), "the gotchas resource");
 
     expect(gotchas).toContain("A caller nobody can see");
     expect(gotchas).toContain("`progress.activity`");
@@ -662,7 +715,7 @@ describe("resource documents served over MCP", () => {
   });
 
   it("states cleanup windows as whole minutes derived from the cleanup constants", () => {
-    const gotchas = docs.get(RESOURCE_URIS.gotchas)!;
+    const gotchas = present(docs.get(RESOURCE_URIS.gotchas), "the gotchas resource");
 
     expect(gotchas).toContain(
       `Idle sessions are auto-cleaned after ${DEFAULT_IDLE_CLEANUP_MS / 60_000} minutes`
@@ -737,9 +790,13 @@ describe("resource documents served over MCP", () => {
       client.notifyManager(Methods.TURN_COMPLETED, {
         turn: { id: "turn_stub", items: [], status: "completed" },
       });
-      const result = manager.getLastResult(sessionId)!;
+      const result = present(manager.getLastResult(sessionId), "the last result of the session");
+      const turnMessage = present(
+        PROTOCOL_MESSAGES.get("turn"),
+        "the Turn message of codex-schema"
+      );
 
-      expect(PROTOCOL_MESSAGES.get("turn")!.has("output")).toBe(false);
+      expect(turnMessage.has("output")).toBe(false);
       expect(result.text).toBe("the answer");
       expect(result.output).toBeUndefined();
       expect(docs.get(RESOURCE_URIS.gotchas)).toContain("`result.output` is exec-mode only");
@@ -749,11 +806,12 @@ describe("resource documents served over MCP", () => {
   });
 
   it("promises `progress` on exactly the tools whose output schema carries it", () => {
-    const configText = docs.get(RESOURCE_URIS.config)!;
-    const claimed = collectMatches(
-      configText.match(/^- `progress` is included on (.+)$/m)![1],
-      /`([a-z_]+)`/g
-    );
+    const configText = present(docs.get(RESOURCE_URIS.config), "the config resource");
+    const progressLine = present(
+      configText.match(/^- `progress` is included on (.+)$/m),
+      "the progress line of the config guide"
+    )[1];
+    const claimed = collectMatches(progressLine, /`([a-z_]+)`/g);
     const declaring = Array.from(tools)
       .filter(([, tool]) => Boolean(tool.outputSchema?.properties?.progress))
       .map(([name]) => name);
@@ -773,8 +831,13 @@ describe("resource documents served over MCP", () => {
         ? (variant.enum as string[])
         : Object.keys((variant.properties ?? {}) as SchemaNode)
     );
-    const toolDecisions = (tools.get("codex_check")!.inputSchema!.properties!.decision.enum ??
-      []) as string[];
+    const checkTool = present(tools.get("codex_check"), "the codex_check tool");
+    const checkSchema = present(checkTool.inputSchema, "the codex_check input schema");
+    const checkProperties = present(
+      checkSchema.properties,
+      "the codex_check input schema properties"
+    );
+    const toolDecisions = (checkProperties.decision.enum ?? []) as string[];
     const used = collectMatches(allText, /"decision": "([A-Za-z]+)"/g);
 
     expect(used.length).toBeGreaterThan(0);
@@ -790,9 +853,11 @@ describe("resource documents served over MCP", () => {
         ToolRequestUserInputAnswer: { required: string[] };
       }
     ).ToolRequestUserInputAnswer;
-    const example = jsonExamples(docs.get(RESOURCE_URIS.quickstart)!).find(
-      (block) => block.action === "respond_user_input"
-    )!;
+    const quickstart = present(docs.get(RESOURCE_URIS.quickstart), "the quickstart resource");
+    const example = present(
+      jsonExamples(quickstart).find((block) => block.action === "respond_user_input"),
+      "the respond_user_input example of the quickstart"
+    );
     const answers = Object.values(example.answers as Record<string, SchemaNode>);
 
     expect(answers.length).toBeGreaterThan(0);
@@ -800,12 +865,15 @@ describe("resource documents served over MCP", () => {
   });
 
   it("keeps the EXEC_NOT_SUPPORTED story consistent between gotchas and the error hints", () => {
-    const gotchas = docs.get(RESOURCE_URIS.gotchas)!;
-    const errorsText = docs.get(RESOURCE_URIS.errors)!;
+    const gotchas = present(docs.get(RESOURCE_URIS.gotchas), "the gotchas resource");
+    const errorsText = present(docs.get(RESOURCE_URIS.errors), "the errors resource");
 
     expect(gotchas).toContain(ErrorCode.EXEC_NOT_SUPPORTED);
     expect(gotchas).toContain("threadFork");
-    const hint = errorsText.match(/^- `EXEC_NOT_SUPPORTED`: (.+)$/m)![1];
+    const hint = present(
+      errorsText.match(/^- `EXEC_NOT_SUPPORTED`: (.+)$/m),
+      "the EXEC_NOT_SUPPORTED hint of the errors resource"
+    )[1];
     expect(hint).toContain("threadFork");
     expect(hint).toContain("app-server");
   });
@@ -848,9 +916,14 @@ describe("runtime metadata in server-info and compat-report", () => {
       }
     );
     return {
-      json: (uri: string) =>
-        JSON.parse(reads.get(uri)!().contents[0].text) as Record<string, never>,
-      text: (uri: string) => reads.get(uri)!().contents[0].text,
+      json: (uri: string) => {
+        const read = present(reads.get(uri), `the registered read of ${uri}`);
+        return JSON.parse(read().contents[0].text) as Record<string, never>;
+      },
+      text: (uri: string) => {
+        const read = present(reads.get(uri), `the registered read of ${uri}`);
+        return read().contents[0].text;
+      },
     };
   }
 
@@ -859,9 +932,12 @@ describe("runtime metadata in server-info and compat-report", () => {
 
     const first = resources.json(RESOURCE_URIS.serverInfo).codexCliVersion;
     const second = resources.json(RESOURCE_URIS.serverInfo).codexCliVersion;
-    const inCompat = (resources.json(RESOURCE_URIS.compatReport).runtime as never as
-      | { codexCliVersion: string }
-      | undefined)!.codexCliVersion;
+    const inCompat = present(
+      resources.json(RESOURCE_URIS.compatReport).runtime as never as
+        | { codexCliVersion: string }
+        | undefined,
+      "the runtime block of the compat report"
+    ).codexCliVersion;
 
     expect(first).toBe("0.52.0");
     expect(second).toBe("0.52.0");

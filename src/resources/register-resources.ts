@@ -698,33 +698,24 @@ export function registerResources(
     return codexCliVersionCache;
   };
 
-  const byKey = new Map(RESOURCE_CATALOG.map((entry) => [entry.key, entry]));
+  // One reader per key of RESOURCE_URIS, so every catalog entry has one and the
+  // registration follows the catalog's order.
+  const readers: Record<keyof typeof RESOURCE_URIS, (uri: URL) => ReadResourceResult> = {
+    serverInfo: (uri) =>
+      asTextResource(uri, buildServerInfoJson(deps, getCodexCliVersion), "application/json"),
+    compatReport: (uri) =>
+      asTextResource(uri, buildCompatReport(deps, getCodexCliVersion()), "application/json"),
+    config: (uri) =>
+      asTextResource(uri, buildConfigGuideText(deps.sessionDefaults), "text/markdown"),
+    gotchas: (uri) => asTextResource(uri, buildGotchasText(deps.sessionDefaults), "text/markdown"),
+    quickstart: (uri) =>
+      asTextResource(uri, buildQuickstartText(deps.sessionDefaults), "text/markdown"),
+    errors: (uri) => asTextResource(uri, buildErrorsText(), "text/markdown"),
+    delegationGuide: (uri) =>
+      asTextResource(uri, buildDelegationGuideText(deps.sessionDefaults), "text/markdown"),
+  };
 
-  registerCatalogResource(server, byKey.get("serverInfo")!, (uri) =>
-    asTextResource(uri, buildServerInfoJson(deps, getCodexCliVersion), "application/json")
-  );
-
-  registerCatalogResource(server, byKey.get("compatReport")!, (uri) =>
-    asTextResource(uri, buildCompatReport(deps, getCodexCliVersion()), "application/json")
-  );
-
-  registerCatalogResource(server, byKey.get("config")!, (uri) =>
-    asTextResource(uri, buildConfigGuideText(deps.sessionDefaults), "text/markdown")
-  );
-
-  registerCatalogResource(server, byKey.get("gotchas")!, (uri) =>
-    asTextResource(uri, buildGotchasText(deps.sessionDefaults), "text/markdown")
-  );
-
-  registerCatalogResource(server, byKey.get("quickstart")!, (uri) =>
-    asTextResource(uri, buildQuickstartText(deps.sessionDefaults), "text/markdown")
-  );
-
-  registerCatalogResource(server, byKey.get("errors")!, (uri) =>
-    asTextResource(uri, buildErrorsText(), "text/markdown")
-  );
-
-  registerCatalogResource(server, byKey.get("delegationGuide")!, (uri) =>
-    asTextResource(uri, buildDelegationGuideText(deps.sessionDefaults), "text/markdown")
-  );
+  for (const entry of RESOURCE_CATALOG) {
+    registerCatalogResource(server, entry, readers[entry.key]);
+  }
 }

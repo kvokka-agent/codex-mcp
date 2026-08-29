@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
+import { present } from "./present.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, "..", "..");
@@ -123,7 +124,7 @@ export class ServerProcess {
   }
 
   get pid(): number {
-    return this.child.pid!;
+    return present(this.child.pid, "the server process id");
   }
 
   private onStdout(chunk: string): void {

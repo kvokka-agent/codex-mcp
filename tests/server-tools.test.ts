@@ -12,6 +12,7 @@ import { EventEmitter } from "node:events";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { createServer } from "../src/server.js";
+import { present } from "./helpers/present.js";
 
 class MockClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;
@@ -72,13 +73,14 @@ describe("server tool registration", () => {
         _requestHandlers: Map<string, (req: unknown, extra: unknown) => Promise<unknown>>;
       };
     };
-    const handler = internal.server._requestHandlers.get("tools/call");
-    expect(handler).toBeTypeOf("function");
+    const registered = internal.server._requestHandlers.get("tools/call");
+    expect(registered).toBeTypeOf("function");
+    const handler = present(registered, "the tools/call request handler");
 
     let nextId = 1;
     callTool = async (name, args) => {
       const controller = new AbortController();
-      return (await handler!(
+      return (await handler(
         {
           jsonrpc: "2.0",
           id: nextId++,
@@ -102,7 +104,8 @@ describe("server tool registration", () => {
       sandbox: "read-only",
     });
     expect(res.isError).toBe(false);
-    return String(res.structuredContent!.sessionId);
+    const structured = present(res.structuredContent, "the codex tool structured content");
+    return String(structured.sessionId);
   }
 
   /** Finish the running turn so the session becomes idle, as the app-server would. */
@@ -122,7 +125,7 @@ describe("server tool registration", () => {
       });
 
       expect(res.isError).toBe(false);
-      const structured = res.structuredContent!;
+      const structured = present(res.structuredContent, "the codex tool structured content");
       expect(String(structured.sessionId)).toMatch(/^sess_/);
       expect(structured.threadId).toBe("thread_mock");
       expect(structured.status).toBe("running");
@@ -211,7 +214,8 @@ describe("server tool registration", () => {
       expect(res.content[0].text).toBe(
         "Error [SESSION_NOT_FOUND]: Session 'sess_missing' not found"
       );
-      expect(res.structuredContent!.isError).toBe(true);
+      const structured = present(res.structuredContent, "the codex_reply structured content");
+      expect(structured.isError).toBe(true);
     });
 
     it("reports SESSION_BUSY while the first turn is still running", async () => {
@@ -236,10 +240,11 @@ describe("server tool registration", () => {
       });
 
       expect(res.isError).toBe(false);
-      expect(res.structuredContent!.sessionId).toBe(sessionId);
-      expect(res.structuredContent!.status).toBe("running");
-      expect(res.structuredContent!.interactionState).toBe("working");
-      expect(JSON.parse(res.content[0].text)).toEqual(res.structuredContent);
+      const structured = present(res.structuredContent, "the codex_reply structured content");
+      expect(structured.sessionId).toBe(sessionId);
+      expect(structured.status).toBe("running");
+      expect(structured.interactionState).toBe("working");
+      expect(JSON.parse(res.content[0].text)).toEqual(structured);
       expect(client.turnStart).toHaveBeenLastCalledWith(
         expect.objectContaining({ effort: "high", input: [{ type: "text", text: "and now this" }] })
       );
@@ -264,7 +269,11 @@ describe("server tool registration", () => {
       const res = await callTool("codex_session", { action: "list" });
 
       expect(res.isError).toBe(false);
-      const sessions = res.structuredContent!.sessions as Array<Record<string, unknown>>;
+      const structured = present(
+        res.structuredContent,
+        "the codex_session list structured content"
+      );
+      const sessions = structured.sessions as Array<Record<string, unknown>>;
       expect(sessions.map((s) => s.sessionId)).toEqual([sessionId]);
       expect(sessions[0].status).toBe("running");
       expect(sessions[0].pendingRequestCount).toBe(0);
@@ -282,18 +291,21 @@ describe("server tool registration", () => {
         sessionId,
         includeSensitive: true,
       });
-      expect(sensitive.structuredContent!.threadId).toBe("thread_mock");
-      expect(sensitive.structuredContent!.cwd).toBe(process.cwd());
+      const structured = present(
+        sensitive.structuredContent,
+        "the codex_session get structured content"
+      );
+      expect(structured.threadId).toBe("thread_mock");
+      expect(structured.cwd).toBe(process.cwd());
     });
 
     it("marks a tool result carrying isError as an error response", async () => {
       const res = await callTool("codex_session", { action: "get" });
 
       expect(res.isError).toBe(true);
-      expect(res.structuredContent!.error).toBe(
-        "Error [INVALID_ARGUMENT]: sessionId required for 'get'"
-      );
-      expect(JSON.parse(res.content[0].text)).toEqual(res.structuredContent);
+      const structured = present(res.structuredContent, "the codex_session structured content");
+      expect(structured.error).toBe("Error [INVALID_ARGUMENT]: sessionId required for 'get'");
+      expect(JSON.parse(res.content[0].text)).toEqual(structured);
     });
 
     it("catches a throwing action and formats the message", async () => {
@@ -340,7 +352,7 @@ describe("server tool registration", () => {
       const res = await callTool("codex_setup", { cwd: process.cwd() });
 
       expect(res.isError).toBe(false);
-      const structured = res.structuredContent!;
+      const structured = present(res.structuredContent, "the codex_setup structured content");
       expect(structured.ready).toBe(false);
       expect(structured.cwd).toBe(process.cwd());
       expect((structured.executable as { ok: boolean }).ok).toBe(false);
@@ -354,7 +366,8 @@ describe("server tool registration", () => {
     it("falls back to the server cwd when no cwd is given", async () => {
       const res = await callTool("codex_setup", {});
 
-      expect(res.structuredContent!.cwd).toBe(process.cwd());
+      const structured = present(res.structuredContent, "the codex_setup structured content");
+      expect(structured.cwd).toBe(process.cwd());
     });
   });
 
@@ -365,7 +378,7 @@ describe("server tool registration", () => {
       const res = await callTool("codex_check", { action: "poll", sessionId });
 
       expect(res.isError).toBe(false);
-      const structured = res.structuredContent!;
+      const structured = present(res.structuredContent, "the codex_check poll structured content");
       expect(structured.sessionId).toBe(sessionId);
       expect(structured.status).toBe("running");
       expect(structured.interactionState).toBe("working");

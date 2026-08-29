@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_EFFORT_LEVEL } from "../src/types.js";
 import { mockModule } from "./helpers/mock.js";
+import { present } from "./helpers/present.js";
 
 /**
  * `detectCodexCliVersion` runs the resolved executable with `--version` under a
@@ -126,17 +127,18 @@ function collect(
 function resource(registered: Registered[], uri: string): Registered {
   const found = registered.find((r) => r.uri === uri);
   expect(found, `resource not registered: ${uri}`).toBeDefined();
-  return found!;
+  return present(found, `the registered resource ${uri}`);
 }
 
 function readText(entry: Registered): string {
   const result = entry.read();
   expect(result.contents, `${entry.uri} returned no contents`).toHaveLength(1);
-  const content = result.contents![0];
+  const contents = present(result.contents, `the contents of ${entry.uri}`);
+  const content = contents[0];
   expect(content.uri).toBe(entry.uri);
   expect(content.mimeType).toBe(entry.mimeType);
   expect(typeof content.text).toBe("string");
-  return content.text!;
+  return present(content.text, `the text of ${entry.uri}`);
 }
 
 function readJson(entry: Registered): Record<string, unknown> {
@@ -178,8 +180,10 @@ describe("resources", () => {
         EXPECTED_MIME_TYPES[key as keyof typeof RESOURCE_URIS]
       );
       expect(entry.name, `${key} name`).toMatch(/^[a-z][a-z0-9_]*$/);
-      expect(entry.title!.length, `${key} title`).toBeGreaterThan(0);
-      expect(entry.description!.length, `${key} description`).toBeGreaterThan(0);
+      const title = present(entry.title, `the title of ${key}`);
+      const description = present(entry.description, `the description of ${key}`);
+      expect(title.length, `${key} title`).toBeGreaterThan(0);
+      expect(description.length, `${key} description`).toBeGreaterThan(0);
       // Every resource must actually render; readText also checks the echoed uri/mimeType.
       expect(readText(entry).length).toBeGreaterThan(0);
     }

@@ -504,7 +504,7 @@ export class SessionManager {
   ): Promise<SessionStartResult> {
     const { sessionId } = session;
     // Register event handlers before start to prevent unhandled "error" events
-    this.registerHandlers(sessionId, client, session.approvalTimeoutMs);
+    this.registerHandlers(session, client, session.approvalTimeoutMs);
 
     // Start app-server subprocess
     await client.start(spawnOpts);
@@ -1047,7 +1047,7 @@ export class SessionManager {
     this.attachEventSink(session);
 
     try {
-      this.registerHandlers(sessionId, client, session.approvalTimeoutMs);
+      this.registerHandlers(session, client, session.approvalTimeoutMs);
       await client.start({
         profile: session.profile,
         model: session.model,
@@ -1206,7 +1206,7 @@ export class SessionManager {
 
     try {
       // Register handlers before start to prevent unhandled "error" events
-      this.registerHandlers(newSessionId, newClient, newSession.approvalTimeoutMs);
+      this.registerHandlers(newSession, newClient, newSession.approvalTimeoutMs);
 
       // Start new app-server subprocess
       await newClient.start({
@@ -1270,9 +1270,9 @@ export class SessionManager {
         return;
       }
 
-      let notifiers = this.sessionNotifiers.get(sessionId);
-      if (!notifiers) {
-        notifiers = new Set();
+      const known = this.sessionNotifiers.get(sessionId);
+      const notifiers = known ?? new Set<() => void>();
+      if (!known) {
         this.sessionNotifiers.set(sessionId, notifiers);
       }
       if (notifiers.size >= MAX_WAITERS_PER_SESSION) {
@@ -1287,8 +1287,8 @@ export class SessionManager {
       const clampedMs = Math.min(Math.max(0, timeoutMs), MAX_LONG_POLL_WAIT_MS);
 
       const done = (): void => {
-        notifiers!.delete(notifyFn);
-        if (notifiers!.size === 0) this.sessionNotifiers.delete(sessionId);
+        notifiers.delete(notifyFn);
+        if (notifiers.size === 0) this.sessionNotifiers.delete(sessionId);
         clearTimeout(timer);
         if (signal) signal.removeEventListener("abort", onAbort);
         resolve();
@@ -2073,11 +2073,11 @@ export class SessionManager {
   }
 
   private registerHandlers(
-    sessionId: string,
+    session: SessionInfo,
     client: ICodexClient,
     approvalTimeoutMs = DEFAULT_APPROVAL_TIMEOUT_MS
   ): void {
-    const session = this.sessions.get(sessionId)!;
+    const { sessionId } = session;
 
     // Persist PID info for orphan detection on the next startup. The client
     // reports every process it spawns: app-server spawns one in `start()`,

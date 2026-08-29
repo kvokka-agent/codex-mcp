@@ -206,9 +206,12 @@ function confirmExit(session: RecoveredSession, pid: number): ReapOutcome {
   return "unconfirmed";
 }
 
+/** A recovered session whose pid.json was read, so it names a process to reap. */
+type SessionWithPid = RecoveredSession & { pidInfo: NonNullable<RecoveredSession["pidInfo"]> };
+
 /** Reap the process one recovered session recorded, and say what became of it. */
-async function reapSession(session: RecoveredSession): Promise<ReapOutcome> {
-  const { pid, spawnedAt } = session.pidInfo!;
+async function reapSession(session: SessionWithPid): Promise<ReapOutcome> {
+  const { pid, spawnedAt } = session.pidInfo;
 
   const identified = identifyOrphan(session, pid, spawnedAt);
   if (identified !== "confirmed") return identified;
@@ -255,7 +258,7 @@ async function reapSession(session: RecoveredSession): Promise<ReapOutcome> {
 export async function reapOrphanProcesses(recovered: RecoveredSession[]): Promise<ReapSummary> {
   const summary: ReapSummary = { reaped: 0, alreadyDead: 0, unconfirmed: 0, skipped: 0 };
 
-  const candidates = recovered.filter((s) => s.pidInfo !== null);
+  const candidates = recovered.filter((s): s is SessionWithPid => s.pidInfo !== null);
   if (candidates.length === 0) return summary;
 
   await Promise.all(

@@ -246,16 +246,10 @@ const LSTART = /^\w{3}\s+(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})
 export function parseLstartMs(lstart: string): number | null {
   const match = LSTART.exec(lstart.trim());
   if (!match) return null;
-  const month = MONTHS.indexOf(match[1]!);
+  const [, monthName, day, hour, minute, second, year] = match;
+  const month = MONTHS.indexOf(monthName);
   if (month < 0) return null;
-  return Date.UTC(
-    Number(match[6]),
-    month,
-    Number(match[2]),
-    Number(match[3]),
-    Number(match[4]),
-    Number(match[5])
-  );
+  return Date.UTC(Number(year), month, Number(day), Number(hour), Number(minute), Number(second));
 }
 
 /**
@@ -274,8 +268,9 @@ function readPosixProcess(pid: number): LiveProcess | null {
   if (combined !== null) {
     const match = /^(\d+)\s+(\S.*)$/.exec(combined);
     if (match) {
-      const startMs = parseLstartMs(match[2]!);
-      if (startMs !== null) return { startMs, pgid: Number(match[1]) };
+      const [, pgidField, lstartField] = match;
+      const startMs = parseLstartMs(lstartField);
+      if (startMs !== null) return { startMs, pgid: Number(pgidField) };
     }
   }
 

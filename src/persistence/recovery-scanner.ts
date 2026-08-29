@@ -95,8 +95,8 @@ function scanEventsJsonl(filePath: string): EventLogScan {
   let lastSeq = -1;
   let corruptLines = 0;
   let lastActivity: string | undefined;
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i]!.trim();
+  for (const [i, line] of lines.entries()) {
+    const trimmed = line.trim();
     if (!trimmed) continue;
     try {
       const parsed = JSON.parse(trimmed);

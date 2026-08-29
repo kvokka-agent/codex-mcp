@@ -13,6 +13,7 @@ import type { AppServerSpawnOptions } from "../src/app-server/lifecycle.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { advanceAsync } from "./helpers/clock.js";
 import { mockModule } from "./helpers/mock.js";
+import { present } from "./helpers/present.js";
 
 const spawnMock = jest.fn();
 
@@ -93,6 +94,11 @@ describe("AppServerClient JSON-RPC", () => {
     return lines[lines.length - 1];
   }
 
+  /** The id a request line carries, which the answer to it must quote back. */
+  function idOf(line: RpcLine, what: string): number {
+    return present(line.id, `the ${what} request id`);
+  }
+
   function emit(raw: string): void {
     proc.stdout.emit("data", Buffer.from(raw, "utf8"));
   }
@@ -106,7 +112,7 @@ describe("AppServerClient JSON-RPC", () => {
     const started = client.start({} as AppServerSpawnOptions);
     const init = lastWritten();
     expect(init.method).toBe(Methods.INITIALIZE);
-    reply(init.id!, { userAgent: "mock-app-server" });
+    reply(idOf(init, "initialize"), { userAgent: "mock-app-server" });
     await started;
     return client;
   }
@@ -119,7 +125,7 @@ describe("AppServerClient JSON-RPC", () => {
     expect(init.method).toBe(Methods.INITIALIZE);
     expect((init.params as { clientInfo: { name: string } }).clientInfo.name).toBe("codex-mcp");
 
-    reply(init.id!, { userAgent: "mock-app-server" });
+    reply(idOf(init, "initialize"), { userAgent: "mock-app-server" });
 
     await expect(started).resolves.toEqual({ userAgent: "mock-app-server" });
     expect(client.childPid).toBe(4242);
@@ -139,7 +145,7 @@ describe("AppServerClient JSON-RPC", () => {
       experimentalApi: true,
     });
 
-    reply(init.id!, { userAgent: "mock-app-server" });
+    reply(idOf(init, "initialize"), { userAgent: "mock-app-server" });
     await started;
   });
 
@@ -152,10 +158,10 @@ describe("AppServerClient JSON-RPC", () => {
     // The handshake is still unanswered, so the reaper already has the pid of a
     // process whose startup outlives its identity window.
     expect(spawns.map((s) => s.pid)).toEqual([proc.pid]);
-    expect(Number.isNaN(Date.parse(spawns[0]!.spawnedAt))).toBe(false);
+    expect(Number.isNaN(Date.parse(spawns[0].spawnedAt))).toBe(false);
 
     const init = lastWritten();
-    reply(init.id!, { userAgent: "mock-app-server" });
+    reply(idOf(init, "initialize"), { userAgent: "mock-app-server" });
     await started;
     expect(spawns).toHaveLength(1);
   });
@@ -172,8 +178,8 @@ describe("AppServerClient JSON-RPC", () => {
     expect(forkReq.id).not.toBe(resumeReq.id);
 
     // Answer out of order: correlation must be by id, not by arrival.
-    reply(resumeReq.id!, { thread: { id: "resumed" } });
-    reply(forkReq.id!, { thread: { id: "forked" } });
+    reply(idOf(resumeReq, Methods.THREAD_RESUME), { thread: { id: "resumed" } });
+    reply(idOf(forkReq, Methods.THREAD_FORK), { thread: { id: "forked" } });
 
     await expect(fork).resolves.toEqual({ thread: { id: "forked" } });
     await expect(resume).resolves.toEqual({ thread: { id: "resumed" } });
@@ -199,7 +205,7 @@ describe("AppServerClient JSON-RPC", () => {
     const client = await startClient();
 
     const pending = client.threadFork({ threadId: "thread_1" });
-    const id = lastWritten().id!;
+    const id = idOf(lastWritten(), Methods.THREAD_FORK);
     const payload = JSON.stringify({ jsonrpc: "2.0", id, result: { thread: { id: "spät€" } } });
     const bytes = Buffer.from(`${payload}\n`, "utf8");
 
@@ -217,7 +223,7 @@ describe("AppServerClient JSON-RPC", () => {
     client.onNotification((method, params) => notifications.push({ method, params }));
 
     const pending = client.threadFork({ threadId: "thread_1" });
-    const id = lastWritten().id!;
+    const id = idOf(lastWritten(), Methods.THREAD_FORK);
 
     emit("codex is starting up...\n\n");
     emit(
@@ -484,7 +490,7 @@ describe("AppServerClient JSON-RPC", () => {
     const client = await startClient();
     proc.stdin.writeReturn = false;
     const queued = client.threadFork({ threadId: "thread_1" });
-    reply(lastWritten().id!, { thread: { id: "forked" } });
+    reply(idOf(lastWritten(), Methods.THREAD_FORK), { thread: { id: "forked" } });
     await queued;
 
     const oversized = client.threadStart({ cwd: "x".repeat(6 * 1024 * 1024) }, 1000);
@@ -570,14 +576,14 @@ describe("AppServerClient JSON-RPC", () => {
     const turn = client.turnStart({ threadId: "t", input: [{ type: "text", text: "hi" }] });
     const turnReq = lastWritten();
     expect(turnReq.method).toBe(Methods.TURN_START);
-    reply(turnReq.id!, { turn: { id: "turn_1" } });
+    reply(idOf(turnReq, Methods.TURN_START), { turn: { id: "turn_1" } });
     await expect(turn).resolves.toEqual({ turn: { id: "turn_1" } });
 
     const clean = client.threadBackgroundTerminalsClean({ threadId: "t" });
     const cleanReq = lastWritten();
     expect(cleanReq.method).toBe(Methods.THREAD_BACKGROUND_TERMINALS_CLEAN);
     expect(cleanReq.params).toEqual({ threadId: "t" });
-    reply(cleanReq.id!, {});
+    reply(idOf(cleanReq, Methods.THREAD_BACKGROUND_TERMINALS_CLEAN), {});
     await expect(clean).resolves.toEqual({});
   });
 

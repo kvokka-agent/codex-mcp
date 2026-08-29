@@ -368,8 +368,8 @@ export class ExecClient extends EventEmitter implements ICodexClient {
 
     // First turn: codex exec "<prompt>" ...
     // Subsequent turns: codex exec resume <threadId> "<prompt>" ... (multi-turn context)
-    const isResume = this.turnCount > 1 && this.realThreadId != null;
-    if (this.turnCount > 1 && !this.realThreadId) {
+    const resumeThreadId = this.turnCount > 1 ? this.realThreadId : null;
+    if (this.turnCount > 1 && resumeThreadId === null) {
       // CLI didn't provide a thread ID (e.g. older CLI without thread.started event).
       // Fall back to fresh exec but warn — multi-turn context will be lost.
       console.error(
@@ -385,9 +385,10 @@ export class ExecClient extends EventEmitter implements ICodexClient {
         willRetry: true, // non-terminal: session continues, just without context
       });
     }
-    const args = isResume
-      ? this.buildResumeArgs(prompt, params, images)
-      : this.buildExecArgs(prompt, params, images);
+    const args =
+      resumeThreadId === null
+        ? this.buildExecArgs(prompt, params, images)
+        : this.buildResumeArgs(resumeThreadId, prompt, params, images);
     const executable = getDefaultCodexExecutable();
     const invocation = resolveCodexInvocation(args, {
       codexCommand: executable.command,
@@ -625,15 +626,13 @@ export class ExecClient extends EventEmitter implements ICodexClient {
    * Note: exec resume only supports -m, -c, -i, --json, --skip-git-repo-check.
    *       -s, -p, -C are NOT supported and inherit from the first turn's session.
    */
-  private buildResumeArgs(prompt: string, params: TurnStartParams, images: string[]): string[] {
-    const args: string[] = [
-      "exec",
-      "resume",
-      this.realThreadId!,
-      prompt,
-      "--json",
-      "--skip-git-repo-check",
-    ];
+  private buildResumeArgs(
+    threadId: string,
+    prompt: string,
+    params: TurnStartParams,
+    images: string[]
+  ): string[] {
+    const args: string[] = ["exec", "resume", threadId, prompt, "--json", "--skip-git-repo-check"];
 
     this.recordResumeUnappliedOverrides(params);
 

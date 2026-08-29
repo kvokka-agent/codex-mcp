@@ -6,6 +6,7 @@
  */
 import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
+import type { Writable } from "node:stream";
 import { ErrorCode } from "../types.js";
 import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 import { LineReader, readChildOutput } from "./child-stdio.js";
@@ -347,7 +348,8 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   }
 
   private enqueueWrite(payload: string): void {
-    if (!this.process?.stdin?.writable) throw new Error("app-server stdin not writable");
+    const stdin = this.process?.stdin;
+    if (!stdin?.writable) throw new Error("app-server stdin not writable");
 
     if (this.backpressure || this.writeQueue.length > 0) {
       this.queueWrite(payload);
@@ -355,7 +357,7 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     }
 
     try {
-      this.writeToStdin(payload);
+      this.writeToStdin(stdin, payload);
     } catch (err) {
       throw this.recordWriteFailure(err);
     }
@@ -378,8 +380,8 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     this.queuedBytes += payload.length;
   }
 
-  private writeToStdin(payload: string): void {
-    const ok = this.process!.stdin!.write(payload);
+  private writeToStdin(stdin: Writable, payload: string): void {
+    const ok = stdin.write(payload);
     if (!ok) this.backpressure = true;
   }
 
@@ -392,7 +394,8 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   }
 
   private flushWriteQueue(): void {
-    if (!this.process?.stdin?.writable) {
+    const stdin = this.process?.stdin;
+    if (!stdin?.writable) {
       const dropped = this.dropQueuedWrites("stdin is not writable while flushing");
       if (dropped) {
         this.terminateOrLog("dropping queued writes");
@@ -400,11 +403,12 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
       return;
     }
     this.backpressure = false;
-    while (this.writeQueue.length > 0 && !this.backpressure) {
-      const next = this.writeQueue.shift()!;
+    while (!this.backpressure) {
+      const next = this.writeQueue.shift();
+      if (next === undefined) break;
       this.queuedBytes -= next.length;
       try {
-        this.writeToStdin(next);
+        this.writeToStdin(stdin, next);
       } catch (err) {
         this.recordWriteFailure(err);
         this.writeQueue = [];
@@ -461,8 +465,9 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   }
 
   private dispatchServerRequest(req: JsonRpcRequest): void {
-    if (this.serverRequestHandler) {
-      this.runHandler(() => this.serverRequestHandler!(req.id, req.method, req.params), req.method);
+    const handler = this.serverRequestHandler;
+    if (handler) {
+      this.runHandler(() => handler(req.id, req.method, req.params), req.method);
     } else {
       // No handler — respond with error to avoid hanging
       this.runHandler(
@@ -473,8 +478,9 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   }
 
   private dispatchNotification(notif: JsonRpcNotification): void {
-    if (this.notificationHandler) {
-      this.runHandler(() => this.notificationHandler!(notif.method, notif.params), notif.method);
+    const handler = this.notificationHandler;
+    if (handler) {
+      this.runHandler(() => handler(notif.method, notif.params), notif.method);
     }
   }
 
@@ -514,9 +520,10 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     this.failAllPending(new Error("Client destroyed"));
 
     // Kill subprocess
-    if (this.process && !this.process.killed) {
-      const alreadyExited = this.process.exitCode !== null;
-      this.process.stdin?.end();
+    const proc = this.process;
+    if (proc && !proc.killed) {
+      const alreadyExited = proc.exitCode !== null;
+      proc.stdin?.end();
       this.terminate("SIGTERM");
 
       // Force kill after 5s
@@ -542,7 +549,7 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
 
       if (!alreadyExited) {
         await new Promise<void>((resolve) => {
-          this.process!.on("exit", () => {
+          proc.on("exit", () => {
             clearTimeout(forceKill);
             resolve();
           });

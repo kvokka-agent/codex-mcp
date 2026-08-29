@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { isoMsAgo } from "./helpers/clock.js";
 import { mockModule } from "./helpers/mock.js";
+import { present } from "./helpers/present.js";
 
 /** Injected failures, keyed by `${call}\0${path}`, holding the errno code to raise. */
 const { fsFaults } = {
@@ -149,8 +150,8 @@ describe("SessionPersistence", () => {
     });
 
     const [recovered] = persistence.recoverSessions();
-    expect(recovered!.sessionId).toBe("sess_1");
-    expect(recovered!.meta.status).toBe("cancelled");
+    expect(recovered.sessionId).toBe("sess_1");
+    expect(recovered.meta.status).toBe("cancelled");
   });
 
   it("writes pid info with a spawn timestamp, and the model under its own key", () => {
@@ -173,7 +174,8 @@ describe("SessionPersistence", () => {
     expect(recovered).toBeUndefined();
 
     persistence.writeSessionMeta(makeSession());
-    const pidInfo = persistence.recoverSessions()[0]!.pidInfo!;
+    const [withMeta] = persistence.recoverSessions();
+    const pidInfo = present(withMeta.pidInfo, "the recovered session pid info");
     expect(pidInfo.pid).toBe(4242);
     expect(Number.isNaN(Date.parse(pidInfo.spawnedAt))).toBe(false);
     expect("command" in pidInfo).toBe(false);
@@ -301,7 +303,8 @@ describe("SessionPersistence", () => {
     failFs("readdirSync", join(root, "sessions"));
 
     // Zero pruned would tell a running server retention succeeded over an empty disk.
-    expect(() => persistence!.prune({ maxAgeMs: 10_000 })).toThrow(/EACCES/);
+    const store = present(persistence, "the persistence store");
+    expect(() => store.prune({ maxAgeMs: 10_000 })).toThrow(/EACCES/);
     expect(persistence.hasSessionOnDisk("sess_1")).toBe(true);
   });
 
@@ -310,7 +313,8 @@ describe("SessionPersistence", () => {
     persistence.writeSessionMeta(makeSession());
     failFs("readdirSync", join(root, "sessions"));
 
-    expect(() => persistence!.recoverSessions()).toThrow(/EACCES/);
+    const store = present(persistence, "the persistence store");
+    expect(() => store.recoverSessions()).toThrow(/EACCES/);
   });
 
   it("claims one session at a time and hands each back", () => {
@@ -400,7 +404,7 @@ describe("startDiskPersistence", () => {
 
     expect(startup.persistence).toBeInstanceOf(SessionPersistence);
     expect(startup.recovered.map((r) => r.sessionId)).toContain("sess_owned");
-    expect(startup.recovered[0]!.owner).toEqual({ kind: "unowned" });
+    expect(startup.recovered[0].owner).toEqual({ kind: "unowned" });
   });
 
   it("keeps pruned sessions out of what it hands back", () => {
@@ -434,7 +438,8 @@ describe("startDiskPersistence", () => {
       String(args[0]).includes("running without disk persistence")
     );
     expect(warning).toBeDefined();
-    expect(String((warning![1] as Error).message)).toContain("EACCES");
+    const warningArgs = present(warning, "the disk persistence warning");
+    expect(String((warningArgs[1] as Error).message)).toContain("EACCES");
   });
 
   it("serves without persistence when retention cannot list the sessions directory", () => {
@@ -449,10 +454,11 @@ describe("startDiskPersistence", () => {
     expect(startup.persistence).toBeUndefined();
     expect(startup.recovered).toEqual([]);
     expect(startup.pruned).toBe(0);
-    const warning = errors.find((args) =>
-      String(args[0]).includes("running without disk persistence")
+    const warning = present(
+      errors.find((args) => String(args[0]).includes("running without disk persistence")),
+      "the disk persistence warning"
     );
-    expect(String((warning![1] as Error).message)).toContain("EACCES");
+    expect(String((warning[1] as Error).message)).toContain("EACCES");
     expect(existsSync(sessionFile("sess_kept", "meta.json"))).toBe(true);
   });
 
@@ -468,10 +474,11 @@ describe("startDiskPersistence", () => {
     expect(startup.persistence).toBeUndefined();
     expect(startup.recovered).toEqual([]);
     expect(startup.pruned).toBe(0);
-    const warning = errors.find((args) =>
-      String(args[0]).includes("running without disk persistence")
+    const warning = present(
+      errors.find((args) => String(args[0]).includes("running without disk persistence")),
+      "the disk persistence warning"
     );
-    expect(String((warning![1] as Error).message)).toContain("EACCES");
+    expect(String((warning[1] as Error).message)).toContain("EACCES");
     expect(existsSync(sessionFile("sess_kept", "meta.json"))).toBe(true);
   });
 
@@ -486,7 +493,10 @@ describe("startDiskPersistence", () => {
     const startup = startDiskPersistence(root);
     persistence = startup.persistence ?? null;
 
-    const live = startup.recovered.find((r) => r.sessionId === "sess_live")!;
+    const live = present(
+      startup.recovered.find((r) => r.sessionId === "sess_live"),
+      "the sess_live recovered session"
+    );
     expect(live.owner.kind).toBe("self");
     expect(existsSync(sessionFile("sess_live", "meta.json"))).toBe(true);
     expect(existsSync(sessionFile("sess_live", "pid.json"))).toBe(true);

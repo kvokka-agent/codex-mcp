@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pollUntil } from "./helpers/clock.js";
+import { present } from "./helpers/present.js";
 import { HARNESS_RUNS_HERE, ServerProcess } from "./helpers/server-harness.js";
 
 const servers: ServerProcess[] = [];
@@ -45,9 +46,9 @@ function spawnStubbornChild(): ChildProcess {
 }
 
 afterEach(async () => {
-  while (servers.length) await servers.pop()!.dispose();
+  while (servers.length) await present(servers.pop(), "the server to dispose").dispose();
   while (strays.length) {
-    const stray = strays.pop()!;
+    const stray = present(strays.pop(), "the stray to kill");
     try {
       if (stray.pid) process.kill(-stray.pid, "SIGKILL");
     } catch {
@@ -216,8 +217,14 @@ describe.skipIf(!HARNESS_RUNS_HERE)("two servers on one state directory", () => 
       sessionId: string;
       owner?: { pid: number; state: string };
     }>;
-    const mine = sessions.find((s) => s.sessionId === idOne)!;
-    const theirs = sessions.find((s) => s.sessionId === idTwo)!;
+    const mine = present(
+      sessions.find((s) => s.sessionId === idOne),
+      "the session of the first server"
+    );
+    const theirs = present(
+      sessions.find((s) => s.sessionId === idTwo),
+      "the session of the second server"
+    );
     expect(mine.owner).toEqual({ pid: first.pid, state: "self" });
     expect(theirs.owner).toEqual({ pid: second.pid, state: "other" });
   }, 60_000);
@@ -257,13 +264,19 @@ describe.skipIf(!HARNESS_RUNS_HERE)("two servers on one state directory", () => 
       owner?: { pid: number; state: string };
     }>;
 
-    const adopted = listed.find((s) => s.sessionId === lostId)!;
+    const adopted = present(
+      listed.find((s) => s.sessionId === lostId),
+      "the adopted session"
+    );
     expect(adopted.status).toBe("abandoned");
     expect(adopted.activity).toBe("Подсчёт-файлов");
     expect(adopted.owner).toBeUndefined();
     expect(existsSync(join(sessionDir(stateDir, lostId), "owner.json"))).toBe(false);
 
-    const untouched = listed.find((s) => s.sessionId === heldId)!;
+    const untouched = present(
+      listed.find((s) => s.sessionId === heldId),
+      "the session of the live owner"
+    );
     expect(untouched.owner).toEqual({ pid: living.pid, state: "other" });
     expect(untouched.status).toBe("running");
     expect(readJson(join(sessionDir(stateDir, heldId), "owner.json")).pid).toBe(living.pid);

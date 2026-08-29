@@ -49,8 +49,14 @@ export function readChildOutput(
   onStdout: (chunk: Buffer) => void,
   stderrPrefix: string
 ): void {
-  proc.stdout!.on("data", (chunk: Buffer) => onStdout(chunk));
-  proc.stderr!.on("data", (chunk: Buffer) => {
+  const { stdout, stderr } = proc;
+  // The caller spawns with `stdio: ["pipe", "pipe", "pipe"]`; a child that came
+  // back without one of those streams carries no output to read, and nothing
+  // here can stand in for what codex would have said.
+  if (!stdout) throw new Error("The codex child was spawned without a stdout pipe.");
+  if (!stderr) throw new Error("The codex child was spawned without a stderr pipe.");
+  stdout.on("data", (chunk: Buffer) => onStdout(chunk));
+  stderr.on("data", (chunk: Buffer) => {
     console.error(`${stderrPrefix} ${chunk.toString().trimEnd()}`);
   });
 }

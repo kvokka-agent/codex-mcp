@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { mockModule } from "./helpers/mock.js";
+import { present } from "./helpers/present.js";
 
 /**
  * `statSync` is the only dependency whose failure mode cannot be produced from a real
@@ -37,7 +38,10 @@ function makeTempDir(): string {
 afterEach(() => {
   fsState.statError = null;
   while (tempRoots.length > 0) {
-    rmSync(tempRoots.pop()!, { recursive: true, force: true });
+    rmSync(present(tempRoots.pop(), "the temporary directory to remove"), {
+      recursive: true,
+      force: true,
+    });
   }
 });
 

@@ -113,9 +113,8 @@ function addExpiredDirs(
 function addExcessDirs(dirs: SessionDirInfo[], maxCount: number, toRemove: Set<string>): void {
   const remaining = dirs.filter((d) => !toRemove.has(d.path));
   if (remaining.length > maxCount) {
-    const excess = remaining.length - maxCount;
-    for (let i = 0; i < excess; i++) {
-      toRemove.add(remaining[i]!.path);
+    for (const dir of remaining.slice(0, remaining.length - maxCount)) {
+      toRemove.add(dir.path);
     }
   }
 }

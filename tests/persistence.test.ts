@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { isoMsAgo, msSince, useFakeClock } from "./helpers/clock.js";
 import { mockModule } from "./helpers/mock.js";
+import { present } from "./helpers/present.js";
 
 /** Injected failures, keyed by `${call}\0${path}`, holding the errno code to raise. */
 const { fsFaults } = { fsFaults: new Map<string, string>() };
@@ -279,7 +280,7 @@ describe("session ownership", () => {
     mkdirSync(dir, { recursive: true });
     claimSession(dir);
 
-    const written = readOwner(dir)!;
+    const written = present(readOwner(dir), "the owner of the claimed session");
     expect(written.pid).toBe(process.pid);
     // The claim dates the process, not the machine: a start time older than the
     // process is what os.uptime() would have written.
@@ -397,15 +398,15 @@ describe("scanRecoverableSessions", () => {
 
     const [recovered, ...rest] = scanRecoverableSessions(join(root, "sessions"));
     expect(rest).toEqual([]);
-    expect(recovered!.sessionId).toBe("sess_a");
-    expect(recovered!.sessionDir).toBe(dir);
-    expect(recovered!.meta.threadId).toBe("thread_a");
+    expect(recovered.sessionId).toBe("sess_a");
+    expect(recovered.sessionDir).toBe(dir);
+    expect(recovered.meta.threadId).toBe("thread_a");
     // The events themselves stay on disk: nothing of a recovered session is built
     // from them, so only the seq to continue from comes back.
     expect(recovered).not.toHaveProperty("events");
-    expect(recovered!.lastSeq).toBe(1);
-    expect(recovered!.result).toEqual({ ok: true });
-    expect(recovered!.pidInfo).toEqual({ pid: 77, spawnedAt: "2024-01-01T00:00:00.000Z" });
+    expect(recovered.lastSeq).toBe(1);
+    expect(recovered.result).toEqual({ ok: true });
+    expect(recovered.pidInfo).toEqual({ pid: 77, spawnedAt: "2024-01-01T00:00:00.000Z" });
   });
 
   it("drops the torn tail of events.jsonl without reporting damage", () => {
@@ -416,8 +417,8 @@ describe("scanRecoverableSessions", () => {
     });
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
-    expect(recovered!.lastSeq).toBe(1);
-    expect(recovered!.corruptEventLines).toBe(0);
+    expect(recovered.lastSeq).toBe(1);
+    expect(recovered.corruptEventLines).toBe(0);
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
@@ -429,8 +430,8 @@ describe("scanRecoverableSessions", () => {
     });
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
-    expect(recovered!.lastSeq).toBe(3);
-    expect(recovered!.corruptEventLines).toBe(1);
+    expect(recovered.lastSeq).toBe(3);
+    expect(recovered.corruptEventLines).toBe(1);
     expect(errorSpy).toHaveBeenCalledWith(
       "[recovery] Session sess_corrupt: skipped 1 corrupt line(s) in events.jsonl"
     );
@@ -444,8 +445,8 @@ describe("scanRecoverableSessions", () => {
     });
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
-    expect(recovered!.lastSeq).toBe(1);
-    expect(recovered!.corruptEventLines).toBe(1);
+    expect(recovered.lastSeq).toBe(1);
+    expect(recovered.corruptEventLines).toBe(1);
   });
 
   it("ignores lines without a numeric seq and reports -1 when nothing survives", () => {
@@ -455,7 +456,7 @@ describe("scanRecoverableSessions", () => {
     });
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
-    expect(recovered!.lastSeq).toBe(-1);
+    expect(recovered.lastSeq).toBe(-1);
   });
 
   it("skips plain files and directories that hold no meta.json", () => {
@@ -477,13 +478,13 @@ describe("scanRecoverableSessions", () => {
     const [recovered, ...rest] = scanRecoverableSessions(join(root, "sessions"));
     expect(rest).toEqual([]);
     // Dropping it would hide the live codex process behind pid.json from the reaper.
-    expect(recovered!.pidInfo).toEqual({ pid: 4242, spawnedAt: "2024-01-01T00:00:00.000Z" });
-    expect(recovered!.metaDamaged).toBe(true);
+    expect(recovered.pidInfo).toEqual({ pid: 4242, spawnedAt: "2024-01-01T00:00:00.000Z" });
+    expect(recovered.metaDamaged).toBe(true);
     // The id is the name the directory was written under, and the times are its own.
-    expect(recovered!.sessionId).toBe("sess_bad_meta");
-    expect(recovered!.meta.status).toBe("unknown");
-    expect(recovered!.meta.createdAt).toBe(new Date(statSync(dir).mtimeMs).toISOString());
-    expect(recovered!.lastSeq).toBe(4);
+    expect(recovered.sessionId).toBe("sess_bad_meta");
+    expect(recovered.meta.status).toBe("unknown");
+    expect(recovered.meta.createdAt).toBe(new Date(statSync(dir).mtimeMs).toISOString());
+    expect(recovered.lastSeq).toBe(4);
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("[recovery] Session sess_bad_meta: meta.json is unusable")
     );
@@ -494,9 +495,9 @@ describe("scanRecoverableSessions", () => {
     writeSession("sess_no_id", { meta: { status: "idle" }, pid: { pid: 77, spawnedAt: "x" } });
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
-    expect(recovered!.sessionId).toBe("sess_no_id");
-    expect(recovered!.metaDamaged).toBe(true);
-    expect(recovered!.pidInfo).toEqual({ pid: 77, spawnedAt: "x" });
+    expect(recovered.sessionId).toBe("sess_no_id");
+    expect(recovered.metaDamaged).toBe(true);
+    expect(recovered.pidInfo).toEqual({ pid: 77, spawnedAt: "x" });
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("meta.json is unusable"));
   });
 
@@ -504,7 +505,7 @@ describe("scanRecoverableSessions", () => {
     writeSession("sess_fine", { meta: { sessionId: "sess_fine", status: "idle" } });
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
-    expect(recovered!.metaDamaged).toBeUndefined();
+    expect(recovered.metaDamaged).toBeUndefined();
   });
 
   it("skips an entry whose stat fails", () => {
@@ -582,9 +583,9 @@ describe("scanRecoverableSessions", () => {
     writeFileSync(join(root, "sessions", "sess_min", "result.json"), "{broken");
 
     const [recovered] = scanRecoverableSessions(join(root, "sessions"));
-    expect(recovered!.result).toBeNull();
-    expect(recovered!.pidInfo).toBeNull();
-    expect(recovered!.lastSeq).toBe(-1);
+    expect(recovered.result).toBeNull();
+    expect(recovered.pidInfo).toBeNull();
+    expect(recovered.lastSeq).toBe(-1);
   });
 });
 

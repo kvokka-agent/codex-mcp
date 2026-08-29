@@ -3,6 +3,7 @@ import type { RecoveredSession } from "../src/persistence/index.js";
 import { reapOrphanProcesses } from "../src/session/orphan-reaper.js";
 import { advanceAsync, msAgo } from "./helpers/clock.js";
 import { mockModule } from "./helpers/mock.js";
+import { present } from "./helpers/present.js";
 
 const { execSyncMock, spawnMock, readFileSyncMock, uptimeMock } = {
   execSyncMock: jest.fn(),
@@ -58,7 +59,8 @@ function procFiles(
     const match = /^\/proc\/(\d+)\/stat$/.exec(path);
     const ticks = match ? startTicksByPid[Number(match[1])] : undefined;
     if (ticks === undefined) throw new Error("ENOENT");
-    const pid = Number(match![1]);
+    const matched = present(match, "the /proc/<pid>/stat path match");
+    const pid = Number(matched[1]);
     return procStat(pid, ticks, pgrpByPid[pid] ?? pid);
   };
 }
@@ -212,7 +214,7 @@ describe("reapOrphanProcesses", () => {
     const summary = await reapOrphanProcesses([session(901, spawnedAt.toISOString())]);
 
     expect(summary).toEqual({ reaped: 1, alreadyDead: 0, unconfirmed: 0, skipped: 0 });
-    expect(execSyncMock.mock.calls[0]![0]).toBe("ps -p 901 -o pgid=,lstart=");
+    expect(execSyncMock.mock.calls[0][0]).toBe("ps -p 901 -o pgid=,lstart=");
     // The clients spawn codex detached, so its children live in the group.
     expect(killCalls).toContainEqual([-901, "SIGTERM"]);
     expect(killCalls).not.toContainEqual([901, "SIGTERM"]);
@@ -247,7 +249,7 @@ describe("reapOrphanProcesses", () => {
     const summary = await reapOrphanProcesses([session(931, spawnedAt.toISOString())]);
 
     expect(summary).toEqual({ reaped: 1, alreadyDead: 0, unconfirmed: 0, skipped: 0 });
-    expect(execSyncMock.mock.calls[1]![0]).toBe("ps -p 931 -o lstart=");
+    expect(execSyncMock.mock.calls[1][0]).toBe("ps -p 931 -o lstart=");
     expect(killCalls).toContainEqual([931, "SIGTERM"]);
     expect(killCalls.every(([pid]) => pid >= 0)).toBe(true);
   });
@@ -598,7 +600,7 @@ describe("reapOrphanProcesses", () => {
     ]);
 
     expect(summary).toEqual({ reaped: 1, alreadyDead: 0, unconfirmed: 0, skipped: 0 });
-    const command = execSyncMock.mock.calls[0]![0] as string;
+    const command = execSyncMock.mock.calls[0][0] as string;
     expect(command).toContain("powershell.exe");
     expect(command).toContain("Get-CimInstance Win32_Process -Filter 'ProcessId=920'");
     expect(execSyncMock.mock.calls.every(([cmd]) => !String(cmd).startsWith("wmic"))).toBe(true);
@@ -627,7 +629,7 @@ describe("reapOrphanProcesses", () => {
     ]);
 
     expect(summary).toEqual({ reaped: 1, alreadyDead: 0, unconfirmed: 0, skipped: 0 });
-    expect(execSyncMock.mock.calls[1]![0]).toBe(
+    expect(execSyncMock.mock.calls[1][0]).toBe(
       'wmic process where "ProcessId=921" get CreationDate /value'
     );
     expect(spawnMock).toHaveBeenCalledWith(
@@ -685,8 +687,8 @@ describe("reapOrphanProcesses", () => {
     const summary = await pending;
 
     expect(summary).toEqual({ reaped: 1, alreadyDead: 0, unconfirmed: 0, skipped: 0 });
-    expect(spawnMock.mock.calls[0]![1]).toEqual(["/PID", "924", "/T"]);
-    expect(spawnMock.mock.calls[1]![1]).toEqual(["/PID", "924", "/T", "/F"]);
+    expect(spawnMock.mock.calls[0][1]).toEqual(["/PID", "924", "/T"]);
+    expect(spawnMock.mock.calls[1][1]).toEqual(["/PID", "924", "/T", "/F"]);
     // No POSIX group signal reaches a platform that has no process groups.
     expect(killCalls.every(([pid]) => pid >= 0)).toBe(true);
   });
@@ -704,6 +706,6 @@ describe("reapOrphanProcesses", () => {
     const summary = await pending;
 
     expect(summary).toEqual({ reaped: 0, alreadyDead: 0, unconfirmed: 1, skipped: 0 });
-    expect(spawnMock.mock.calls[1]![1]).toEqual(["/PID", "925", "/T", "/F"]);
+    expect(spawnMock.mock.calls[1][1]).toEqual(["/PID", "925", "/T", "/F"]);
   });
 });
