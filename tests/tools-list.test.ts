@@ -97,6 +97,7 @@ describe("tools/list metadata", () => {
     expect(codexSession).toContain("source remains unchanged");
     expect(codexSession).toContain("clean_background_terminals");
     expect(codexSession).toContain("terminate_background_terminal");
+    expect(codexSession).toContain("add to the turn already running");
 
     const codexCheck = tool(tools, "codex_check").description ?? "";
     expect(codexCheck).toContain("waitMs");
@@ -134,6 +135,25 @@ describe("tools/list metadata", () => {
     const waitMsSchema = checkProps.waitMs as Record<string, unknown> | undefined;
     expect(waitMsSchema, "codex_check.waitMs").toBeDefined();
     expect(waitMsSchema).not.toHaveProperty("default");
+  });
+
+  it("publishes the steer action of codex_session with the prompt it takes", async () => {
+    const tools = await listTools();
+    const session = tool(tools, "codex_session");
+    const props = propertiesOf(session.inputSchema, "codex_session");
+
+    const actionEnum = present(
+      (props.action as { enum?: unknown[] }).enum,
+      "the codex_session action enum"
+    );
+    expect(actionEnum).toContain("steer");
+    expect(props).toHaveProperty("prompt");
+    // The turn id a steer answers with is the running turn's, and the schema says so.
+    const turnId = present(
+      session.outputSchema?.properties?.turnId as { description?: string } | undefined,
+      "codex_session.turnId"
+    );
+    expect(turnId.description).toContain("already running");
   });
 
   it("publishes the background-terminal surface of codex_session", async () => {

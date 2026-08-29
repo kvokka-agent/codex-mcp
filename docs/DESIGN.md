@@ -569,7 +569,31 @@ app-server hangs the turn when one goes unanswered.
 ### turn/start input
 
 `prompt` becomes `input: [{ type: "text", text: prompt }]`, and each entry of
-`advanced.images` appends `{ type: "localImage", path }`.
+`advanced.images` appends `{ type: "localImage", path }`. `turn/steer` takes the
+same `UserInput[]` and is built by the same function.
+
+### turn/steer
+
+`codex_session(action="steer")` sends `turn/steer` with `expectedTurnId:
+session.activeTurnId`. It adds no state to the session machine: measured on
+`codex-cli 0.150.1` with a stub holding the model response for 8 s and a steer at
+2 s, the call answered the running turn's id, sent neither `turn/started` nor
+`turn/completed`, delivered the steered text as a `userMessage` item at +8232 ms
+and made a second upstream request inside the same turn. `activeTurnId`, the
+status and `signalOf` all stand, and the turn writes its one `lastResult` at its
+end.
+
+Nothing `signalOf` reads moves, so a steer wakes no long poll — a woken waiter
+would answer with the state it already had. The steer is written to
+`events.jsonl` as a `progress` record naming `turn/steer` and the turn: Codex's
+rollout log carries the `userMessage` item without saying who sent it, so that
+record is the only place saying this server put text into a turn it did not
+start.
+
+The backend refuses a steer with `-32600` in two cases — `no active turn to
+steer` and ``expected active turn id `X` but found `Y` `` — and both reach the
+caller as `SESSION_NOT_RUNNING` carrying the backend's own sentence. Any other
+failure of the call is raised as it was.
 
 ### Background terminals
 

@@ -184,6 +184,28 @@ describe("AppServerClient JSON-RPC", () => {
     await expect(resume).resolves.toEqual({ thread: { id: "resumed" } });
   });
 
+  it("sends turn/steer and answers with the turn id the server named", async () => {
+    const client = await startClient();
+
+    const steer = client.turnSteer({
+      threadId: "thread_1",
+      expectedTurnId: "turn_1",
+      input: [{ type: "text", text: "not that directory" }],
+    });
+
+    const req = lastWritten();
+    expect(req.method).toBe(Methods.TURN_STEER);
+    expect(req.params).toEqual({
+      threadId: "thread_1",
+      expectedTurnId: "turn_1",
+      input: [{ type: "text", text: "not that directory" }],
+    });
+
+    // turn/steer answers a bare turnId — the turn already running.
+    reply(idOf(req, Methods.TURN_STEER), { turnId: "turn_1" });
+    await expect(steer).resolves.toEqual({ turnId: "turn_1" });
+  });
+
   it("rejects with the error the server reported", async () => {
     const client = await startClient();
 

@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import os from "node:os";
 import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client.js";
-import { Methods } from "../src/app-server/protocol.js";
+import { Methods, type TurnSteerParams } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
 import { executeCodexCheck } from "../src/tools/codex-check.js";
@@ -20,6 +20,10 @@ class MockAppServerClient extends EventEmitter {
   turnStartResult: unknown = { turn: { id: "turn_mock" } };
   threadForkResult: unknown = { thread: { id: "thread_forked" } };
   threadResumeResult: unknown = { thread: { id: "thread_forked" } };
+  /** What `turn/steer` answers: the id of the turn already running. */
+  turnSteerResult: unknown = { turnId: "turn_mock" };
+  /** What `turn/steer` raises instead of answering, for the refusals. */
+  turnSteerError: Error | undefined = undefined;
 
   childPid: number | undefined = undefined;
   /** Spawn instant reported with the "spawn" event, as the real clients report theirs. */
@@ -35,6 +39,10 @@ class MockAppServerClient extends EventEmitter {
   threadDelete = jest.fn(async (_params: { threadId: string }) => ({}));
   turnStart = jest.fn(async () => this.turnStartResult);
   turnInterrupt = jest.fn(async () => {});
+  turnSteer = jest.fn(async (_params: TurnSteerParams) => {
+    if (this.turnSteerError) throw this.turnSteerError;
+    return this.turnSteerResult as { turnId: string };
+  });
 
   respondToServer = jest.fn((_id: number, _result: unknown) => {});
   respondErrorToServer = jest.fn((_id: number, _code: number, _message: string) => {});
@@ -1437,6 +1445,136 @@ describe("SessionManager missing protocol ids", () => {
   });
 });
 
+describe("SessionManager steering a running turn", () => {
+  let manager: SessionManager;
+  let client: MockAppServerClient;
+  const workspace = path.resolve(os.tmpdir(), "codex-mcp-tests");
+
+  beforeEach(() => {
+    client = new MockAppServerClient();
+    manager = new SessionManager({
+      disableCleanup: true,
+      createClient: () => client as unknown as AppServerClient,
+    });
+  });
+
+  afterEach(() => {
+    manager.destroy();
+  });
+
+  /** A session on a turn `turn/started` named, which is what a steer needs. */
+  async function sessionOnTurn(turnId: string): Promise<{ sessionId: string; threadId: string }> {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.emitNotification(Methods.TURN_STARTED, {
+      threadId: started.threadId,
+      turn: { id: turnId, status: "in_progress" },
+    });
+    return { sessionId: started.sessionId, threadId: started.threadId };
+  }
+
+  it("sends turn/steer for the turn that is running and reports it as that turn", async () => {
+    const { sessionId, threadId } = await sessionOnTurn("turn_running");
+    client.turnSteerResult = { turnId: "turn_running" };
+
+    const steer = await manager.steerSession(sessionId, "use src/, not tests/");
+
+    expect(client.turnSteer).toHaveBeenCalledWith({
+      threadId,
+      expectedTurnId: "turn_running",
+      input: [{ type: "text", text: "use src/, not tests/" }],
+    });
+    expect(steer.turnId).toBe("turn_running");
+    expect(steer.status).toBe("running");
+    expect(steer.threadId).toBe(threadId);
+    expect(steer.message).toContain("no turn started");
+    // The steer joined the turn: the session is still on it and no result is written.
+    expect(manager.pollStatus(sessionId).status).toBe("running");
+    expect(manager.getLastResult(sessionId)).toBeUndefined();
+  });
+
+  it("builds the steer input the way a turn start builds its own", async () => {
+    const { sessionId } = await sessionOnTurn("turn_running");
+    const turnStartInput = (client.turnStart.mock.calls[0] as unknown as [{ input: unknown }])[0]
+      .input;
+
+    await manager.steerSession(sessionId, "hi");
+
+    const steerInput = (client.turnSteer.mock.calls[0] as unknown as [TurnSteerParams])[0].input;
+    expect(steerInput).toEqual(turnStartInput as TurnSteerParams["input"]);
+  });
+
+  it("refuses a steer on an idle session and sends nothing", async () => {
+    const { sessionId, threadId } = await sessionOnTurn("turn_running");
+    client.emitNotification(Methods.TURN_COMPLETED, {
+      threadId,
+      turn: { id: "turn_running", status: "completed" },
+    });
+    expect(manager.pollStatus(sessionId).status).toBe("idle");
+
+    await expect(manager.steerSession(sessionId, "also run the tests")).rejects.toThrow(
+      "Error [SESSION_NOT_RUNNING]: Cannot steer session in idle state"
+    );
+    expect(client.turnSteer).not.toHaveBeenCalled();
+  });
+
+  it("refuses a steer on a running session that has no active turn id", async () => {
+    // `turn/start` put the id outside `turn`, so nothing seeded `activeTurnId`
+    // and no `turn/started` has arrived: there is no id to send as expectedTurnId.
+    client.turnStartResult = { turnId: "turn_v1" };
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    expect(started.progress?.activeTurnId).toBeUndefined();
+
+    await expect(manager.steerSession(started.sessionId, "narrow it down")).rejects.toThrow(
+      "Error [INTERNAL]: Missing threadId or activeTurnId for steer"
+    );
+    expect(client.turnSteer).not.toHaveBeenCalled();
+  });
+
+  it("refuses a steer on a cancelled session", async () => {
+    const { sessionId } = await sessionOnTurn("turn_running");
+    await manager.cancelSession(sessionId);
+
+    await expect(manager.steerSession(sessionId, "carry on")).rejects.toThrow(
+      "Error [CANCELLED]: "
+    );
+  });
+
+  it("carries `expected active turn id` through as SESSION_NOT_RUNNING", async () => {
+    const { sessionId } = await sessionOnTurn("turn_running");
+    // codex-cli 0.150.1 answers this when the steer names a turn that is not the
+    // running one: the turn moved on between the caller's poll and its steer.
+    client.turnSteerError = new Error(
+      "RPC error -32600: expected active turn id `turn_running` but found `turn_next`"
+    );
+
+    await expect(manager.steerSession(sessionId, "not that directory")).rejects.toThrow(
+      /Error \[SESSION_NOT_RUNNING\].*expected active turn id `turn_running` but found `turn_next`/
+    );
+  });
+
+  it("carries `no active turn to steer` through as SESSION_NOT_RUNNING", async () => {
+    const { sessionId } = await sessionOnTurn("turn_running");
+    // The steer landed after the turn ended — the backend saw no turn at all.
+    client.turnSteerError = new Error("RPC error -32600: no active turn to steer");
+
+    await expect(manager.steerSession(sessionId, "one more thing")).rejects.toThrow(
+      /Error \[SESSION_NOT_RUNNING\].*no active turn to steer/
+    );
+  });
+
+  it("leaves any other steer failure as the backend raised it", async () => {
+    const { sessionId } = await sessionOnTurn("turn_running");
+    client.turnSteerError = new Error("Request turn/steer timed out after 60000ms");
+
+    const raised = await manager.steerSession(sessionId, "hurry up").catch((err: unknown) => err);
+
+    // A timed-out request is not a turn that ended, so it reaches the caller as
+    // itself rather than relabelled.
+    expect(raised).toBe(client.turnSteerError);
+    expect(String(raised)).not.toContain("SESSION_NOT_RUNNING");
+  });
+});
+
 describe("SessionManager disk persistence", () => {
   const workspace = path.resolve(os.tmpdir(), "codex-mcp-tests");
   let root: string;
@@ -1500,6 +1638,32 @@ describe("SessionManager disk persistence", () => {
     expect(Number.isNaN(Date.parse(String(onDisk[0].timestamp)))).toBe(false);
     // And nothing of it reaches the caller.
     expect(manager.pollStatus(sessionId)).not.toHaveProperty("events");
+  });
+
+  it("records a steer in events.jsonl, which is the only place it is written down", async () => {
+    // Codex's rollout log carries the steered text as a `userMessage` item of the
+    // turn and not who sent it, so this record is what says the server put text
+    // into a turn it did not start.
+    const { sessionId, threadId } = await manager.createSession("hi", workspace, {}, "medium");
+    client.emitNotification(Methods.TURN_STARTED, {
+      threadId,
+      turn: { id: "turn_running", status: "in_progress" },
+    });
+    client.turnSteerResult = { turnId: "turn_running" };
+
+    await manager.steerSession(sessionId, "use src/, not tests/");
+    persistence.flushAll();
+
+    const steered = readEventLines(sessionId).filter(
+      (line) => (line.data as { method?: string }).method === Methods.TURN_STEER
+    );
+    expect(steered).toHaveLength(1);
+    expect(steered[0].type).toBe("progress");
+    expect(steered[0].data).toEqual({
+      method: Methods.TURN_STEER,
+      threadId,
+      turnId: "turn_running",
+    });
   });
 
   it("flushes a critical event at once and holds a normal one until the flush", async () => {

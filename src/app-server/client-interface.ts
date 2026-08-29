@@ -24,6 +24,8 @@ import type {
   TurnInterruptParams,
   TurnStartParams,
   TurnStartResult,
+  TurnSteerParams,
+  TurnSteerResult,
 } from "./protocol.js";
 
 export interface ICodexClient {
@@ -67,6 +69,14 @@ export interface ICodexClient {
 
   /** Interrupt a running turn. */
   turnInterrupt(params: TurnInterruptParams): Promise<void>;
+
+  /**
+   * Add input to the turn already running, and answer the id of that turn.
+   *
+   * `expectedTurnId` must name the running turn: the backend answers `-32600`
+   * otherwise, and the same when no turn is running at all.
+   */
+  turnSteer(params: TurnSteerParams): Promise<TurnSteerResult>;
 
   /** Register handler for server notifications. */
   onNotification(handler: (method: string, params: unknown) => void): void;

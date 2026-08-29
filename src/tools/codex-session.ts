@@ -1,6 +1,6 @@
 /**
- * codex_session tool — manage sessions (list/get/resume/cancel/interrupt/fork/
- * clean/clean_background_terminals/terminate_background_terminal).
+ * codex_session tool — manage sessions (list/get/resume/cancel/interrupt/steer/
+ * fork/clean/clean_background_terminals/terminate_background_terminal).
  */
 import type { SessionManager } from "../session/manager.js";
 import { type CleanableStatus, ErrorCode, type SessionAction } from "../types.js";
@@ -14,6 +14,7 @@ export interface CodexSessionParams {
   dryRun?: boolean;
   includeDisk?: boolean;
   processId?: string;
+  prompt?: string;
 }
 
 /** What an action that works on one session answers when the caller named none. */
@@ -76,6 +77,17 @@ export async function executeCodexSession(
       if (!args.sessionId) return missingSessionId(args.action);
       await sessionManager.interruptSession(args.sessionId);
       return { success: true, message: `Session ${args.sessionId} interrupted` };
+
+    case "steer": {
+      if (!args.sessionId) return missingSessionId(args.action);
+      if (!args.prompt) {
+        return {
+          error: `Error [${ErrorCode.INVALID_ARGUMENT}]: prompt required for '${args.action}'`,
+          isError: true,
+        };
+      }
+      return await sessionManager.steerSession(args.sessionId, args.prompt);
+    }
 
     case "fork":
       if (!args.sessionId) return missingSessionId(args.action);

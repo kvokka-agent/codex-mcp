@@ -515,6 +515,17 @@ export interface TurnSteerParams {
   responsesapiClientMetadata?: Record<string, string> | null;
 }
 
+/**
+ * turn/steer response — schema v2/TurnSteerResponse.json.
+ *
+ * `turnId` is the turn that was already running, not a new one. Measured on
+ * codex-cli 0.150.1: a steer sent 2s into an 8s turn answered the running turn's
+ * id, and no `turn/started` or `turn/completed` followed it.
+ */
+export interface TurnSteerResult {
+  turnId: string;
+}
+
 // ── Approval Requests (server → client) ────────────────────────────
 
 export interface CommandApprovalParams {

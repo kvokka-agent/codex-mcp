@@ -15,6 +15,7 @@ import {
   Methods,
   type RequestId,
   type TurnStartParams,
+  type TurnSteerResult,
   toSandboxPolicy,
   type UserInput,
   type UserInputRequestResponse,
@@ -62,6 +63,7 @@ import {
   type SessionStartResult,
   type SessionStatus,
   type SessionWarning,
+  type SteerResult,
   type SummaryMode,
   type TurnResult,
   WAITING_APPROVAL_POLL_INTERVAL,
@@ -545,19 +547,11 @@ export class SessionManager {
     // than with the next status change.
     this.persistSessionIfChanged(session);
 
-    // Build input array
-    const input: UserInput[] = [{ type: "text", text: prompt }];
-    if (resolvedImages) {
-      for (const imagePath of resolvedImages) {
-        input.push({ type: "localImage", path: imagePath });
-      }
-    }
-
     // Start first turn
     this.markTurnOutputSchema(sessionId, advanced?.outputSchema);
     const turnStart = await this.startTurnWithCompatibilityFallback(client, {
       threadId,
-      input,
+      input: buildUserInput(prompt, resolvedImages),
       effort: session.effort,
       summary: advanced?.summary,
       outputSchema: advanced?.outputSchema,
@@ -897,34 +891,107 @@ export class SessionManager {
     }
   }
 
-  async interruptSession(sessionId: string): Promise<void> {
+  /**
+   * The session, its client and the turn it is running, or the error saying why not.
+   *
+   * `words` names the call in the errors the caller reads: `verb` as in "Cannot
+   * steer session in idle state", `done` as in "cannot be steered".
+   */
+  private runningTurnTarget(
+    sessionId: string,
+    words: { verb: string; done: string }
+  ): { session: SessionInfo; client: ICodexClient; threadId: string; turnId: string } {
     const session = this.getSessionOrThrow(sessionId);
 
     // Status first: cancelSession drops the client, so a client lookup ahead of this
     // reports a cancelled session as SESSION_NOT_FOUND.
     if (session.status === "cancelled") {
       throw new Error(
-        `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be interrupted`
+        `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be ${words.done}`
       );
     }
     if (session.status !== "running" && session.status !== "waiting_approval") {
       throw new Error(
-        `Error [${ErrorCode.SESSION_NOT_RUNNING}]: Cannot interrupt session in ${session.status} state`
+        `Error [${ErrorCode.SESSION_NOT_RUNNING}]: Cannot ${words.verb} session in ${session.status} state`
       );
     }
 
     if (!session.threadId || !session.activeTurnId) {
       throw new Error(
-        `Error [${ErrorCode.INTERNAL}]: Missing threadId or activeTurnId for interrupt`
+        `Error [${ErrorCode.INTERNAL}]: Missing threadId or activeTurnId for ${words.verb}`
       );
     }
 
-    const client = this.getClientOrThrow(sessionId);
-
-    await client.turnInterrupt({
+    return {
+      session,
+      client: this.getClientOrThrow(sessionId),
       threadId: session.threadId,
       turnId: session.activeTurnId,
+    };
+  }
+
+  async interruptSession(sessionId: string): Promise<void> {
+    const { client, threadId, turnId } = this.runningTurnTarget(sessionId, {
+      verb: "interrupt",
+      done: "interrupted",
     });
+
+    await client.turnInterrupt({ threadId, turnId });
+  }
+
+  /**
+   * Add input to the turn already running, so a caller can correct it instead of
+   * throwing it away with `interruptSession`.
+   *
+   * Measured on codex-cli 0.150.1 against a stub holding the model response for
+   * 8s, steered at 2s: `turn/steer` answered the running turn's id, sent no
+   * `turn/started` and no `turn/completed`, delivered the steered text as a
+   * `userMessage` item at +8232ms — the first model round trip after the steer —
+   * and made a second upstream request inside the same turn carrying it. So
+   * `activeTurnId`, `status` and `signalOf` do not move, and the one
+   * `lastResult` of the turn is still written at its end.
+   */
+  async steerSession(sessionId: string, prompt: string): Promise<SteerResult> {
+    const { session, client, threadId, turnId } = this.runningTurnTarget(sessionId, {
+      verb: "steer",
+      done: "steered",
+    });
+
+    let answer: TurnSteerResult;
+    try {
+      answer = await client.turnSteer({
+        threadId,
+        expectedTurnId: turnId,
+        input: buildUserInput(prompt),
+      });
+    } catch (err) {
+      throw steerRefusal(sessionId, turnId, err) ?? err;
+    }
+
+    session.lastActiveAt = new Date().toISOString();
+    // Codex's rollout log holds the `userMessage` item and not who sent it, so
+    // `events.jsonl` is the only place recording that this server put text into a
+    // turn it did not start, and when.
+    recordEvent(session, "progress", {
+      method: Methods.TURN_STEER,
+      threadId,
+      turnId: answer.turnId,
+    });
+    // No `notifyWaiters`: a steer moves no field `signalOf` reads — the status,
+    // the open request ids, the result instant, the activity instant and the
+    // warning count all stand — so waking a long poll would hand it the state it
+    // already has and spend a round trip of the caller's budget. The steer's own
+    // answer is what says it landed.
+
+    return {
+      sessionId,
+      threadId,
+      turnId: answer.turnId,
+      status: session.status,
+      message:
+        `Steered turn ${answer.turnId}, which was already running: no turn started, and this is the id of the turn the steer joined. ` +
+        `Codex reads the added text at the turn's next model round trip, and the turn's one result still comes at its end — carry on polling.`,
+    };
   }
 
   /**
@@ -3201,6 +3268,41 @@ function resolveTurnCwd(
     : undefined;
 }
 
+/**
+ * The `input` of a turn: the prompt, then one entry per image the caller named.
+ *
+ * `turn/start` and `turn/steer` both take `UserInput[]`, so a steer that carries
+ * an image is built here too.
+ */
+function buildUserInput(prompt: string, images?: string[]): UserInput[] {
+  const input: UserInput[] = [{ type: "text", text: prompt }];
+  for (const path of images ?? []) input.push({ type: "localImage", path });
+  return input;
+}
+
+/**
+ * The backend's refusal of a steer, as the error the caller acts on.
+ *
+ * Measured on codex-cli 0.150.1: a steer whose `expectedTurnId` is not the
+ * running turn answers ``-32600 expected active turn id `X` but found `Y` ``,
+ * and one that arrives with no turn running answers `-32600 no active turn to
+ * steer`. The steered text lands at the turn's next model round trip rather than
+ * on arrival, so a steer sent late in a turn reaches a turn that has ended.
+ *
+ * Both say the same thing about the session — the turn the steer named is not
+ * running — which is `SESSION_NOT_RUNNING`; the backend's own sentence is
+ * carried through, so the caller can still tell the turn that moved on from the
+ * turn that ended. Any other failure is left as it was raised: a timed-out
+ * request or a dead child is not a turn that finished.
+ */
+function steerRefusal(sessionId: string, turnId: string, err: unknown): Error | undefined {
+  const message = messageOf(err);
+  if (!/no active turn to steer|expected active turn id/.test(message)) return undefined;
+  return new Error(
+    `Error [${ErrorCode.SESSION_NOT_RUNNING}]: Session '${sessionId}' is no longer running turn '${turnId}', so the steer reached no turn: ${message}`
+  );
+}
+
 /** The `turn/start` parameters of a reply: the overrides it names, over what the session runs with. */
 function buildTurnParams(
   session: SessionInfo,
@@ -3209,10 +3311,9 @@ function buildTurnParams(
   overrides: TurnOverrides | undefined,
   resolvedCwd: string | undefined
 ): TurnStartParams {
-  const input: UserInput[] = [{ type: "text", text: prompt }];
   const turnParams: TurnStartParams = {
     threadId,
-    input,
+    input: buildUserInput(prompt),
     model: overrides?.model,
     approvalPolicy: overrides?.approvalPolicy,
     // `turn/start` carries these on every turn; the thread holds none of them, so a
@@ -3674,7 +3775,8 @@ function extractThreadId(result: unknown): string {
  *
  * Optional: the id is a seed for `activeTurnId` and the `turn/started`
  * notification is what settles it. The one response of the bundle carrying a
- * bare `turnId` answers `turn/steer`, which this server never sends.
+ * bare `turnId` answers `turn/steer`, which `steerSession` reads on its own —
+ * that id is the running turn's, not a new one's.
  */
 function extractTurnId(result: unknown): string | undefined {
   if (!isRecord(result)) return undefined;

@@ -38,6 +38,7 @@ export const SESSION_ACTIONS = [
   "resume",
   "cancel",
   "interrupt",
+  "steer",
   "fork",
   "clean",
   "clean_background_terminals",
@@ -421,6 +422,23 @@ export interface BackgroundTerminalsReport {
   cleanCalled?: boolean;
   /** The listing failed at this stage, so what stands afterwards is unknown. */
   listError?: { stage: "before" | "after"; message: string };
+}
+
+/**
+ * What a steer came to.
+ *
+ * `turn/steer` adds input to the turn that is already running rather than
+ * starting one, so `turnId` names that turn and `status` is the status the
+ * session was already on.
+ */
+export interface SteerResult {
+  sessionId: string;
+  threadId: string;
+  /** The turn the steer joined — the running one, which Codex answered with. */
+  turnId: string;
+  status: SessionStatus;
+  /** What happened, in the terms a caller expecting a new turn needs to read. */
+  message: string;
 }
 
 export interface SessionStartResult {

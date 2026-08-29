@@ -752,8 +752,10 @@ describe("SessionManager session operations", () => {
   });
 
   it("keeps no active turn when turn/start puts the id outside `turn`", async () => {
-    // turn/steer is the one response of the bundle answering a bare `turnId`
-    // (codex-schema/v2/TurnSteerResponse.json), and this server never sends it.
+    // A bare `turnId` is the shape `turn/steer` answers
+    // (codex-schema/v2/TurnSteerResponse.json), and that id names a turn already
+    // running — `turn/start` naming its id that way starts nothing this server
+    // can address.
     client.turnStartResult = { turnId: "turn_v1" };
     const started = await manager.createSession("hi", workspace, {}, "medium");
 
