@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { randomUUID } from "node:crypto";
 /**
  * A codex app-server stand-in for the end-to-end tests.
  *
@@ -11,7 +12,6 @@
  * `--help` answers so the app-server probe of detect.ts reads as supported.
  */
 import process from "node:process";
-import { randomUUID } from "node:crypto";
 import { setTimeout } from "node:timers";
 
 const argv = process.argv.slice(2);
@@ -28,17 +28,18 @@ let buffer = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
-  let index;
-  while ((index = buffer.indexOf("\n")) !== -1) {
+  let index = buffer.indexOf("\n");
+  while (index !== -1) {
     const line = buffer.slice(0, index).trim();
     buffer = buffer.slice(index + 1);
     if (line) handle(JSON.parse(line));
+    index = buffer.indexOf("\n");
   }
 });
 process.stdin.on("end", () => process.exit(0));
 
 function send(msg) {
-  process.stdout.write(JSON.stringify(msg) + "\n");
+  process.stdout.write(`${JSON.stringify(msg)}\n`);
 }
 
 function reply(id, result) {

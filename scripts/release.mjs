@@ -61,7 +61,9 @@ export function releaseLevel(labels) {
     return null;
   }
   if (asked.length > 1) {
-    throw new Error(`a pull request carries one release label, this one carries ${asked.join(", ")}`);
+    throw new Error(
+      `a pull request carries one release label, this one carries ${asked.join(", ")}`
+    );
   }
   const level = asked[0].slice(LABEL_PREFIX.length);
   if (!LEVELS.includes(level)) {
@@ -75,7 +77,7 @@ export function applyVersion(content, target, version) {
   const found = content.match(target.pattern) ?? [];
   if (found.length !== target.count) {
     throw new Error(
-      `${target.path} holds ${found.length} version reference(s), the release expects ${target.count}`,
+      `${target.path} holds ${found.length} version reference(s), the release expects ${target.count}`
     );
   }
   return content.replace(target.pattern, (hit) => hit.replace(VERSION_IN_TEXT, version));
@@ -112,7 +114,7 @@ function main(argv) {
     return;
   }
   throw new Error(
-    `usage: release.mjs level '<labels as a json array>' | release.mjs bump <${LEVELS.join("|")}>`,
+    `usage: release.mjs level '<labels as a json array>' | release.mjs bump <${LEVELS.join("|")}>`
   );
 }
 

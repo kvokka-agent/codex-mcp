@@ -1,8 +1,8 @@
 /**
  * File path resolution + validation helpers.
  */
-import { existsSync, statSync } from "fs";
-import path from "path";
+import { existsSync, statSync } from "node:fs";
+import path from "node:path";
 import { ErrorCode } from "../types.js";
 
 export function resolveAndValidateFilePath(

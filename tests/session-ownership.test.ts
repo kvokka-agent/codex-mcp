@@ -1,16 +1,17 @@
 /**
  * Who owns a session, what an abandoned one looks like, and what resuming it does.
  */
-import { EventEmitter } from "events";
+
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
-
+import { ownStartedAt } from "../src/persistence/process-identity.js";
 import { SessionManager } from "../src/session/manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
-import { ownStartedAt } from "../src/persistence/process-identity.js";
 import { ErrorCode } from "../src/types.js";
+import { present } from "./helpers/present.js";
 
 class MockClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;
@@ -111,9 +112,9 @@ describe("a session this server drives", () => {
     const [sessionId] = manager.listSessions().map((s) => s.sessionId);
 
     // The turn is still running: nothing has completed, and the id is on disk.
-    expect(manager.getSession(sessionId!).status).toBe("running");
-    expect(readMeta(sessionId!).threadId).toBe("thr_started");
-    expect(JSON.parse(readFileSync(sessionFile(sessionId!, "owner.json"), "utf-8")).pid).toBe(
+    expect(manager.getSession(sessionId).status).toBe("running");
+    expect(readMeta(sessionId).threadId).toBe("thr_started");
+    expect(JSON.parse(readFileSync(sessionFile(sessionId, "owner.json"), "utf-8")).pid).toBe(
       process.pid
     );
     expect(persistence.ownedSessions()).toEqual([sessionId]);
@@ -129,7 +130,7 @@ describe("a session this server drives", () => {
     );
     const [sessionId] = manager.listSessions().map((s) => s.sessionId);
 
-    expect(readMeta(sessionId!)).toMatchObject({
+    expect(readMeta(sessionId)).toMatchObject({
       model: "gpt-5",
       profile: "work",
       approvalPolicy: "never",
@@ -137,7 +138,7 @@ describe("a session this server drives", () => {
       personality: "pragmatic",
       approvalTimeoutMs: 900_000,
     });
-    expect(String(readMeta(sessionId!).developerInstructions)).toContain("%%%ACTIVITY:");
+    expect(String(readMeta(sessionId).developerInstructions)).toContain("%%%ACTIVITY:");
   });
 
   it("writes a turn cut off by shutdown as abandoned and gives the session back", async () => {
@@ -146,8 +147,8 @@ describe("a session this server drives", () => {
 
     manager.finalizeForShutdown();
 
-    expect(readMeta(sessionId!).status).toBe("abandoned");
-    expect(existsSync(sessionFile(sessionId!, "owner.json"))).toBe(false);
+    expect(readMeta(sessionId).status).toBe("abandoned");
+    expect(existsSync(sessionFile(sessionId, "owner.json"))).toBe(false);
     expect(persistence.ownedSessions()).toEqual([]);
   });
 });
@@ -157,7 +158,10 @@ describe("listing", () => {
     writeAbandonedOnDisk("sess_disk", {}, "Подсчёт TypeScript-файлов в src");
 
     const listed = manager.listAllSessions();
-    const found = listed.find((s) => s.sessionId === "sess_disk")!;
+    const found = present(
+      listed.find((s) => s.sessionId === "sess_disk"),
+      "the sess_disk session in the listing"
+    );
     expect(found.status).toBe("abandoned");
     expect(found.activity).toBe("Подсчёт TypeScript-файлов в src");
     expect(found.owner).toBeUndefined();
@@ -167,7 +171,10 @@ describe("listing", () => {
     await manager.createSession("hello", process.cwd(), {}, "low");
     const [sessionId] = manager.listSessions().map((s) => s.sessionId);
 
-    const listed = manager.listAllSessions().find((s) => s.sessionId === sessionId)!;
+    const listed = present(
+      manager.listAllSessions().find((s) => s.sessionId === sessionId),
+      "the created session in the listing"
+    );
     expect(listed.owner).toEqual({ pid: process.pid, state: "self" });
   });
 });
@@ -183,7 +190,7 @@ describe("resume", () => {
       status: "idle",
     });
 
-    const client = clients[0]!;
+    const client = clients[0];
     expect(client.threadResume).toHaveBeenCalledWith({
       threadId: "thr_on_disk",
       developerInstructions: "# Activity marker",
@@ -238,7 +245,7 @@ describe("resume", () => {
     await manager.createSession("hello", process.cwd(), {}, "low");
     const [sessionId] = manager.listSessions().map((s) => s.sessionId);
 
-    await expect(manager.resumeSession(sessionId!)).rejects.toThrow(ErrorCode.SESSION_BUSY);
+    await expect(manager.resumeSession(sessionId)).rejects.toThrow(ErrorCode.SESSION_BUSY);
   });
 
   it("leaves the session abandoned when the resume itself fails", async () => {

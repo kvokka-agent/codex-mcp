@@ -1,23 +1,23 @@
-import { spawnSync } from "child_process";
+import { spawnSync } from "node:child_process";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
 import type { SessionManager } from "../session/manager.js";
 import {
   APPROVAL_POLICIES,
-  SANDBOX_MODES,
-  EFFORT_LEVELS,
   DEFAULT_APPROVAL_TIMEOUT_MS,
   DEFAULT_EFFORT_LEVEL,
-  MAX_LONG_POLL_WAIT_MS,
   DEFAULT_IDLE_CLEANUP_MS,
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
+  EFFORT_LEVELS,
   ErrorCode,
+  MAX_LONG_POLL_WAIT_MS,
+  SANDBOX_MODES,
 } from "../types.js";
+import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 import type { SessionDefaults } from "../utils/session-defaults.js";
 import { SESSION_DEFAULT_ENV } from "../utils/session-defaults.js";
 import { resolveStdioMode } from "../utils/stdio-guard.js";
-import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 
 const RESOURCE_SCHEME = "codex-mcp";
 
@@ -698,33 +698,24 @@ export function registerResources(
     return codexCliVersionCache;
   };
 
-  const byKey = new Map(RESOURCE_CATALOG.map((entry) => [entry.key, entry]));
+  // One reader per key of RESOURCE_URIS, so every catalog entry has one and the
+  // registration follows the catalog's order.
+  const readers: Record<keyof typeof RESOURCE_URIS, (uri: URL) => ReadResourceResult> = {
+    serverInfo: (uri) =>
+      asTextResource(uri, buildServerInfoJson(deps, getCodexCliVersion), "application/json"),
+    compatReport: (uri) =>
+      asTextResource(uri, buildCompatReport(deps, getCodexCliVersion()), "application/json"),
+    config: (uri) =>
+      asTextResource(uri, buildConfigGuideText(deps.sessionDefaults), "text/markdown"),
+    gotchas: (uri) => asTextResource(uri, buildGotchasText(deps.sessionDefaults), "text/markdown"),
+    quickstart: (uri) =>
+      asTextResource(uri, buildQuickstartText(deps.sessionDefaults), "text/markdown"),
+    errors: (uri) => asTextResource(uri, buildErrorsText(), "text/markdown"),
+    delegationGuide: (uri) =>
+      asTextResource(uri, buildDelegationGuideText(deps.sessionDefaults), "text/markdown"),
+  };
 
-  registerCatalogResource(server, byKey.get("serverInfo")!, (uri) =>
-    asTextResource(uri, buildServerInfoJson(deps, getCodexCliVersion), "application/json")
-  );
-
-  registerCatalogResource(server, byKey.get("compatReport")!, (uri) =>
-    asTextResource(uri, buildCompatReport(deps, getCodexCliVersion()), "application/json")
-  );
-
-  registerCatalogResource(server, byKey.get("config")!, (uri) =>
-    asTextResource(uri, buildConfigGuideText(deps.sessionDefaults), "text/markdown")
-  );
-
-  registerCatalogResource(server, byKey.get("gotchas")!, (uri) =>
-    asTextResource(uri, buildGotchasText(deps.sessionDefaults), "text/markdown")
-  );
-
-  registerCatalogResource(server, byKey.get("quickstart")!, (uri) =>
-    asTextResource(uri, buildQuickstartText(deps.sessionDefaults), "text/markdown")
-  );
-
-  registerCatalogResource(server, byKey.get("errors")!, (uri) =>
-    asTextResource(uri, buildErrorsText(), "text/markdown")
-  );
-
-  registerCatalogResource(server, byKey.get("delegationGuide")!, (uri) =>
-    asTextResource(uri, buildDelegationGuideText(deps.sessionDefaults), "text/markdown")
-  );
+  for (const entry of RESOURCE_CATALOG) {
+    registerCatalogResource(server, entry, readers[entry.key]);
+  }
 }

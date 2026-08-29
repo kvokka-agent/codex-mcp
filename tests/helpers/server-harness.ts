@@ -6,13 +6,13 @@
  * rather than importing it. `tests/helpers/fake-codex.mjs` stands in for the
  * codex CLI, which keeps the runs hermetic.
  */
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { execFileSync } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
+import { present } from "./present.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, "..", "..");
@@ -85,7 +85,6 @@ export class ServerProcess {
   private buffer = "";
   private nextId = 1;
   private pending = new Map<number, PendingCall>();
-  private stderrText = "";
   private exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
   private notifications: ServerNotification[] = [];
   private notificationWaiters = new Set<(notification: ServerNotification) => void>();
@@ -110,30 +109,27 @@ export class ServerProcess {
 
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => this.onStdout(chunk));
-    this.child.stderr.setEncoding("utf8");
-    this.child.stderr.on("data", (chunk: string) => {
-      this.stderrText += chunk;
-    });
+    // Drain stderr without reading it: nothing here asserts on the server's
+    // diagnostics, and a piped stream nobody consumes stops the child once the
+    // pipe buffer fills.
+    this.child.stderr.resume();
     this.exited = new Promise((resolveExit) => {
       this.child.on("exit", (code, signal) => resolveExit({ code, signal }));
     });
   }
 
-  get stderr(): string {
-    return this.stderrText;
-  }
-
   get pid(): number {
-    return this.child.pid!;
+    return present(this.child.pid, "the server process id");
   }
 
   private onStdout(chunk: string): void {
     this.buffer += chunk;
-    let index: number;
-    while ((index = this.buffer.indexOf("\n")) !== -1) {
+    let index = this.buffer.indexOf("\n");
+    while (index !== -1) {
       const line = this.buffer.slice(0, index).trim();
       this.buffer = this.buffer.slice(index + 1);
       if (line) this.receive(JSON.parse(line) as ServerMessage);
+      index = this.buffer.indexOf("\n");
     }
   }
 
@@ -157,7 +153,7 @@ export class ServerProcess {
   }
 
   private send(msg: unknown): void {
-    this.child.stdin.write(JSON.stringify(msg) + "\n");
+    this.child.stdin.write(`${JSON.stringify(msg)}\n`);
   }
 
   request(method: string, params: unknown, timeoutMs = 30_000): Promise<unknown> {
@@ -276,7 +272,15 @@ export class ServerProcess {
     }
   }
 
-  /** Stop the process whatever state it is in. */
+  /**
+   * Stop the process whatever state it is in.
+   *
+   * `tests/server-lifecycle.e2e.test.ts` calls this from its `afterEach`, as
+   * `present(servers.pop(), "the server to dispose").dispose()`. fallow
+   * attributes a member call only to a receiver it can name by type, and the
+   * return of a generic helper is not one, so its scan reaches no call here.
+   */
+  // fallow-ignore-next-line unused-class-member -- the one call goes through `present()`
   async dispose(): Promise<void> {
     if (this.child.exitCode === null && this.child.signalCode === null) {
       this.child.kill("SIGKILL");

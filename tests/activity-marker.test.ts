@@ -7,18 +7,19 @@
  * session tests run a real SessionManager with a real disk log behind a
  * stand-in client.
  */
-import { EventEmitter } from "events";
+
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import {
   ACTIVITY_MARKER_INSTRUCTION,
   ActivityMarkerScanner,
-  MAX_ACTIVITY_LENGTH,
   composeDeveloperInstructions,
+  MAX_ACTIVITY_LENGTH,
   stripActivityMarkers,
   stripActivityMarkersFromTurn,
 } from "../src/session/activity-marker.js";

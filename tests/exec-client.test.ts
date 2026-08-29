@@ -1,12 +1,12 @@
-import { mockModule, mocked } from "./helpers/mock.js";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
-
 import { EXEC_EVENT_TO_METHOD, ExecClient } from "../src/app-server/exec-client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { _resetForTesting } from "../src/utils/codex-executable.js";
+import { mocked, mockModule } from "./helpers/mock.js";
+import { present } from "./helpers/present.js";
 
 /** Read a file of the vendored schema bundle, the contract the CLI stream follows. */
 function readSchema(file: string): Record<string, unknown> {
@@ -18,7 +18,7 @@ function readSchema(file: string): Record<string, unknown> {
 /** Every `type` codex-schema/EventMsg.json declares. */
 const EVENT_MSG_TYPES: string[] = (
   readSchema("EventMsg.json").oneOf as Array<{ properties: { type: { enum: string[] } } }>
-).map((variant) => variant.properties.type.enum[0]!);
+).map((variant) => variant.properties.type.enum[0]);
 
 /** The TurnStatus values codex-schema/v2/TurnCompletedNotification.json allows. */
 const TURN_STATUSES: string[] = (
@@ -29,7 +29,7 @@ const TURN_STATUSES: string[] = (
 
 const { spawnMock } = { spawnMock: jest.fn() };
 
-const realModule1 = { ...(await import("child_process")) };
+const realModule1 = { ...(await import("node:child_process")) };
 mockModule("child_process", realModule1, () => {
   const actual = realModule1;
   return { ...actual, spawn: spawnMock };
@@ -74,16 +74,24 @@ function newProc(pid: number): FakeProc {
 }
 
 function lastProc(): FakeProc {
-  return procs[procs.length - 1]!;
+  return procs[procs.length - 1];
 }
 
 function spawnArgs(index = 0): string[] {
-  return spawnMock.mock.calls[index]![1] as string[];
+  return spawnMock.mock.calls[index][1] as string[];
 }
 
 /** Feed one JSONL line (plus newline) through the client's stdout pipe. */
 function emitLine(proc: FakeProc, obj: unknown): void {
-  proc.stdout.emit("data", Buffer.from(JSON.stringify(obj) + "\n"));
+  proc.stdout.emit("data", Buffer.from(`${JSON.stringify(obj)}\n`));
+}
+
+/** The first notification of `method` the client emitted. */
+function notification(notifications: Array<[string, unknown]>, method: string): [string, unknown] {
+  return present(
+    notifications.find(([m]) => m === method),
+    `the ${method} notification`
+  );
 }
 
 async function startedClient(): Promise<{
@@ -153,7 +161,7 @@ describe("ExecClient lifecycle", () => {
     await client.turnStart({ threadId: "t", input: [{ type: "text", text: "one" }] });
     const first = lastProc();
     expect(spawns.map((s) => s.pid)).toEqual([first.pid]);
-    expect(Number.isNaN(Date.parse(spawns[0]!.spawnedAt))).toBe(false);
+    expect(Number.isNaN(Date.parse(spawns[0].spawnedAt))).toBe(false);
 
     emitLine(first, { type: "thread.started", thread_id: "thread_real" });
     await client.turnStart({ threadId: "t", input: [{ type: "text", text: "two" }] });
@@ -236,7 +244,7 @@ describe("ExecClient argument building", () => {
       approvalPolicy: "on-request",
     });
 
-    expect(spawnMock.mock.calls[0]![0]).toBe("codex");
+    expect(spawnMock.mock.calls[0][0]).toBe("codex");
     expect(spawnArgs()).toEqual([
       "exec",
       "first\nsecond",
@@ -315,7 +323,7 @@ describe("ExecClient argument building", () => {
     });
 
     const args = spawnArgs();
-    const schemaPath = args[args.indexOf("--output-schema") + 1]!;
+    const schemaPath = args[args.indexOf("--output-schema") + 1];
     expect(existsSync(schemaPath)).toBe(true);
 
     lastProc().exitCode = 0;
@@ -381,7 +389,7 @@ describe("ExecClient argument building", () => {
     expect(spawnArgs(1)[1]).toBe("two");
     expect(client.supportsTurnOverrides).toBe(true);
 
-    const [method, params] = notifications.find(([m]) => m === Methods.ERROR)!;
+    const [method, params] = notification(notifications, Methods.ERROR);
     expect(method).toBe(Methods.ERROR);
     expect(params).toMatchObject({ willRetry: true });
     expect((params as { error: { message: string } }).error.message).toContain(
@@ -483,7 +491,7 @@ describe("ExecClient on Windows", () => {
   it("hands the command line to cmd.exe as separate tokens", async () => {
     await windowsTurn();
 
-    const [cmd, args, opts] = spawnMock.mock.calls[0]! as [
+    const [cmd, args, opts] = spawnMock.mock.calls[0] as [
       string,
       string[],
       Record<string, unknown>,
@@ -598,7 +606,7 @@ describe("ExecClient event translation", () => {
     const { notifications, proc } = await runningTurn();
     emitLine(proc, { type: "turn.failed" });
 
-    const [, params] = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const [, params] = notification(notifications, Methods.TURN_COMPLETED);
     expect(params).toMatchObject({ turn: { error: { message: "Turn failed" } } });
   });
 
@@ -632,7 +640,7 @@ describe("ExecClient event translation", () => {
     const { notifications, proc } = await runningTurn();
     emitLine(proc, { type: "stream_error", message: "reconnect in progress" });
 
-    const [, params] = notifications.find(([m]) => m === Methods.ERROR)!;
+    const [, params] = notification(notifications, Methods.ERROR);
     expect(params).toMatchObject({ error: { message: "reconnect in progress" }, willRetry: true });
   });
 
@@ -640,7 +648,7 @@ describe("ExecClient event translation", () => {
     const { notifications, proc } = await runningTurn();
     emitLine(proc, { type: "stream_error" });
 
-    const [, params] = notifications.find(([m]) => m === Methods.ERROR)!;
+    const [, params] = notification(notifications, Methods.ERROR);
     expect(params).toMatchObject({ error: { message: "stream_error" }, willRetry: false });
   });
 
@@ -707,7 +715,7 @@ describe("ExecClient event translation", () => {
       last_agent_message: "the final answer",
     });
 
-    const [, params] = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const [, params] = notification(notifications, Methods.TURN_COMPLETED);
     expect(params).toMatchObject({ turn: { status: "completed", output: "the final answer" } });
   });
 
@@ -716,7 +724,7 @@ describe("ExecClient event translation", () => {
     emitLine(proc, { type: "agent_message", message: "the only message" });
     emitLine(proc, { type: "task_complete", turn_id: "legacy_turn", last_agent_message: null });
 
-    const [, params] = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const [, params] = notification(notifications, Methods.TURN_COMPLETED);
     expect(params).toMatchObject({ turn: { status: "completed", output: "the only message" } });
   });
 
@@ -725,7 +733,7 @@ describe("ExecClient event translation", () => {
     emitLine(proc, { type: "agent_message" });
     emitLine(proc, { type: "task_complete", turn_id: "legacy_turn" });
 
-    const [, params] = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const [, params] = notification(notifications, Methods.TURN_COMPLETED);
     expect((params as { turn: Record<string, unknown> }).turn.output).toBeUndefined();
   });
 
@@ -760,7 +768,7 @@ describe("ExecClient event translation", () => {
       chunk: [104, 105],
     });
 
-    const [, params] = notifications.find(([m]) => m === Methods.COMMAND_OUTPUT_DELTA)!;
+    const [, params] = notification(notifications, Methods.COMMAND_OUTPUT_DELTA);
     expect(params).toMatchObject({ itemId: "call_10", chunk: [104, 105] });
     expect(params).not.toHaveProperty("delta");
   });
@@ -775,7 +783,7 @@ describe("ExecClient event translation", () => {
       delta: "lo",
     });
 
-    const [, params] = notifications.find(([m]) => m === Methods.AGENT_MESSAGE_DELTA)!;
+    const [, params] = notification(notifications, Methods.AGENT_MESSAGE_DELTA);
     expect(params).toMatchObject({ turnId, itemId: "item_4", delta: "lo" });
     expect(params).not.toHaveProperty("item_id");
   });
@@ -784,7 +792,7 @@ describe("ExecClient event translation", () => {
     const { notifications, proc } = await runningTurn();
     emitLine(proc, { type: "agent_message_delta", delta: "he" });
 
-    const [, params] = notifications.find(([m]) => m === Methods.AGENT_MESSAGE_DELTA)!;
+    const [, params] = notification(notifications, Methods.AGENT_MESSAGE_DELTA);
     expect(params).not.toHaveProperty("itemId");
   });
 
@@ -884,7 +892,7 @@ describe("ExecClient process exit", () => {
     emitLine(proc, { type: "some_future_event_type" });
     proc.emit("exit", 0, null);
 
-    const completion = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const completion = notification(notifications, Methods.TURN_COMPLETED);
     const turn = (completion[1] as { turn: Record<string, unknown> }).turn;
     expect(turn.id).toBe(turnId);
     expect(turn.status).toBe("failed");
@@ -955,7 +963,7 @@ describe("ExecClient process exit", () => {
     proc.stdout.emit("data", Buffer.from('{"type":"item.completed","item":{"type":"agent_\n'));
     emitLine(proc, { type: "turn.completed" });
 
-    const completion = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const completion = notification(notifications, Methods.TURN_COMPLETED);
     const turn = (completion[1] as { turn: Record<string, unknown> }).turn;
     expect(turn.id).toBe(turnId);
     expect(turn.status).toBe("failed");
@@ -970,7 +978,7 @@ describe("ExecClient process exit", () => {
     proc.stdout.emit("data", Buffer.from('{"type":"item.compl\n'));
     emitLine(proc, { type: "turn_aborted", reason: "interrupted" });
 
-    const completion = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const completion = notification(notifications, Methods.TURN_COMPLETED);
     const turn = (completion[1] as { turn: Record<string, unknown> }).turn;
     expect(turn.status).toBe("interrupted");
     expect(String((turn.error as { message: string }).message)).toBe(
@@ -983,7 +991,7 @@ describe("ExecClient process exit", () => {
     proc.stdout.emit("data", Buffer.from('{"type":"item.compl\n'));
     emitLine(proc, { type: "turn.failed", error: { message: "model exploded" } });
 
-    const completion = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const completion = notification(notifications, Methods.TURN_COMPLETED);
     expect((completion[1] as { turn: Record<string, unknown> }).turn).toMatchObject({
       status: "failed",
       error: { message: "model exploded" },
@@ -1002,7 +1010,7 @@ describe("ExecClient process exit", () => {
     emitLine(second, { type: "turn.completed" });
 
     const completions = notifications.filter(([m]) => m === Methods.TURN_COMPLETED);
-    expect((completions[1]![1] as { turn: Record<string, unknown> }).turn).toMatchObject({
+    expect((completions[1][1] as { turn: Record<string, unknown> }).turn).toMatchObject({
       status: "completed",
       output: "clean",
     });
@@ -1083,7 +1091,7 @@ describe("ExecClient error shape", () => {
       },
     });
 
-    expect(errorParams(notifications)[0]!.error).toEqual({
+    expect(errorParams(notifications)[0].error).toEqual({
       message: "usage limit reached",
       additionalDetails: "resets at 10:00",
       codexErrorInfo: { type: "usageLimitReached" },
@@ -1123,7 +1131,7 @@ describe("ExecClient error shape", () => {
     lastProc().emit("exit", null, "SIGTERM");
 
     expect(errorParams(notifications)).toEqual([]);
-    const [, params] = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const [, params] = notification(notifications, Methods.TURN_COMPLETED);
     expect(params).toMatchObject({
       turn: { id: turn.turn.id, error: { message: "exec process killed by signal SIGTERM" } },
     });
@@ -1136,7 +1144,7 @@ describe("ExecClient error shape", () => {
     // TurnAbortReason of codex-schema/EventMsg.json is a bare enum string.
     emitLine(lastProc(), { type: "turn_aborted", reason: "review_ended" });
 
-    const [, params] = notifications.find(([m]) => m === Methods.TURN_COMPLETED)!;
+    const [, params] = notification(notifications, Methods.TURN_COMPLETED);
     expect(params).toMatchObject({
       turn: { status: "interrupted", error: { message: "review_ended" } },
     });

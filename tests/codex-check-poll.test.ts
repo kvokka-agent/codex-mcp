@@ -5,19 +5,20 @@
  * The session manager is real; only the app-server client is a stand-in, so
  * every asserted value is produced by the code under test.
  */
-import { useFakeClock } from "./helpers/clock.js";
-import { EventEmitter } from "events";
-import os from "os";
-import path from "path";
+
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
+import { EventEmitter } from "node:events";
+import os from "node:os";
+import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
 import { executeCodexCheck } from "../src/tools/codex-check.js";
-import { POLL_WINDOW_MARGIN_MS, PollWindow } from "../src/utils/poll-window.js";
-import { DEFAULT_APPROVAL_TIMEOUT_MS, MAX_LONG_POLL_WAIT_MS } from "../src/types.js";
-import { ProgressReporter, type ProgressNotification } from "../src/utils/progress-notifier.js";
 import type { CheckResult } from "../src/types.js";
+import { DEFAULT_APPROVAL_TIMEOUT_MS, MAX_LONG_POLL_WAIT_MS } from "../src/types.js";
+import { POLL_WINDOW_MARGIN_MS, PollWindow } from "../src/utils/poll-window.js";
+import { type ProgressNotification, ProgressReporter } from "../src/utils/progress-notifier.js";
+import { useFakeClock } from "./helpers/clock.js";
 
 class MockClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;
@@ -116,7 +117,7 @@ describe("executeCodexCheck", () => {
   function pendingRequestId(): string {
     const actions = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager)).actions;
     expect(actions.length, "no pending actions").toBeGreaterThan(0);
-    return actions[0]!.requestId;
+    return actions[0].requestId;
   }
 
   /**
@@ -212,7 +213,7 @@ describe("executeCodexCheck", () => {
           {
             action: "respond_permission",
             sessionId,
-            requestId: waiting.actions[0]!.requestId,
+            requestId: waiting.actions[0].requestId,
             decision: "accept",
           },
           manager
@@ -310,7 +311,7 @@ describe("executeCodexCheck", () => {
       const turn = res.result?.turn as { output: string; items: Array<{ text: string }> };
       expect(res.result?.text).toBe("семь");
       expect(turn.output).toBe("семь");
-      expect(turn.items[0]!.text).toBe("семь");
+      expect(turn.items[0].text).toBe("семь");
     });
 
     it("keeps the finished turn's outcome after the session is closed", async () => {
@@ -516,7 +517,7 @@ describe("executeCodexCheck", () => {
       const waiting = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
       expect(waiting.status).toBe("waiting_approval");
       expect(waiting.recommendedNextAction).toBe("respond_permission");
-      const action = waiting.actions[0]!;
+      const action = waiting.actions[0];
       expect(action.kind).toBe("command");
       expect(action.reason).toBe("needs the network");
       expect(action.approvalId).toBe("appr_1");
@@ -943,7 +944,7 @@ describe("executeCodexCheck", () => {
       // One refusal logged and no second one: the poll gave the 200ms window up
       // rather than re-asking for a slot until it ran out.
       expect(logged).toHaveBeenCalledTimes(1);
-      expect(String(logged.mock.calls[0]![0])).toContain("Long-poll wait refused");
+      expect(String(logged.mock.calls[0][0])).toContain("Long-poll wait refused");
 
       blockers.abort();
       await Promise.all(held);

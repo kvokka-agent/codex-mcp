@@ -126,9 +126,9 @@ function guardDisabledResult(
 function looksLikePowerShell(env: NodeJS.ProcessEnv): boolean {
   return Boolean(
     env.POWERSHELL_DISTRIBUTION_CHANNEL ||
-    env.PSModulePath ||
-    env.PSExecutionPolicyPreference ||
-    env.PSModuleAnalysisCachePath
+      env.PSModulePath ||
+      env.PSExecutionPolicyPreference ||
+      env.PSModuleAnalysisCachePath
   );
 }
 

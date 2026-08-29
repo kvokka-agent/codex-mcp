@@ -11,11 +11,7 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { parseLaunchArgs, resolveSpawnTarget } from "./lib/launch-args.mjs";
-import {
-  assertResourcesPresent,
-  assertToolsPresent,
-  codexMcpEnv,
-} from "./lib/mcp-client.mjs";
+import { assertResourcesPresent, assertToolsPresent, codexMcpEnv } from "./lib/mcp-client.mjs";
 
 function usage(exitCode = 0) {
   const msg = [
@@ -28,7 +24,6 @@ function usage(exitCode = 0) {
     "  --        -> overrides command/args explicitly",
     "",
   ].join("\n");
-  // eslint-disable-next-line no-console
   console.error(msg);
   process.exit(exitCode);
 }
@@ -70,8 +65,14 @@ async function main() {
   assertToolsPresent(tools.tools);
 
   if (args.verbose) {
-    // eslint-disable-next-line no-console
-    console.error("tools/list:", JSON.stringify(tools.tools.map((t) => t.name), null, 2));
+    console.error(
+      "tools/list:",
+      JSON.stringify(
+        tools.tools.map((t) => t.name),
+        null,
+        2
+      )
+    );
   }
 
   const resources = await client.listResources();
@@ -81,12 +82,10 @@ async function main() {
   await client.readResource({ uri: "codex-mcp:///gotchas" });
 
   await client.close();
-  // eslint-disable-next-line no-console
   console.error("OK: MCP handshake, tools, and resources look good.");
 }
 
 main().catch((err) => {
-  // eslint-disable-next-line no-console
   console.error("FAILED:", err?.stack || String(err));
   process.exitCode = 1;
 });

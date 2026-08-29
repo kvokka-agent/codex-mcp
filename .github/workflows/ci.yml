@@ -28,8 +28,9 @@ jobs:
         with:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
+      # biome lints, formats and organizes imports in one pass, so this is the
+      # whole style gate.
       - run: bun run lint
-      - run: bun run format:check
       - run: bun run typecheck
       # Before the tests: the end-to-end ones spawn the bundle, and a build
       # inside a test spends that test's own window on it.

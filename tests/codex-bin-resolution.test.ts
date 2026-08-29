@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import path from "path";
+import path from "node:path";
 import { findOnPath, resolveCodexInvocation } from "../src/app-server/codex-bin.js";
 
 describe("resolveCodexInvocation defaults", () => {

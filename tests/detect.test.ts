@@ -1,12 +1,12 @@
+import { afterEach, describe, expect, it, jest } from "bun:test";
+import { EventEmitter } from "node:events";
+import { detectClientMode } from "../src/app-server/detect.js";
 import { advanceAsync } from "./helpers/clock.js";
 import { mockModule } from "./helpers/mock.js";
-import { EventEmitter } from "node:events";
-import { afterEach, describe, expect, it, jest } from "bun:test";
-import { detectClientMode } from "../src/app-server/detect.js";
 
 const { spawnMock } = { spawnMock: jest.fn() };
 
-const realModule1 = { ...(await import("child_process")) };
+const realModule1 = { ...(await import("node:child_process")) };
 mockModule("child_process", realModule1, () => {
   const actual = realModule1;
   return { ...actual, spawn: spawnMock };

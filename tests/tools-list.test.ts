@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { createServer } from "../src/server.js";
 import { RESOURCE_URIS } from "../src/resources/register-resources.js";
+import { createServer } from "../src/server.js";
 import { SESSION_DEFAULT_ENV } from "../src/utils/session-defaults.js";
+import { present } from "./helpers/present.js";
 
 type RequestHandler = (req: unknown, extra: unknown) => Promise<unknown>;
 
@@ -23,7 +24,7 @@ function handlerFor(method: string): RequestHandler {
   };
   const handler = internal.server._requestHandlers.get(method);
   expect(handler, `no request handler registered for ${method}`).toBeTypeOf("function");
-  return handler!;
+  return present(handler, `the ${method} request handler`);
 }
 
 async function listTools(): Promise<Map<string, McpTool>> {
@@ -37,13 +38,14 @@ async function listTools(): Promise<Map<string, McpTool>> {
 function tool(tools: Map<string, McpTool>, name: string): McpTool {
   const found = tools.get(name);
   expect(found, `missing tool in tools/list: ${name}`).toBeDefined();
-  return found!;
+  return present(found, `the ${name} tool`);
 }
 
 function propertiesOf(schema: McpTool["inputSchema"], label: string): Record<string, unknown> {
   expect(schema, `${label} has no inputSchema`).toBeDefined();
-  expect(schema!.properties, `${label} inputSchema has no properties`).toBeDefined();
-  return schema!.properties!;
+  const inputSchema = present(schema, `the ${label} inputSchema`);
+  expect(inputSchema.properties, `${label} inputSchema has no properties`).toBeDefined();
+  return present(inputSchema.properties, `the ${label} inputSchema properties`);
 }
 
 describe("tools/list metadata", () => {
@@ -67,12 +69,12 @@ describe("tools/list metadata", () => {
       expect(entry.outputSchema?.type, `${name} outputSchema.type`).toBe("object");
       expect(Object.keys(entry.inputSchema?.properties ?? {}).length).toBeGreaterThan(0);
 
-      const annotations = entry.annotations;
-      expect(annotations, `${name} annotations`).toBeDefined();
-      expect(typeof annotations!.title).toBe("string");
-      expect(String(annotations!.title).length).toBeGreaterThan(0);
+      expect(entry.annotations, `${name} annotations`).toBeDefined();
+      const annotations = present(entry.annotations, `the ${name} annotations`);
+      expect(typeof annotations.title).toBe("string");
+      expect(String(annotations.title).length).toBeGreaterThan(0);
       for (const hint of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]) {
-        expect(typeof annotations![hint], `${name} annotations.${hint}`).toBe("boolean");
+        expect(typeof annotations[hint], `${name} annotations.${hint}`).toBe("boolean");
       }
     }
   });
@@ -115,8 +117,9 @@ describe("tools/list metadata", () => {
 
     const actionSchema = checkProps.action as { enum?: unknown[] } | undefined;
     expect(actionSchema?.enum, "codex_check.action has no enum").toBeInstanceOf(Array);
-    expect(actionSchema!.enum).toContain("respond_permission");
-    expect(actionSchema!.enum).not.toContain("respond_approval");
+    const actionEnum = present(actionSchema?.enum, "the codex_check action enum");
+    expect(actionEnum).toContain("respond_permission");
+    expect(actionEnum).not.toContain("respond_approval");
 
     expect(checkProps).toHaveProperty("execpolicy_amendment");
     expect(checkProps).not.toHaveProperty("execpolicyAmendment");
@@ -149,7 +152,8 @@ describe("tools/list metadata", () => {
       toolCounts?: Record<string, number>;
     };
     expect(compat.toolCounts, "compat report has no toolCounts").toBeDefined();
-    expect(compat.toolCounts!.core).toBe(tools.size);
+    const toolCounts = present(compat.toolCounts, "the compat report toolCounts");
+    expect(toolCounts.core).toBe(tools.size);
   });
 });
 

@@ -119,7 +119,7 @@ function getWmicCreationTimeMs(pid: number): number | null {
       timeout: 5000,
     }).toString();
     const match = raw.match(/CreationDate=(\d{14})\.\d+([+-]\d{1,4})/);
-    if (!match || !match[1] || !match[2]) return null;
+    if (!match?.[1] || !match[2]) return null;
     const s = match[1];
     const iso = `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T${s.slice(8, 10)}:${s.slice(10, 12)}:${s.slice(12, 14)}.000Z`;
     const ms = new Date(iso).getTime();
@@ -246,16 +246,10 @@ const LSTART = /^\w{3}\s+(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})
 export function parseLstartMs(lstart: string): number | null {
   const match = LSTART.exec(lstart.trim());
   if (!match) return null;
-  const month = MONTHS.indexOf(match[1]!);
+  const [, monthName, day, hour, minute, second, year] = match;
+  const month = MONTHS.indexOf(monthName);
   if (month < 0) return null;
-  return Date.UTC(
-    Number(match[6]),
-    month,
-    Number(match[2]),
-    Number(match[3]),
-    Number(match[4]),
-    Number(match[5])
-  );
+  return Date.UTC(Number(year), month, Number(day), Number(hour), Number(minute), Number(second));
 }
 
 /**
@@ -274,8 +268,9 @@ function readPosixProcess(pid: number): LiveProcess | null {
   if (combined !== null) {
     const match = /^(\d+)\s+(\S.*)$/.exec(combined);
     if (match) {
-      const startMs = parseLstartMs(match[2]!);
-      if (startMs !== null) return { startMs, pgid: Number(match[1]) };
+      const [, pgidField, lstartField] = match;
+      const startMs = parseLstartMs(lstartField);
+      if (startMs !== null) return { startMs, pgid: Number(pgidField) };
     }
   }
 
@@ -297,7 +292,7 @@ function readPosixProcess(pid: number): LiveProcess | null {
  */
 export function identifyProcess(pid: number, startedAt: string): ProcessCheck {
   const recordedMs = new Date(startedAt).getTime();
-  if (isNaN(recordedMs)) return UNKNOWN_PROCESS;
+  if (Number.isNaN(recordedMs)) return UNKNOWN_PROCESS;
 
   if (process.platform === "win32") {
     const procMs = getWindowsCreationTimeMs(pid);

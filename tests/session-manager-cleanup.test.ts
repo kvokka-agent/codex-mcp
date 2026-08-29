@@ -1,9 +1,8 @@
-import { advanceAsync } from "./helpers/clock.js";
-import { EventEmitter } from "events";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
-import os from "os";
-import path from "path";
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
+import { EventEmitter } from "node:events";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
@@ -13,6 +12,8 @@ import {
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
 } from "../src/types.js";
+import { advanceAsync } from "./helpers/clock.js";
+import { present } from "./helpers/present.js";
 
 class MockClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;
@@ -169,7 +170,8 @@ describe("SessionManager background cleanup", () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
     const sessions = (manager as unknown as { sessions: Map<string, { lastActiveAt: string }> })
       .sessions;
-    sessions.get(started.sessionId)!.lastActiveAt = "not-a-timestamp";
+    present(sessions.get(started.sessionId), "the started session").lastActiveAt =
+      "not-a-timestamp";
 
     await advanceAsync(60_000);
 
@@ -240,7 +242,7 @@ describe("SessionManager background cleanup", () => {
     await advanceAsync(DEFAULT_IDLE_CLEANUP_MS + 5 * 60_000);
     expect(client.destroy).toHaveBeenCalledTimes(1);
 
-    releaseDestroy!();
+    present(releaseDestroy, "the held destroy's resolve")();
     await advanceAsync(0);
     expect(manager.getSession(started.sessionId).cancelledReason).toBe("Idle timeout");
   });
@@ -336,7 +338,7 @@ describe("SessionManager cleanSessions", () => {
     const idleId = await startIdleSession();
     const sessions = (manager as unknown as { sessions: Map<string, { lastActiveAt: string }> })
       .sessions;
-    sessions.get(idleId)!.lastActiveAt = "not-a-timestamp";
+    present(sessions.get(idleId), "the idle session").lastActiveAt = "not-a-timestamp";
 
     const report = await manager.cleanSessions({ olderThanMs: 1000 });
 

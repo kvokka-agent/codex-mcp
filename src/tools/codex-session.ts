@@ -3,7 +3,7 @@
  * (list/get/resume/cancel/interrupt/fork/clean/clean_background_terminals).
  */
 import type { SessionManager } from "../session/manager.js";
-import { ErrorCode, type CleanableStatus, type SessionAction } from "../types.js";
+import { type CleanableStatus, ErrorCode, type SessionAction } from "../types.js";
 
 export interface CodexSessionParams {
   action: SessionAction;

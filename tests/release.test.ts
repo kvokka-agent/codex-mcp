@@ -3,12 +3,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 // @ts-expect-error -- the release rules are plain ESM, shared with the workflow that runs them.
 import {
-  ROOT,
-  TARGETS,
   applyVersion,
   currentVersion,
   nextVersion,
+  ROOT,
   releaseLevel,
+  TARGETS,
 } from "../scripts/release.mjs";
 
 type Target = { path: string; pattern: RegExp; count: number };

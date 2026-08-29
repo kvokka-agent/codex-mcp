@@ -1,12 +1,12 @@
-import { spawnSync } from "child_process";
-import { existsSync } from "fs";
-import { homedir } from "os";
-import path from "path";
-import { detectClientMode, type ClientMode } from "../app-server/detect.js";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
 import { resolveCodexInvocation } from "../app-server/codex-bin.js";
+import { type ClientMode, detectClientMode } from "../app-server/detect.js";
 import {
-  resolveDefaultCodexExecutable,
   type CodexExecutableInfo,
+  resolveDefaultCodexExecutable,
 } from "../utils/codex-executable.js";
 
 export interface CodexSetupInput {

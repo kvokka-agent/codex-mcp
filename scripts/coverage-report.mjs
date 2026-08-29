@@ -8,5 +8,4 @@ import { fileURLToPath } from "node:url";
 import { writeIstanbulReport } from "./lib/lcov-istanbul.mjs";
 
 const { path, files } = writeIstanbulReport(join(dirname(fileURLToPath(import.meta.url)), ".."));
-// eslint-disable-next-line no-console
 console.error(`Wrote ${path} (${files} files).`);

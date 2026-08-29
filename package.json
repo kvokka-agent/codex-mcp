@@ -1,7 +1,7 @@
 {
   "name": "@kvokka/codex-mcp",
   "version": "2.6.2",
-  "description": "MCP server that wraps OpenAI Codex app-server \u2014 start coding agents, poll their progress, and manage permissions from any MCP client",
+  "description": "MCP server that wraps OpenAI Codex app-server — start coding agents, poll their progress, and manage permissions from any MCP client",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -29,7 +29,7 @@
     "build:types": "tsc --emitDeclarationOnly",
     "start": "bun dist/index.js",
     "typecheck": "tsc --noEmit",
-    "check": "bun run lint && bun run format:check && bun run typecheck && bun run build && bun run lint:fallow && bun run check:stdio && bun run smoke:mcp && bun run lint:md",
+    "check": "bun run lint && bun run typecheck && bun run build && bun run lint:fallow && bun run check:stdio && bun run smoke:mcp && bun run lint:md",
     "test": "bun test",
     "coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov && bun scripts/coverage-report.mjs",
     "test:watch": "bun test --watch",
@@ -37,11 +37,10 @@
     "check:stdio": "bun scripts/check-stdio.mjs --timeout-ms 6000",
     "check:stdio:strict": "bun scripts/check-stdio.mjs --mode strict --timeout-ms 6000",
     "smoke:mcp": "bun scripts/mcp-smoke.mjs",
-    "lint": "eslint src/ tests/",
+    "lint": "biome check",
     "lint:md": "rumdl check .",
     "lint:fallow": "bun run coverage && fallow",
-    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\""
+    "format": "biome format --write"
   },
   "keywords": [
     "mcp",
@@ -73,15 +72,12 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
+    "@biomejs/biome": "^2.5.11",
     "@types/bun": "^1.4.0",
     "@types/node": "^22.0.0",
-    "eslint": "^9.39.2",
     "fallow": "^3.20.0",
-    "prettier": "^3.8.1",
     "rumdl": "0.2.60",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.55.0",
     "yaml": "^2.8.2"
   },
   "engines": {

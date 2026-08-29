@@ -47,9 +47,10 @@ PATH that answers `codex --version`.
 
 ## Commands
 
-`bun run check` is the gate — lint, format, types, build, the tests under
-coverage with `fallow` reading that coverage, the two runtime scripts and the
-markdown lint. Run it before opening a pull request. `bun run` lists the rest.
+`bun run check` is the gate — biome's lint and format check, types, build, the
+tests under coverage with `fallow` reading that coverage, the two runtime
+scripts and the markdown lint. Run it before opening a pull request. `bun run`
+lists the rest.
 
 ## Layout
 
@@ -152,7 +153,7 @@ These are the patterns a change keeps, each of them written after it was broken:
 - A test asserts on a value the code under test produced.
 - A test measures on the fake clock, never on the wall clock. `useFakeClock()`
   of `tests/helpers/clock.ts` installs the fake timers and reports how far the
-  clock has moved, so a wait of 40ms is 40ms exactly; `eslint` refuses
+  clock has moved, so a wait of 40ms is 40ms exactly; `biome` refuses
   `Date.now`, `performance.now` and `process.hrtime` in a test file. A real
   `setTimeout(f, 40)` runs on libuv's millisecond loop clock and fires with a
   `Date.now()` delta of 39 about once in two thousand waits, which is a red

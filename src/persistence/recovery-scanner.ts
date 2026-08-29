@@ -6,11 +6,11 @@
  * - Reads result.json if present
  * - Returns recovered sessions for the SessionManager to ingest
  */
-import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { isMissing } from "./fs-errors.js";
-import { ownerState, readOwner, type OwnerState } from "./session-owner.js";
+import { type OwnerState, ownerState, readOwner } from "./session-owner.js";
 
 /**
  * The version of the session directory format. Version 3 records the owner of the
@@ -95,8 +95,8 @@ function scanEventsJsonl(filePath: string): EventLogScan {
   let lastSeq = -1;
   let corruptLines = 0;
   let lastActivity: string | undefined;
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i]!.trim();
+  for (const [i, line] of lines.entries()) {
+    const trimmed = line.trim();
     if (!trimmed) continue;
     try {
       const parsed = JSON.parse(trimmed);

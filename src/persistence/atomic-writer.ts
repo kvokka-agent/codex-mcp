@@ -1,9 +1,10 @@
 /**
  * Atomic JSON file writer — write to .tmp then rename to avoid torn writes.
  */
-import { writeFileSync, renameSync, mkdirSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+
 import { randomBytes } from "node:crypto";
+import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 /**
  * Atomically write a JSON-serializable value to `filePath`.
@@ -15,7 +16,7 @@ export function atomicWriteJson(filePath: string, data: unknown): void {
   mkdirSync(dir, { recursive: true });
   const tmpPath = join(dir, `.tmp-${randomBytes(6).toString("hex")}`);
   try {
-    writeFileSync(tmpPath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+    writeFileSync(tmpPath, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
     renameSync(tmpPath, filePath);
   } catch (err) {
     // Best-effort cleanup of the temp file

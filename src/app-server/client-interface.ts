@@ -6,18 +6,18 @@
  */
 import type { AppServerSpawnOptions } from "./lifecycle.js";
 import type {
-  RequestId,
   InitializeResult,
-  ThreadStartParams,
-  ThreadStartResult,
+  RequestId,
+  ThreadBackgroundTerminalsCleanParams,
   ThreadForkParams,
   ThreadForkResult,
   ThreadResumeParams,
   ThreadResumeResult,
-  ThreadBackgroundTerminalsCleanParams,
+  ThreadStartParams,
+  ThreadStartResult,
+  TurnInterruptParams,
   TurnStartParams,
   TurnStartResult,
-  TurnInterruptParams,
 } from "./protocol.js";
 
 export interface ICodexClient {

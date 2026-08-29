@@ -1,14 +1,15 @@
-import { advanceAsync } from "./helpers/clock.js";
-import { EventEmitter } from "events";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
-import os from "os";
-import path from "path";
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
+import { EventEmitter } from "node:events";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
+import { type RecoveredSession, SCHEMA_VERSION } from "../src/persistence/recovery-scanner.js";
 import { SessionManager } from "../src/session/manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
-import { SCHEMA_VERSION, type RecoveredSession } from "../src/persistence/recovery-scanner.js";
+import { advanceAsync } from "./helpers/clock.js";
+import { present } from "./helpers/present.js";
 
 class MockClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;
@@ -62,7 +63,7 @@ function internalSession(
   const sessions = (
     manager as unknown as { sessions: Map<string, { threadId?: string; status: string }> }
   ).sessions;
-  return sessions.get(sessionId)!;
+  return present(sessions.get(sessionId), `the internal record of session ${sessionId}`);
 }
 
 function recovered(overrides: Partial<RecoveredSession> = {}): RecoveredSession {
@@ -272,7 +273,10 @@ describe("SessionManager recovered sessions", () => {
       }),
     ]);
 
-    const listed = manager.listSessions().find((s) => s.sessionId === "sess_cut_off")!;
+    const listed = present(
+      manager.listSessions().find((s) => s.sessionId === "sess_cut_off"),
+      "the sess_cut_off session listing"
+    );
     expect(listed.status).toBe("abandoned");
     expect(listed.activity).toBe("Подсчёт TypeScript-файлов в src");
     expect(listed.owner).toBeUndefined();
@@ -501,7 +505,8 @@ describe("SessionManager session operations", () => {
       (event) => event.data?.method === Methods.THREAD_BACKGROUND_TERMINALS_CLEAN
     );
     expect(cleaned).toBeDefined();
-    expect(cleaned!.data.status).toBe("requested");
+    const cleanEvent = present(cleaned, "the thread/backgroundTerminals/clean event");
+    expect(cleanEvent.data.status).toBe("requested");
   });
 
   it("pushes no event when the client refuses to clean background terminals", async () => {
@@ -642,7 +647,8 @@ describe("SessionManager session operations", () => {
     const forkManager = new SessionManager({
       disableCleanup: true,
       persistence,
-      createClient: () => queue.shift()! as unknown as AppServerClient,
+      createClient: () =>
+        present(queue.shift(), "the next queued client") as unknown as AppServerClient,
     });
     const writePid = jest.spyOn(persistence, "writePidInfo");
     try {
@@ -754,7 +760,7 @@ describe("SessionManager session operations", () => {
     ]);
 
     const poll = manager.pollStatus(started.sessionId);
-    for (const action of poll.actions!) {
+    for (const action of present(poll.actions, "the pending actions of the poll")) {
       if (action.kind === "user_input") {
         manager.resolveUserInput(started.sessionId, action.requestId, { q1: { answers: ["a"] } });
       } else {
@@ -945,8 +951,9 @@ describe("SessionManager unapplied turn overrides", () => {
 
     expect(reply.status).toBe("running");
     expect(reply.compatWarnings).toHaveLength(1);
-    expect(reply.compatWarnings![0]).toContain("read-only");
-    expect(reply.compatWarnings![0]).toContain("workspace-write");
+    const warnings = present(reply.compatWarnings, "the compat warnings of the reply");
+    expect(warnings[0]).toContain("read-only");
+    expect(warnings[0]).toContain("workspace-write");
     // The session keeps the permissions the turn actually runs under.
     expect((manager.getSession(sessionId) as { sandbox?: string }).sandbox).toBe("workspace-write");
   });
@@ -959,8 +966,9 @@ describe("SessionManager unapplied turn overrides", () => {
 
       const reply = await manager.replyToSession(sessionId, "again", { cwd: otherCwd });
 
-      expect(reply.compatWarnings![0]).toContain(otherCwd);
-      expect(reply.compatWarnings![0]).toContain("cwd");
+      const warnings = present(reply.compatWarnings, "the compat warnings of the reply");
+      expect(warnings[0]).toContain(otherCwd);
+      expect(warnings[0]).toContain("cwd");
     } finally {
       rmSync(otherCwd, { recursive: true, force: true });
     }
@@ -985,9 +993,10 @@ describe("SessionManager unapplied turn overrides", () => {
     });
 
     expect(reply.compatWarnings).toHaveLength(1);
-    expect(reply.compatWarnings![0]).toContain("sandbox 'read-only'");
-    expect(reply.compatWarnings![0]).toContain("workspace-write");
-    expect(reply.compatWarnings![0]).toContain("outputSchema");
+    const warnings = present(reply.compatWarnings, "the compat warnings of the reply");
+    expect(warnings[0]).toContain("sandbox 'read-only'");
+    expect(warnings[0]).toContain("workspace-write");
+    expect(warnings[0]).toContain("outputSchema");
   });
 
   it("does not read the turn output as structured when the schema was dropped", async () => {
@@ -1080,9 +1089,12 @@ describe("SessionManager notification handling", () => {
 
     const info = manager.getSession(started.sessionId, true) as { threadId?: string };
     expect(info.threadId).toBe("thread_real");
-    const event = events(started.sessionId).find((e) => e.data?.method === Methods.THREAD_STARTED);
-    expect(event!.data.threadId).toBe("thread_real");
-    expect(event!.data.status).toBe("active");
+    const event = present(
+      events(started.sessionId).find((e) => e.data?.method === Methods.THREAD_STARTED),
+      "the thread/started event"
+    );
+    expect(event.data.threadId).toBe("thread_real");
+    expect(event.data.status).toBe("active");
   });
 
   it("reports the idle variant of a thread/started status", async () => {
@@ -1092,8 +1104,11 @@ describe("SessionManager notification handling", () => {
       thread: { id: started.threadId, status: { type: "idle" } },
     });
 
-    const event = events(started.sessionId).find((e) => e.data?.method === Methods.THREAD_STARTED);
-    expect(event!.data.status).toBe("idle");
+    const event = present(
+      events(started.sessionId).find((e) => e.data?.method === Methods.THREAD_STARTED),
+      "the thread/started event"
+    );
+    expect(event.data.status).toBe("idle");
   });
 
   it("reports no status for a thread/started that carries no thread", async () => {
@@ -1101,8 +1116,11 @@ describe("SessionManager notification handling", () => {
 
     client.emitNotification(Methods.THREAD_STARTED, { threadId: started.threadId });
 
-    const event = events(started.sessionId).find((e) => e.data?.method === Methods.THREAD_STARTED);
-    expect(event!.data.status).toBeUndefined();
+    const event = present(
+      events(started.sessionId).find((e) => e.data?.method === Methods.THREAD_STARTED),
+      "the thread/started event"
+    );
+    expect(event.data.status).toBeUndefined();
   });
 
   it("drops a command output delta that is nothing but shell profile noise", async () => {
@@ -1128,7 +1146,7 @@ describe("SessionManager notification handling", () => {
 
     const logged = events(started.sessionId);
     expect(logged).toHaveLength(1);
-    expect(logged[0]!.data.delta).toEqual({ chunks: ["a"] });
+    expect(logged[0].data.delta).toEqual({ chunks: ["a"] });
   });
 
   it("ignores a notification method it has no case for", async () => {
@@ -1195,10 +1213,11 @@ describe("SessionManager notification handling", () => {
       turn: { id: "turn_1", status: "completed", items: [] },
     });
 
-    const planEvent = events(started.sessionId).find(
-      (e) => (e.data?.item as { id?: string })?.id === "item_plan"
+    const planEvent = present(
+      events(started.sessionId).find((e) => (e.data?.item as { id?: string })?.id === "item_plan"),
+      "the plan item event"
     );
-    expect(planEvent!.type).toBe("progress");
+    expect(planEvent.type).toBe("progress");
     expect(manager.getLastResult(started.sessionId)?.text).toBe("the answer");
   });
 
@@ -1228,10 +1247,11 @@ describe("SessionManager notification handling", () => {
     });
 
     expect(manager.getLastResult(started.sessionId)?.text).toBe("the answer");
-    const rawEvent = events(started.sessionId).find(
-      (e) => e.data?.method === Methods.RAW_RESPONSE_ITEM_COMPLETED
+    const rawEvent = present(
+      events(started.sessionId).find((e) => e.data?.method === Methods.RAW_RESPONSE_ITEM_COMPLETED),
+      "the raw response item event"
     );
-    expect(rawEvent!.type).toBe("progress");
+    expect(rawEvent.type).toBe("progress");
   });
 
   it("reads the final message as structured output when the turn asked for a schema", async () => {
@@ -1496,7 +1516,10 @@ describe("SessionManager notification handling", () => {
       willRetry: false,
     });
 
-    const errorEvent = events(started.sessionId).find((event) => event.type === "error")!;
+    const errorEvent = present(
+      events(started.sessionId).find((event) => event.type === "error"),
+      "the error event"
+    );
     expect(errorEvent.data.error).toContain("<path>");
     expect(errorEvent.data.error).not.toContain("/home/someone/secret");
   });
@@ -1848,7 +1871,8 @@ describe("SessionManager approval decision validation", () => {
       ...extra,
     });
     const poll = manager.pollStatus(started.sessionId);
-    return { sessionId: started.sessionId, requestId: poll.actions![0].requestId };
+    const actions = present(poll.actions, "the pending actions of the poll");
+    return { sessionId: started.sessionId, requestId: actions[0].requestId };
   }
 
   it("refuses a decision the prompt did not advertise", async () => {
@@ -1958,7 +1982,8 @@ describe("SessionManager approval decision validation", () => {
       questions: [{ id: "q1", question: "which?" }],
     });
     const poll = manager.pollStatus(started.sessionId);
-    const requestId = poll.actions![0].requestId;
+    const actions = present(poll.actions, "the pending actions of the poll");
+    const requestId = actions[0].requestId;
 
     expect(() => manager.resolveApproval(started.sessionId, requestId, "accept")).toThrow(
       "is not an approval request"

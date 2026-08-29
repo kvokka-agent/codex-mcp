@@ -12,6 +12,14 @@ import { join } from "node:path";
 import { parseLaunchArgs, resolveSpawnTarget, splitArgv } from "../scripts/lib/launch-args.mjs";
 // @ts-expect-error -- plain ESM, shared with the scripts that run it.
 import {
+  assertResourcesPresent,
+  assertToolsPresent,
+  codexMcpEnv,
+  REQUIRED_RESOURCES,
+  REQUIRED_TOOLS,
+} from "../scripts/lib/mcp-client.mjs";
+// @ts-expect-error -- plain ESM, shared with the scripts that run it.
+import {
   buildStdioReport,
   captureChildOutput,
   describeStdioReport,
@@ -21,14 +29,6 @@ import {
   readStdioMode,
   stdioCheckEnv,
 } from "../scripts/lib/stdio-check.mjs";
-// @ts-expect-error -- plain ESM, shared with the scripts that run it.
-import {
-  assertResourcesPresent,
-  assertToolsPresent,
-  codexMcpEnv,
-  REQUIRED_RESOURCES,
-  REQUIRED_TOOLS,
-} from "../scripts/lib/mcp-client.mjs";
 
 type LaunchArgs = {
   useBunx: boolean;

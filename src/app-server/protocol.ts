@@ -5,6 +5,14 @@
  * Wire format for stdio communication with codex app-server subprocess.
  */
 
+// fallow-ignore-file duplicate-export -- `ApprovalPolicy`, `SandboxMode` and
+// `Personality` name the same three unions in `src/types.ts`, and the two have
+// separate sources of truth: this file follows `codex app-server
+// generate-json-schema`, `src/types.ts` follows the tuples the zod enums of
+// `src/server.ts` are built from. No barrel re-exports either set, and every
+// consumer outside this file imports from `src/types.js`, so the ambiguity the
+// rule guards against has nowhere to arise.
+
 // fallow-ignore-file unused-type -- this file is the wire model, and its consumer
 // reads it by name rather than by import: `tests/protocol-schema.test.ts` walks
 // `checker.getExportsOfModule(protocol.ts)` and holds each exported type against

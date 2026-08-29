@@ -1,10 +1,9 @@
-import { mockModule } from "./helpers/mock.js";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
-
 import { executeCodexSetup } from "../src/tools/codex-setup.js";
+import { mockModule } from "./helpers/mock.js";
 
 const { spawnSyncMock, spawnMock, homedirMock } = {
   spawnSyncMock: jest.fn(),
@@ -12,13 +11,13 @@ const { spawnSyncMock, spawnMock, homedirMock } = {
   homedirMock: jest.fn(),
 };
 
-const realModule1 = { ...(await import("child_process")) };
+const realModule1 = { ...(await import("node:child_process")) };
 mockModule("child_process", realModule1, () => {
   const actual = realModule1;
   return { ...actual, spawnSync: spawnSyncMock, spawn: spawnMock };
 });
 
-const realModule2 = { ...(await import("os")) };
+const realModule2 = { ...(await import("node:os")) };
 mockModule("os", realModule2, () => {
   const actual = realModule2;
   return { ...actual, default: { ...actual, homedir: homedirMock }, homedir: homedirMock };

@@ -1,15 +1,15 @@
-import { mockModule } from "./helpers/mock.js";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
+import { mockModule } from "./helpers/mock.js";
 
 const { deniedExecute } = { deniedExecute: new Set<string>() };
 
 // The resolver asks `fs.accessSync(file, X_OK)` whether a file carries the POSIX execute bit.
 // Windows has no such bit and answers X_OK like F_OK, so the denial is injected here instead of
 // taken from a mode: that keeps the POSIX branch measurable on every host.
-const realModule1 = { ...(await import("fs")) };
+const realModule1 = { ...(await import("node:fs")) };
 mockModule("fs", realModule1, () => {
   const actual = realModule1;
   return {
@@ -29,10 +29,10 @@ mockModule("fs", realModule1, () => {
 });
 
 import {
+  _resetForTesting,
   AUTO_CODEX_COMMANDS,
   CODEX_MCP_COMMAND,
   CODEX_MCP_PATH,
-  _resetForTesting,
   checkDefaultCodexExecutableAvailability,
   getDefaultCodexExecutable,
   resolveDefaultCodexExecutable,

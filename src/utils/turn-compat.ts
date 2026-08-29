@@ -1,4 +1,4 @@
-import { ErrorCode, type EffortLevel } from "../types.js";
+import { type EffortLevel, ErrorCode } from "../types.js";
 
 export type TurnCompatibilityErrorKind = "minimal_web_search";
 

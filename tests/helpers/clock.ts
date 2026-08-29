@@ -6,7 +6,7 @@
  * not the one `Date.now()` reads: measured over 10000 waits under a 12-way CPU
  * load, 19 of them fired with a `Date.now()` delta under 40ms, the shortest 31.
  * A test that asserts on a real duration therefore fails on the runner's luck
- * rather than on a defect, so a test file reads no clock of its own — `eslint`
+ * rather than on a defect, so a test file reads no clock of its own — `biome`
  * holds it to that — and drives the fake one from here instead, where a wait of
  * 40ms is 40ms exactly.
  */

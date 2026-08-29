@@ -6,39 +6,38 @@
  * and transforms JSONL stdout events into the app-server notification format
  * that SessionManager expects.
  */
-import { spawn, type ChildProcess } from "child_process";
-import { writeFileSync, mkdtempSync, rmSync } from "fs";
-import { EventEmitter } from "events";
-import { randomUUID } from "crypto";
-import { tmpdir } from "os";
-import { join } from "path";
+import { type ChildProcess, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ErrorCode } from "../types.js";
+import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
+import { awaitChildExit } from "./child-shutdown.js";
+import { LineReader, readChildOutput } from "./child-stdio.js";
 import type { ICodexClient } from "./client-interface.js";
+import { resolveCodexInvocation } from "./codex-bin.js";
 import type { AppServerSpawnOptions } from "./lifecycle.js";
 import {
-  type RequestId,
   type InitializeResult,
-  type ThreadStartParams,
-  type ThreadStartResult,
+  Methods,
+  type RequestId,
+  type SandboxPolicy,
+  type ThreadBackgroundTerminalsCleanParams,
   type ThreadForkParams,
   type ThreadForkResult,
   type ThreadResumeParams,
   type ThreadResumeResult,
-  type ThreadBackgroundTerminalsCleanParams,
+  type ThreadStartParams,
+  type ThreadStartResult,
+  type TurnInterruptParams,
   type TurnStartParams,
   type TurnStartResult,
-  type TurnInterruptParams,
-  type SandboxPolicy,
-  Methods,
 } from "./protocol.js";
-import { resolveCodexInvocation } from "./codex-bin.js";
-import { LineReader, readChildOutput } from "./child-stdio.js";
-import { ErrorCode } from "../types.js";
-import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 
 type NotificationHandler = (method: string, params: unknown) => void;
 type ServerRequestHandler = (id: RequestId, method: string, params: unknown) => void;
-
-const FORCE_KILL_TIMEOUT_MS = 5_000;
 
 /**
  * Convert snake_case item type from exec JSONL to camelCase used by app-server protocol.
@@ -280,7 +279,6 @@ export class ExecClient extends EventEmitter implements ICodexClient {
 
   // Handlers
   private notificationHandler: NotificationHandler | null = null;
-  private serverRequestHandler: ServerRequestHandler | null = null;
 
   private lines = new LineReader();
 
@@ -369,8 +367,8 @@ export class ExecClient extends EventEmitter implements ICodexClient {
 
     // First turn: codex exec "<prompt>" ...
     // Subsequent turns: codex exec resume <threadId> "<prompt>" ... (multi-turn context)
-    const isResume = this.turnCount > 1 && this.realThreadId != null;
-    if (this.turnCount > 1 && !this.realThreadId) {
+    const resumeThreadId = this.turnCount > 1 ? this.realThreadId : null;
+    if (this.turnCount > 1 && resumeThreadId === null) {
       // CLI didn't provide a thread ID (e.g. older CLI without thread.started event).
       // Fall back to fresh exec but warn — multi-turn context will be lost.
       console.error(
@@ -386,9 +384,10 @@ export class ExecClient extends EventEmitter implements ICodexClient {
         willRetry: true, // non-terminal: session continues, just without context
       });
     }
-    const args = isResume
-      ? this.buildResumeArgs(prompt, params, images)
-      : this.buildExecArgs(prompt, params, images);
+    const args =
+      resumeThreadId === null
+        ? this.buildExecArgs(prompt, params, images)
+        : this.buildResumeArgs(resumeThreadId, prompt, params, images);
     const executable = getDefaultCodexExecutable();
     const invocation = resolveCodexInvocation(args, {
       codexCommand: executable.command,
@@ -431,9 +430,12 @@ export class ExecClient extends EventEmitter implements ICodexClient {
     this.notificationHandler = handler;
   }
 
-  onServerRequest(handler: ServerRequestHandler): void {
-    this.serverRequestHandler = handler;
-  }
+  /**
+   * `codex exec` raises no server-initiated requests, so the handler this
+   * registers would never be called; keeping it would claim exec mode can
+   * deliver an approval request.
+   */
+  onServerRequest(_handler: ServerRequestHandler): void {}
 
   /**
    * `codex exec` raises no server-initiated requests, so there is no request to
@@ -462,20 +464,7 @@ export class ExecClient extends EventEmitter implements ICodexClient {
       proc.stdin?.end();
       this.killProcess();
 
-      // Force kill after timeout (matches AppServerClient behavior)
-      const forceKill = setTimeout(() => forceKillProcess(proc), FORCE_KILL_TIMEOUT_MS);
-      forceKill.unref();
-
-      if (!alreadyExited) {
-        await new Promise<void>((resolve) => {
-          proc.on("exit", () => {
-            clearTimeout(forceKill);
-            resolve();
-          });
-          const fallback = setTimeout(resolve, FORCE_KILL_TIMEOUT_MS + 1000);
-          fallback.unref();
-        });
-      }
+      await awaitChildExit(proc, alreadyExited, () => forceKillProcess(proc));
     }
 
     this.process = null;
@@ -623,15 +612,13 @@ export class ExecClient extends EventEmitter implements ICodexClient {
    * Note: exec resume only supports -m, -c, -i, --json, --skip-git-repo-check.
    *       -s, -p, -C are NOT supported and inherit from the first turn's session.
    */
-  private buildResumeArgs(prompt: string, params: TurnStartParams, images: string[]): string[] {
-    const args: string[] = [
-      "exec",
-      "resume",
-      this.realThreadId!,
-      prompt,
-      "--json",
-      "--skip-git-repo-check",
-    ];
+  private buildResumeArgs(
+    threadId: string,
+    prompt: string,
+    params: TurnStartParams,
+    images: string[]
+  ): string[] {
+    const args: string[] = ["exec", "resume", threadId, prompt, "--json", "--skip-git-repo-check"];
 
     this.recordResumeUnappliedOverrides(params);
 

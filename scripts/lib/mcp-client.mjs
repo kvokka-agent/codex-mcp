@@ -1,7 +1,13 @@
 // The contract `smoke:mcp` holds the server to: the tools and the resources a
 // client finds after the handshake.
 
-export const REQUIRED_TOOLS = ["codex", "codex_reply", "codex_session", "codex_check", "codex_setup"];
+export const REQUIRED_TOOLS = [
+  "codex",
+  "codex_reply",
+  "codex_session",
+  "codex_check",
+  "codex_setup",
+];
 
 export const REQUIRED_RESOURCES = [
   "codex-mcp:///server-info",
@@ -37,6 +43,8 @@ export function assertResourcesPresent(resources) {
  */
 export function codexMcpEnv(env) {
   return Object.fromEntries(
-    Object.entries(env).filter(([key, value]) => key.startsWith("CODEX_MCP_") && value !== undefined)
+    Object.entries(env).filter(
+      ([key, value]) => key.startsWith("CODEX_MCP_") && value !== undefined
+    )
   );
 }

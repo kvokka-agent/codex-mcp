@@ -10,10 +10,10 @@ import type { SessionStartResult } from "../types.js";
 import { ErrorCode } from "../types.js";
 import type { CodexToolParams } from "../utils/config.js";
 import { extractSpawnOptions } from "../utils/config.js";
-import type { SessionDefaults } from "../utils/session-defaults.js";
-import { SESSION_DEFAULT_ENV } from "../utils/session-defaults.js";
 import { resolveAndValidateCwd } from "../utils/cwd.js";
 import { startedTurnResult } from "../utils/execution.js";
+import type { SessionDefaults } from "../utils/session-defaults.js";
+import { SESSION_DEFAULT_ENV } from "../utils/session-defaults.js";
 
 export async function executeCodex(
   args: CodexToolParams,

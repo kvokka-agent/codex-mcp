@@ -5,23 +5,24 @@
  * Spawns codex app-server child processes for each session,
  * or falls back to codex exec --json when app-server is unavailable.
  */
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createServer } from "./server.js";
-import type { ICodexClient } from "./app-server/client-interface.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { AppServerClient } from "./app-server/client.js";
+import type { ICodexClient } from "./app-server/client-interface.js";
 import { detectClientMode } from "./app-server/detect.js";
 import { ExecClient } from "./app-server/exec-client.js";
-import { runStdioPreflight } from "./utils/stdio-guard.js";
+import type { RecoveredSession } from "./persistence/index.js";
+import { createServer } from "./server.js";
+import type { SessionManager } from "./session/manager.js";
+import { reapOrphanProcesses } from "./session/orphan-reaper.js";
+import { type SessionPersistence, startDiskPersistence } from "./session/persistence.js";
 import {
   checkDefaultCodexExecutableAvailability,
   getDefaultCodexExecutable,
 } from "./utils/codex-executable.js";
-import type { RecoveredSession } from "./persistence/index.js";
-import type { SessionManager } from "./session/manager.js";
-import { startDiskPersistence, type SessionPersistence } from "./session/persistence.js";
-import { reapOrphanProcesses } from "./session/orphan-reaper.js";
 import { decideStdinShutdown } from "./utils/stdin-shutdown.js";
+import { runStdioPreflight } from "./utils/stdio-guard.js";
 
 const STDIN_SHUTDOWN_CHECK_MS = 750;
 const STDIN_SHUTDOWN_MAX_WAIT_MS = process.platform === "win32" ? 15_000 : 10_000;

@@ -1,15 +1,16 @@
-import { advanceAsync } from "./helpers/clock.js";
-import { EventEmitter } from "events";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
-import os from "os";
-import path from "path";
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
+import { EventEmitter } from "node:events";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
-import { DEFAULT_POLL_INTERVAL, WAITING_APPROVAL_POLL_INTERVAL } from "../src/types.js";
 import { executeCodexCheck } from "../src/tools/codex-check.js";
+import { DEFAULT_POLL_INTERVAL, WAITING_APPROVAL_POLL_INTERVAL } from "../src/types.js";
+import { advanceAsync } from "./helpers/clock.js";
+import { present } from "./helpers/present.js";
 
 class MockAppServerClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;
@@ -257,7 +258,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
     expect(poll1.status).toBe("waiting_approval");
     expect(poll1.actions?.length).toBe(1);
 
-    const requestId = poll1.actions![0].requestId;
+    const requestId = poll1.actions[0].requestId;
     const poll2 = executeCodexCheck(
       {
         action: "respond_permission",
@@ -337,8 +338,9 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
 
     const poll1 = manager.pollStatus(sessionId);
-    const requestId = poll1.actions?.[0]?.requestId;
-    expect(requestId).toBeDefined();
+    const capturedRequestId = poll1.actions?.[0]?.requestId;
+    expect(capturedRequestId).toBeDefined();
+    const requestId = present(capturedRequestId, "the pending request id");
 
     client.respondToServer.mockImplementationOnce(() => {
       throw new Error("write queue dropped");
@@ -347,7 +349,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
       {
         action: "respond_permission",
         sessionId,
-        requestId: requestId!,
+        requestId,
         decision: "accept",
       },
       manager
@@ -363,7 +365,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
       {
         action: "respond_permission",
         sessionId,
-        requestId: requestId!,
+        requestId,
         decision: "accept",
       },
       manager
@@ -382,8 +384,9 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
 
     const poll1 = manager.pollStatus(sessionId);
-    const requestId = poll1.actions?.[0]?.requestId;
-    expect(requestId).toBeDefined();
+    const capturedRequestId = poll1.actions?.[0]?.requestId;
+    expect(capturedRequestId).toBeDefined();
+    const requestId = present(capturedRequestId, "the pending request id");
 
     client.respondToServer.mockImplementationOnce(() => {
       throw new Error("write queue dropped");
@@ -392,7 +395,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
       {
         action: "respond_permission",
         sessionId,
-        requestId: requestId!,
+        requestId,
         decision: "accept",
       },
       manager
@@ -408,7 +411,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
       {
         action: "respond_permission",
         sessionId,
-        requestId: requestId!,
+        requestId,
         decision: "accept",
       },
       manager
@@ -431,7 +434,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
     expect(poll1.actions?.length).toBe(1);
     expect(poll1.actions?.[0]?.type).toBe("user_input");
 
-    const requestId = poll1.actions![0].requestId;
+    const requestId = poll1.actions[0].requestId;
     const answers = { q1: { answers: ["A"] } };
     const poll2 = executeCodexCheck(
       {
@@ -462,7 +465,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
       ],
     });
 
-    const requestId = manager.pollStatus(sessionId).actions![0].requestId;
+    const requestId = manager.pollStatus(sessionId).actions[0].requestId;
     const answers = { token: { answers: ["sk-live-123"] }, env: { answers: ["staging"] } };
     manager.resolveUserInput(sessionId, requestId, answers);
 
@@ -480,8 +483,9 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
 
     const poll1 = manager.pollStatus(sessionId);
-    const requestId = poll1.actions?.[0]?.requestId;
-    expect(requestId).toBeDefined();
+    const capturedRequestId = poll1.actions?.[0]?.requestId;
+    expect(capturedRequestId).toBeDefined();
+    const requestId = present(capturedRequestId, "the pending request id");
 
     client.respondToServer.mockImplementationOnce(() => {
       throw new Error("write queue dropped");
@@ -490,7 +494,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
       {
         action: "respond_user_input",
         sessionId,
-        requestId: requestId!,
+        requestId,
         answers: { q1: { answers: ["A"] } },
       },
       manager
@@ -506,7 +510,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
       {
         action: "respond_user_input",
         sessionId,
-        requestId: requestId!,
+        requestId,
         answers: { q1: { answers: ["A"] } },
       },
       manager
@@ -526,14 +530,15 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
 
     const poll1 = manager.pollStatus(sessionId);
-    const requestId = poll1.actions?.[0]?.requestId;
-    expect(requestId).toBeDefined();
+    const capturedRequestId = poll1.actions?.[0]?.requestId;
+    expect(capturedRequestId).toBeDefined();
+    const requestId = present(capturedRequestId, "the pending request id");
 
     const poll2 = executeCodexCheck(
       {
         action: "respond_permission",
         sessionId,
-        requestId: requestId!,
+        requestId,
         decision: "accept",
       },
       manager
@@ -577,7 +582,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
 
     const poll1 = manager.pollStatus(sessionId);
-    const requestId = poll1.actions![0].requestId;
+    const requestId = poll1.actions[0].requestId;
     const out = executeCodexCheck(
       {
         action: "respond_permission",
@@ -604,7 +609,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
 
     const poll1 = manager.pollStatus(sessionId);
-    const requestId = poll1.actions![0].requestId;
+    const requestId = poll1.actions[0].requestId;
     const out = executeCodexCheck(
       {
         action: "respond_permission",
@@ -641,7 +646,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
 
     const poll1 = manager.pollStatus(sessionId);
-    const requestId = poll1.actions![0].requestId;
+    const requestId = poll1.actions[0].requestId;
     const out = executeCodexCheck(
       {
         action: "respond_permission",
@@ -668,7 +673,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
 
     const poll1 = manager.pollStatus(sessionId);
-    const requestId = poll1.actions![0].requestId;
+    const requestId = poll1.actions[0].requestId;
     const out = executeCodexCheck(
       {
         action: "respond_permission",
@@ -696,7 +701,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
 
     const poll1 = manager.pollStatus(sessionId);
-    const requestId = poll1.actions![0].requestId;
+    const requestId = poll1.actions[0].requestId;
     const out = executeCodexCheck(
       {
         action: "respond_permission",
@@ -733,7 +738,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
 
     const poll1 = manager.pollStatus(sessionId);
-    const requestId = poll1.actions![0].requestId;
+    const requestId = poll1.actions[0].requestId;
 
     const ok = executeCodexCheck(
       {
@@ -781,14 +786,15 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
 
     const poll1 = manager.pollStatus(sessionId);
-    const requestId = poll1.actions?.[0]?.requestId;
-    expect(requestId).toBeDefined();
+    const capturedRequestId = poll1.actions?.[0]?.requestId;
+    expect(capturedRequestId).toBeDefined();
+    const requestId = present(capturedRequestId, "the pending request id");
 
     const out = executeCodexCheck(
       {
         action: "respond_permission",
         sessionId,
-        requestId: requestId!,
+        requestId,
         decision: "accept",
         answers: { q1: { answers: ["A"] } },
       },
@@ -811,14 +817,15 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
 
     const poll1 = manager.pollStatus(sessionId);
-    const requestId = poll1.actions?.[0]?.requestId;
-    expect(requestId).toBeDefined();
+    const capturedRequestId = poll1.actions?.[0]?.requestId;
+    expect(capturedRequestId).toBeDefined();
+    const requestId = present(capturedRequestId, "the pending request id");
 
     const out = executeCodexCheck(
       {
         action: "respond_user_input",
         sessionId,
-        requestId: requestId!,
+        requestId,
         answers: { q1: { answers: ["A"] } },
         decision: "decline",
       },
@@ -1220,7 +1227,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
     });
     const pending = manager.pollStatus(sessionId);
     expect(pending.status).toBe("waiting_approval");
-    manager.resolveApproval(sessionId, pending.actions![0].requestId, "accept");
+    manager.resolveApproval(sessionId, pending.actions[0].requestId, "accept");
     expect(manager.pollStatus(sessionId).status).toBe("running");
 
     // The status change codex sent while the request was open lands afterwards.
@@ -1249,7 +1256,7 @@ describe("SessionManager protocol compatibility + approvals", () => {
     client.emitNotification(Methods.THREAD_STATUS_CHANGED, { threadId, status: { type: "idle" } });
     expect(manager.pollStatus(sessionId).status).toBe("waiting_approval");
 
-    manager.resolveApproval(sessionId, pending.actions![0].requestId, "accept");
+    manager.resolveApproval(sessionId, pending.actions[0].requestId, "accept");
     client.emitNotification(Methods.THREAD_STATUS_CHANGED, { threadId, status: { type: "idle" } });
     expect(manager.pollStatus(sessionId).status).toBe("idle");
   });
@@ -1323,7 +1330,7 @@ describe("SessionManager missing protocol ids", () => {
     client.emitServerRequest(1, Methods.COMMAND_APPROVAL, { command: "ls" });
 
     expect(logged("carries no itemId, threadId, turnId")).toBe(true);
-    const action = manager.pollStatus(started.sessionId).actions[0]!;
+    const action = manager.pollStatus(started.sessionId).actions[0];
     expect(action.itemId).toBe("");
   });
 
@@ -1443,14 +1450,14 @@ describe("SessionManager disk persistence", () => {
 
     const onDisk = readEventLines(sessionId);
     expect(onDisk).toHaveLength(1);
-    expect(onDisk[0]!.seq).toBe(0);
-    expect(onDisk[0]!.type).toBe("output");
-    expect(onDisk[0]!.data).toEqual({
+    expect(onDisk[0].seq).toBe(0);
+    expect(onDisk[0].type).toBe("output");
+    expect(onDisk[0].data).toEqual({
       method: Methods.AGENT_MESSAGE_DELTA,
       delta: "hello",
       itemId: "item_1",
     });
-    expect(Number.isNaN(Date.parse(String(onDisk[0]!.timestamp)))).toBe(false);
+    expect(Number.isNaN(Date.parse(String(onDisk[0].timestamp)))).toBe(false);
     // And nothing of it reaches the caller.
     expect(manager.pollStatus(sessionId)).not.toHaveProperty("events");
   });
@@ -1500,7 +1507,7 @@ describe("SessionManager disk persistence", () => {
       "error",
     ]);
     expect(onDisk.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4]);
-    expect((onDisk[0]!.data as { summary?: string }).summary).toBe("unknown key `sandbox_mode`");
+    expect((onDisk[0].data as { summary?: string }).summary).toBe("unknown key `sandbox_mode`");
     expect(manager.pollStatus(sessionId).status).toBe("error");
   });
 
@@ -1557,7 +1564,10 @@ describe("SessionManager disk persistence", () => {
     expect(pidInfo.model).toBe("gpt-5-codex");
     expect(pidInfo.command).toBeUndefined();
 
-    const recoveredPid = persistence.recoverSessions()[0]!.pidInfo!;
+    const recoveredPid = present(
+      persistence.recoverSessions()[0].pidInfo,
+      "the pid info of the recovered session"
+    );
     expect(recoveredPid.pid).toBe(client.childPid);
   });
 

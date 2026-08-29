@@ -5,15 +5,15 @@
  * send function it was built with.
  */
 import { describe, expect, it, jest } from "bun:test";
+import { PROGRESS_HEARTBEAT_MS, type ProgressInfo } from "../src/types.js";
 import {
-  ProgressReporter,
   activityLine,
   formatDuration,
   heartbeatIntervalMs,
-  progressReporterFor,
   type ProgressNotification,
+  ProgressReporter,
+  progressReporterFor,
 } from "../src/utils/progress-notifier.js";
-import { PROGRESS_HEARTBEAT_MS, type ProgressInfo } from "../src/types.js";
 
 function capture(): {
   sent: ProgressNotification[];

@@ -4,34 +4,36 @@
  * Manages a single codex app-server child process via stdio.
  * Handles request/response correlation, notifications, and server-initiated requests.
  */
-import { spawn, type ChildProcess } from "child_process";
-import { EventEmitter } from "events";
+import { type ChildProcess, spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
+import type { Writable } from "node:stream";
+import { ErrorCode } from "../types.js";
+import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
+import { awaitChildExit } from "./child-shutdown.js";
+import { LineReader, readChildOutput } from "./child-stdio.js";
+import type { ICodexClient } from "./client-interface.js";
+import { resolveCodexInvocation } from "./codex-bin.js";
+import { type AppServerSpawnOptions, buildAppServerArgs } from "./lifecycle.js";
 import {
-  type RequestId,
-  type JsonRpcRequest,
-  type JsonRpcResponse,
-  type JsonRpcNotification,
-  type JsonRpcMessage,
   type InitializeParams,
   type InitializeResult,
-  type ThreadStartParams,
-  type ThreadStartResult,
+  type JsonRpcMessage,
+  type JsonRpcNotification,
+  type JsonRpcRequest,
+  type JsonRpcResponse,
+  Methods,
+  type RequestId,
+  type ThreadBackgroundTerminalsCleanParams,
   type ThreadForkParams,
   type ThreadForkResult,
   type ThreadResumeParams,
   type ThreadResumeResult,
-  type ThreadBackgroundTerminalsCleanParams,
+  type ThreadStartParams,
+  type ThreadStartResult,
+  type TurnInterruptParams,
   type TurnStartParams,
   type TurnStartResult,
-  type TurnInterruptParams,
-  Methods,
 } from "./protocol.js";
-import { buildAppServerArgs, type AppServerSpawnOptions } from "./lifecycle.js";
-import { resolveCodexInvocation } from "./codex-bin.js";
-import { LineReader, readChildOutput } from "./child-stdio.js";
-import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
-import { ErrorCode } from "../types.js";
-import type { ICodexClient } from "./client-interface.js";
 
 declare const __PKG_VERSION__: string;
 const CLIENT_VERSION = typeof __PKG_VERSION__ !== "undefined" ? __PKG_VERSION__ : "0.0.0-dev";
@@ -288,7 +290,7 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   private send(msg: JsonRpcMessage): void {
     if (!this.process?.stdin) throw new Error("app-server process not started");
     if (!this.process.stdin.writable) throw new Error("app-server stdin not writable");
-    const payload = JSON.stringify(msg) + "\n";
+    const payload = `${JSON.stringify(msg)}\n`;
     this.enqueueWrite(payload);
   }
 
@@ -347,7 +349,8 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   }
 
   private enqueueWrite(payload: string): void {
-    if (!this.process?.stdin?.writable) throw new Error("app-server stdin not writable");
+    const stdin = this.process?.stdin;
+    if (!stdin?.writable) throw new Error("app-server stdin not writable");
 
     if (this.backpressure || this.writeQueue.length > 0) {
       this.queueWrite(payload);
@@ -355,7 +358,7 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     }
 
     try {
-      this.writeToStdin(payload);
+      this.writeToStdin(stdin, payload);
     } catch (err) {
       throw this.recordWriteFailure(err);
     }
@@ -378,8 +381,8 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     this.queuedBytes += payload.length;
   }
 
-  private writeToStdin(payload: string): void {
-    const ok = this.process!.stdin!.write(payload);
+  private writeToStdin(stdin: Writable, payload: string): void {
+    const ok = stdin.write(payload);
     if (!ok) this.backpressure = true;
   }
 
@@ -392,7 +395,8 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   }
 
   private flushWriteQueue(): void {
-    if (!this.process?.stdin?.writable) {
+    const stdin = this.process?.stdin;
+    if (!stdin?.writable) {
       const dropped = this.dropQueuedWrites("stdin is not writable while flushing");
       if (dropped) {
         this.terminateOrLog("dropping queued writes");
@@ -400,11 +404,12 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
       return;
     }
     this.backpressure = false;
-    while (this.writeQueue.length > 0 && !this.backpressure) {
-      const next = this.writeQueue.shift()!;
+    while (!this.backpressure) {
+      const next = this.writeQueue.shift();
+      if (next === undefined) break;
       this.queuedBytes -= next.length;
       try {
-        this.writeToStdin(next);
+        this.writeToStdin(stdin, next);
       } catch (err) {
         this.recordWriteFailure(err);
         this.writeQueue = [];
@@ -461,8 +466,9 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   }
 
   private dispatchServerRequest(req: JsonRpcRequest): void {
-    if (this.serverRequestHandler) {
-      this.runHandler(() => this.serverRequestHandler!(req.id, req.method, req.params), req.method);
+    const handler = this.serverRequestHandler;
+    if (handler) {
+      this.runHandler(() => handler(req.id, req.method, req.params), req.method);
     } else {
       // No handler — respond with error to avoid hanging
       this.runHandler(
@@ -473,8 +479,9 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   }
 
   private dispatchNotification(notif: JsonRpcNotification): void {
-    if (this.notificationHandler) {
-      this.runHandler(() => this.notificationHandler!(notif.method, notif.params), notif.method);
+    const handler = this.notificationHandler;
+    if (handler) {
+      this.runHandler(() => handler(notif.method, notif.params), notif.method);
     }
   }
 
@@ -514,47 +521,37 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     this.failAllPending(new Error("Client destroyed"));
 
     // Kill subprocess
-    if (this.process && !this.process.killed) {
-      const alreadyExited = this.process.exitCode !== null;
-      this.process.stdin?.end();
+    const proc = this.process;
+    if (proc && !proc.killed) {
+      const alreadyExited = proc.exitCode !== null;
+      proc.stdin?.end();
       this.terminate("SIGTERM");
 
-      // Force kill after 5s
-      const forceKill = setTimeout(() => {
-        if (this.process && !this.process.killed) {
-          if (process.platform === "win32" && this.process.pid) {
-            try {
-              spawn("taskkill", ["/PID", String(this.process.pid), "/T", "/F"], {
-                stdio: "ignore",
-                windowsHide: true,
-              });
-            } catch (err) {
-              console.error(
-                `[app-server] Failed to force-kill app-server via taskkill: ${err instanceof Error ? err.message : String(err)}`
-              );
-            }
-          } else {
-            this.terminate("SIGKILL");
-          }
-        }
-      }, 5000);
-      forceKill.unref();
-
-      if (!alreadyExited) {
-        await new Promise<void>((resolve) => {
-          this.process!.on("exit", () => {
-            clearTimeout(forceKill);
-            resolve();
-          });
-          // Resolve anyway after timeout
-          const fallback = setTimeout(resolve, 6000);
-          fallback.unref();
-        });
-      }
+      await awaitChildExit(proc, alreadyExited, () => this.forceKill());
     }
 
     this.process = null;
     this.removeAllListeners();
+  }
+
+  /** Kill the child that outlived its `SIGTERM`, by whatever this platform offers. */
+  private forceKill(): void {
+    const proc = this.process;
+    if (!proc || proc.killed) return;
+    if (process.platform !== "win32" || !proc.pid) {
+      this.terminate("SIGKILL");
+      return;
+    }
+    try {
+      spawn("taskkill", ["/PID", String(proc.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch (err) {
+      console.error(
+        `[app-server] Failed to force-kill app-server via taskkill: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
   }
 
   private terminate(signal: NodeJS.Signals): void {
