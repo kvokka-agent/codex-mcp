@@ -8,7 +8,6 @@ import type { ICodexClient } from "../app-server/client-interface.js";
 import type { AppServerSpawnOptions } from "../app-server/lifecycle.js";
 import {
   ANSWERED_APPROVALS_REVIEWERS,
-  type ApprovalsReviewer as AnsweredApprovalsReviewer,
   APPROVAL_POLICY_PRESETS,
   type AskForApproval,
   type AskForApprovalGranular,
@@ -35,6 +34,8 @@ import {
   readOwner,
 } from "../persistence/index.js";
 import {
+  APPROVAL_POLICIES,
+  APPROVALS_REVIEWERS,
   type ApprovalPolicy,
   type ApprovalsReviewer,
   type BackgroundTerminalOutcome,
@@ -64,6 +65,7 @@ import {
   type ProgressTokens,
   type PublicEffectiveSettings,
   type PublicSessionInfo,
+  SANDBOX_MODES,
   type SandboxMode,
   SESSION_STATUSES,
   type SensitiveSessionInfo,
@@ -2714,9 +2716,9 @@ function sessionOfRecovered(
     cwd: normalizeOptionalString(rec.meta.cwd),
     model: normalizeOptionalString(rec.meta.model),
     profile: normalizeOptionalString(rec.meta.profile),
-    approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
-    sandbox: rec.meta.sandbox as SandboxMode | undefined,
-    approvalsReviewer: rec.meta.approvalsReviewer as ApprovalsReviewer | undefined,
+    approvalPolicy: readOneOf(APPROVAL_POLICIES, rec.meta.approvalPolicy),
+    sandbox: readOneOf(SANDBOX_MODES, rec.meta.sandbox),
+    approvalsReviewer: readOneOf(APPROVALS_REVIEWERS, rec.meta.approvalsReviewer),
     permissions: normalizeOptionalString(rec.meta.permissions),
     personality: rec.meta.personality as Personality | undefined,
     effort: rec.meta.effort as EffortLevel | undefined,
@@ -2758,10 +2760,10 @@ function publicInfoOfRecovered(rec: RecoveredSession): PublicSessionInfo {
     cancelledAt: normalizeOptionalString(rec.meta.cancelledAt),
     cancelledReason: normalizeOptionalString(rec.meta.cancelledReason),
     model: normalizeOptionalString(rec.meta.model),
-    approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
-    sandbox: rec.meta.sandbox as SandboxMode | undefined,
+    approvalPolicy: readOneOf(APPROVAL_POLICIES, rec.meta.approvalPolicy),
+    sandbox: readOneOf(SANDBOX_MODES, rec.meta.sandbox),
     permissions: normalizeOptionalString(rec.meta.permissions),
-    approvalsReviewer: rec.meta.approvalsReviewer as ApprovalsReviewer | undefined,
+    approvalsReviewer: readOneOf(APPROVALS_REVIEWERS, rec.meta.approvalsReviewer),
     pendingRequestCount: 0,
     activity: rec.lastActivity,
     owner: ownershipOf(rec.owner),
@@ -3939,7 +3941,7 @@ function readEffectiveSettings(source: unknown): EffectiveSettings | undefined {
     cwd: readNonEmptyString(source.cwd),
     // Required by the schema, and a session that does not know its reviewer
     // still runs, so an answer without one reports it unknown like the rest.
-    approvalsReviewer: readApprovalsReviewer(source.approvalsReviewer),
+    approvalsReviewer: readOneOf(ANSWERED_APPROVALS_REVIEWERS, source.approvalsReviewer),
     activePermissionProfile: readActivePermissionProfile(source.activePermissionProfile),
   };
   return Object.values(settings).some((value) => value !== undefined) ? settings : undefined;
@@ -3949,23 +3951,33 @@ function readNonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-/** A policy preset the schema lists, or its `granular` object. */
-function readAskForApproval(value: unknown): AskForApproval | undefined {
-  if (typeof value === "string") {
-    return APPROVAL_POLICY_PRESETS.includes(value as ApprovalPolicy)
-      ? (value as ApprovalPolicy)
-      : undefined;
-  }
-  if (!isRecord(value) || !isRecord(value.granular)) return undefined;
-  return value as unknown as AskForApprovalGranular;
+/**
+ * One of `values`, or nothing where the value is not one of them.
+ *
+ * `meta.json` is JSON another process wrote — an older release, a hand edit, a
+ * write cut in half — so a field of it is held against the set `codex_session`
+ * publishes rather than cast to it. `approvalPolicy` no longer takes
+ * `on-failure`, and a directory the previous release left behind carries it.
+ *
+ * The narrowing sits here, where a record becomes a session, and not in
+ * `src/persistence/recovery-scanner.ts`: the scanner reads JSON off disk and
+ * types everything past `sessionId` and the timestamps as `unknown` because the
+ * vocabulary of these fields belongs to the session, and these same values are
+ * what a resume hands back to `thread/resume`. A value outside the set is left
+ * out, which reports the field as unknown — the whole session still lists, and
+ * so does every other session of the directory.
+ */
+function readOneOf<T extends string>(values: readonly T[], value: unknown): T | undefined {
+  return typeof value === "string" && (values as readonly string[]).includes(value)
+    ? (value as T)
+    : undefined;
 }
 
-/** One of the reviewers the schema's `ApprovalsReviewer` enum names. */
-function readApprovalsReviewer(value: unknown): AnsweredApprovalsReviewer | undefined {
-  return typeof value === "string" &&
-    ANSWERED_APPROVALS_REVIEWERS.includes(value as AnsweredApprovalsReviewer)
-    ? (value as AnsweredApprovalsReviewer)
-    : undefined;
+/** A policy preset the schema lists, or its `granular` object. */
+function readAskForApproval(value: unknown): AskForApproval | undefined {
+  if (typeof value === "string") return readOneOf(APPROVAL_POLICY_PRESETS, value);
+  if (!isRecord(value) || !isRecord(value.granular)) return undefined;
+  return value as unknown as AskForApprovalGranular;
 }
 
 /**

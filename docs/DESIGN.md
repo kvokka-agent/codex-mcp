@@ -450,6 +450,12 @@ Ingest then loads them into memory:
   skipped entirely, so restart-dated timestamps cannot defeat cleanup and
   retention.
 - An unrecognized status becomes `error`.
+- `approvalPolicy`, `sandbox` and `approvalsReviewer` are each held against the
+  set `codex_session` publishes and left out where the value is not in it — an
+  older release wrote `approvalPolicy: "on-failure"`, which this one no longer
+  takes. The field then reports as unknown, which is what a field nothing could
+  read is, and the session lists beside every other session of the directory
+  rather than failing the whole answer against the tool's output schema.
 - `result.json` becomes `lastResult`, so the outcome of a finished session is
   still readable.
 - The event-log sequence resumes at `lastSeq + 1`.

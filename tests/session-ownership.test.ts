@@ -8,6 +8,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ownStartedAt } from "../src/persistence/process-identity.js";
+import { createServer } from "../src/server.js";
 import { SessionManager } from "../src/session/manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
 import { ErrorCode } from "../src/types.js";
@@ -182,6 +183,44 @@ describe("listing", () => {
     expect(found.effective?.activePermissionProfile).toEqual({ id: ":read-only" });
   });
 
+  it("leaves out a field of meta.json the schema does not describe and keeps the rest", () => {
+    writeAbandonedOnDisk("sess_stale", {
+      // What this release dropped from `approvalPolicy`, so a directory the
+      // previous one wrote carries it.
+      approvalPolicy: "on-failure",
+      sandbox: "read-only",
+      approvalsReviewer: "auto_review",
+      permissions: ":read-only",
+    });
+
+    const found = present(
+      manager.listAllSessions().find((s) => s.sessionId === "sess_stale"),
+      "the sess_stale session in the listing"
+    );
+    expect(found.approvalPolicy).toBeUndefined();
+    expect(found.sandbox).toBe("read-only");
+    expect(found.approvalsReviewer).toBe("auto_review");
+    expect(found.permissions).toBe(":read-only");
+    expect(found.model).toBe("gpt-5");
+    expect(found.status).toBe("abandoned");
+  });
+
+  it("leaves out a sandbox and a reviewer it cannot read, each on its own", () => {
+    writeAbandonedOnDisk("sess_odd", {
+      approvalPolicy: "never",
+      sandbox: "read-write",
+      approvalsReviewer: 7,
+    });
+
+    const found = present(
+      manager.listAllSessions().find((s) => s.sessionId === "sess_odd"),
+      "the sess_odd session in the listing"
+    );
+    expect(found.approvalPolicy).toBe("never");
+    expect(found.sandbox).toBeUndefined();
+    expect(found.approvalsReviewer).toBeUndefined();
+  });
+
   it("names this server as the owner of the sessions it drives", async () => {
     await manager.createSession("hello", process.cwd(), {}, "low");
     const [sessionId] = manager.listSessions().map((s) => s.sessionId);
@@ -351,5 +390,56 @@ describe("resume", () => {
     await expect(manager.resumeSession("sess_nowhere")).rejects.toThrow(
       ErrorCode.SESSION_NOT_FOUND
     );
+  });
+});
+
+/**
+ * The answer `codex_session(action="list")` hands a client, which the MCP SDK
+ * holds against the tool's output schema before it leaves the server: a field
+ * outside an enum of that schema fails the whole call, not the field.
+ */
+describe("the listing a client receives", () => {
+  interface ToolCallResult {
+    content: Array<{ type: string; text: string }>;
+    structuredContent?: { sessions?: Array<Record<string, unknown>> };
+    isError?: boolean;
+  }
+
+  it("carries a good session directory beside one whose approvalPolicy it cannot read", async () => {
+    writeAbandonedOnDisk("sess_stale", { approvalPolicy: "on-failure" });
+    writeAbandonedOnDisk("sess_good", { approvalPolicy: "never", sandbox: "read-only" });
+
+    const ctx = createServer(process.cwd(), {
+      disableCleanup: true,
+      persistence,
+      createClient: () => new MockClient() as never,
+    });
+    const internal = ctx.server as unknown as {
+      server: {
+        _requestHandlers: Map<string, (req: unknown, extra: unknown) => Promise<unknown>>;
+      };
+    };
+    const handler = present(
+      internal.server._requestHandlers.get("tools/call"),
+      "the tools/call request handler"
+    );
+
+    const res = (await handler(
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "codex_session", arguments: { action: "list" } },
+      },
+      { signal: new AbortController().signal }
+    )) as ToolCallResult;
+    await ctx.server.close();
+
+    expect(res.isError).toBeFalsy();
+    const sessions = present(res.structuredContent?.sessions, "the listed sessions");
+    const byId = new Map(sessions.map((session) => [session.sessionId, session]));
+    expect(byId.get("sess_stale")?.approvalPolicy).toBeUndefined();
+    expect(byId.get("sess_good")?.approvalPolicy).toBe("never");
+    expect(byId.get("sess_good")?.sandbox).toBe("read-only");
   });
 });
