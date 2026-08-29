@@ -189,6 +189,52 @@ describe("a permissions profile reaching the backend", () => {
     expect(resume.permissions).toBe(":workspace");
   });
 
+  it("reports the profile Codex derived the active permissions from", async () => {
+    // A call naming `permissions` sends no sandbox, so the profile id is the
+    // only thing saying which permission level the session runs at.
+    client.threadStart = jest.fn(async (_params: unknown) => ({
+      thread: { id: "thread_mock" },
+      model: "gpt-5.6-luna",
+      modelProvider: "myproxy",
+      cwd: workspace,
+      approvalPolicy: "never",
+      sandbox: { type: "readOnly" },
+      approvalsReviewer: "user",
+      activePermissionProfile: { id: ":read-only", extends: null },
+    }));
+
+    const sessionId = await start(":read-only");
+
+    const session = manager.getSession(sessionId, true);
+    // `extends: null` names no parent, so the reported profile carries only its id.
+    expect(session.effective?.activePermissionProfile).toEqual({ id: ":read-only" });
+    expect(session.effective?.sandbox).toEqual({ type: "readOnly" });
+    // What the call asked for stays beside it: the profile id, and no sandbox.
+    expect(session.permissions).toBe(":read-only");
+    expect(session.sandbox).toBeUndefined();
+  });
+
+  it("lists the profile the call asked for beside the one Codex answered", async () => {
+    client.threadStart = jest.fn(async (_params: unknown) => ({
+      thread: { id: "thread_mock" },
+      approvalsReviewer: "auto_review",
+      activePermissionProfile: { id: ":workspace", extends: null },
+    }));
+
+    const sessionId = await start(":read-only");
+
+    const listed = present(
+      manager.listSessions().find((entry) => entry.sessionId === sessionId),
+      "the started session in the listing"
+    );
+    expect(listed.permissions).toBe(":read-only");
+    expect(listed.approvalsReviewer).toBeUndefined();
+    expect(listed.effective).toEqual({
+      approvalsReviewer: "auto_review",
+      activePermissionProfile: { id: ":workspace" },
+    });
+  });
+
   it("names the ids that exist when the call named one that does not", async () => {
     await expect(start("no-such-profile")).rejects.toThrow(
       "Error [INVALID_ARGUMENT]: no permission profile 'no-such-profile' here. This machine offers: `:read-only`, `:workspace`, `:danger-full-access` (not selectable)."

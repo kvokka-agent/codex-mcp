@@ -144,12 +144,18 @@ export type DynamicToolSpec =
     };
 
 /**
+ * Every reviewer the schema's `ApprovalsReviewer` enum names, which is what a
+ * thread answer can carry.
+ */
+export const ANSWERED_APPROVALS_REVIEWERS = ["user", "auto_review", "guardian_subagent"] as const;
+
+/**
  * Where approval requests are routed for review. Absent means the schema
  * default `user`. `auto_review` hands the decision to a subagent;
  * `guardian_subagent` is the legacy spelling of it, which this server never
- * sends.
+ * sends and a backend can still answer with.
  */
-export type ApprovalsReviewer = "user" | "auto_review" | "guardian_subagent";
+export type ApprovalsReviewer = (typeof ANSWERED_APPROVALS_REVIEWERS)[number];
 
 /** Persisted thread history contract. */
 export type ThreadHistoryMode = "legacy" | "paginated";
@@ -249,9 +255,8 @@ export interface ThreadStartParams {
  * The three responses carry the same block (v2/ThreadStartResponse.json,
  * v2/ThreadForkResponse.json, v2/ThreadResumeResponse.json). Modelled here are
  * the id and the settings a session reports; the rest of the block —
- * `approvalsReviewer`, `activePermissionProfile`, `instructionSources`,
- * `runtimeWorkspaceRoots`, `serviceTier`, `multiAgentMode` and the resume
- * cursors — has no reader.
+ * `instructionSources`, `runtimeWorkspaceRoots`, `serviceTier`,
+ * `multiAgentMode` and the resume cursors — has no reader.
  */
 export interface ThreadSettingsResult {
   thread: { id: string };
@@ -263,6 +268,27 @@ export interface ThreadSettingsResult {
   sandbox: SandboxPolicy;
   /** Optional on the response, and null for a model advertising no effort. */
   reasoningEffort?: ReasoningEffort | null;
+  /** Who the thread routes its approval requests to, whatever the call named. */
+  approvalsReviewer: ApprovalsReviewer;
+  /**
+   * The profile that produced the active permissions. Null where Codex names
+   * none, and the only field saying which profile derived `sandbox`.
+   */
+  activePermissionProfile?: ActivePermissionProfile | null;
+}
+
+/**
+ * The permissions profile a thread runs under, as a thread answer names it
+ * (schema definition `ActivePermissionProfile`).
+ */
+export interface ActivePermissionProfile {
+  /**
+   * An id of `default_permissions`, a built-in such as `:workspace`, or a
+   * user-defined `[permissions.<id>]` profile.
+   */
+  id: string;
+  /** The parent id of the profile's `extends`, null where it names no parent. */
+  extends?: string | null;
 }
 
 /** thread/start response — schema v2/ThreadStartResponse.json. */

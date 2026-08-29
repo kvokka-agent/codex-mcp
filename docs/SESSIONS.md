@@ -168,13 +168,24 @@ is not sent to Codex.
 
 Two sets of settings, and `codex_session(action="get")` answers both.
 
-`model`, `approvalPolicy`, `sandbox` and the rest are what the call asked for.
-`effective` is what Codex answered the thread call with — `model`,
-`modelProvider`, `reasoningEffort`, `approvalPolicy`, `sandbox`, and `cwd` with
+`model`, `approvalPolicy`, `sandbox`, `permissions`, `approvalsReviewer` and the
+rest are what the call asked for. `effective` is what Codex answered the thread
+call with — `model`, `modelProvider`, `reasoningEffort`, `approvalPolicy`,
+`sandbox`, `approvalsReviewer`, `activePermissionProfile`, and `cwd` with
 `includeSensitive: true` — and that is what the session runs with. A `codex`
 call naming no model leaves `model` absent and reads the model Codex picked from
 `config.toml` in `effective.model`; a call whose model the backend swapped reads
 the swap there too.
+
+`effective.activePermissionProfile` is `{ id, extends }` — the profile Codex
+derived the active permissions from, and `extends` only where that profile names
+a parent. It is where a session started on `permissions` reads its permission
+level: such a call sends no sandbox, so `sandbox` beside it is empty and
+`effective.sandbox` is the policy object the profile produced.
+`effective.approvalsReviewer` is who Codex routes this thread's approval
+requests to, which a call naming no reviewer reads here and nowhere else; the
+backend also answers the legacy spelling `guardian_subagent` for `auto_review`,
+and the session reports what it answered.
 
 An answer that did not carry a field leaves it out of `effective`, which says
 unknown. Nothing is filled in from the request: the request is already reported

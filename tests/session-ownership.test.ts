@@ -166,6 +166,22 @@ describe("listing", () => {
     expect(found.owner).toBeUndefined();
   });
 
+  it("carries the profile and the reviewer a disk record asked for", () => {
+    writeAbandonedOnDisk("sess_perm", {
+      permissions: ":read-only",
+      approvalsReviewer: "auto_review",
+      effective: { activePermissionProfile: { id: ":read-only" } },
+    });
+
+    const found = present(
+      manager.listAllSessions().find((s) => s.sessionId === "sess_perm"),
+      "the sess_perm session in the listing"
+    );
+    expect(found.permissions).toBe(":read-only");
+    expect(found.approvalsReviewer).toBe("auto_review");
+    expect(found.effective?.activePermissionProfile).toEqual({ id: ":read-only" });
+  });
+
   it("names this server as the owner of the sessions it drives", async () => {
     await manager.createSession("hello", process.cwd(), {}, "low");
     const [sessionId] = manager.listSessions().map((s) => s.sessionId);
@@ -221,6 +237,8 @@ describe("resume", () => {
       approvalPolicy: "on-request",
       sandbox: { type: "readOnly", networkAccess: false },
       reasoningEffort: "xhigh",
+      approvalsReviewer: "auto_review",
+      activePermissionProfile: { id: ":read-only", extends: null },
     };
     manager = new SessionManager({
       disableCleanup: true,
@@ -243,9 +261,19 @@ describe("resume", () => {
       approvalPolicy: "on-request",
       sandbox: { type: "readOnly", networkAccess: false },
       cwd: "/srv/work",
+      approvalsReviewer: "auto_review",
+      activePermissionProfile: { id: ":read-only" },
     });
     expect(session.model).toBe("gpt-5");
-    expect(readMeta("sess_disk").effective).toMatchObject({ model: "gpt-5.6-luna" });
+    // The reviewer and the profile are the thread's, not this server's record:
+    // nothing on disk named either.
+    expect(session.approvalsReviewer).toBeUndefined();
+    expect(session.permissions).toBeUndefined();
+    expect(readMeta("sess_disk").effective).toMatchObject({
+      model: "gpt-5.6-luna",
+      approvalsReviewer: "auto_review",
+      activePermissionProfile: { id: ":read-only" },
+    });
   });
 
   it("keeps the settings it holds when the resume answers none", async () => {

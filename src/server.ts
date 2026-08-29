@@ -3,6 +3,7 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { ANSWERED_APPROVALS_REVIEWERS } from "./app-server/protocol.js";
 import { registerResources } from "./resources/register-resources.js";
 import { SessionManager, type SessionManagerOptions } from "./session/manager.js";
 import { executeCodex } from "./tools/codex.js";
@@ -137,6 +138,18 @@ const effectiveSettingsSchema = z
       .optional(),
     sandbox: z.record(z.string(), z.unknown()).optional(),
     cwd: z.string().optional(),
+    approvalsReviewer: z
+      .enum(ANSWERED_APPROVALS_REVIEWERS)
+      .optional()
+      .describe(
+        "Who Codex routes this thread's approval requests to. `guardian_subagent` is the legacy spelling of `auto_review` and is reported as answered."
+      ),
+    activePermissionProfile: z
+      .object({ id: z.string(), extends: z.string().optional() })
+      .optional()
+      .describe(
+        "The permission profile that produced the active permissions, and the only field saying which profile derived `sandbox`."
+      ),
   })
   .describe(
     "The settings Codex answered with, which are the ones the session runs with. A field is absent where the answer did not carry it."
@@ -152,6 +165,14 @@ const publicSessionInfoSchema = z.object({
   model: z.string().optional(),
   approvalPolicy: z.enum(APPROVAL_POLICIES).optional(),
   sandbox: z.enum(SANDBOX_MODES).optional(),
+  permissions: z
+    .string()
+    .optional()
+    .describe("The permission profile id the call named in place of a sandbox."),
+  approvalsReviewer: z
+    .enum(APPROVALS_REVIEWERS)
+    .optional()
+    .describe("Who the call asked to review its approval requests."),
   pendingRequestCount: z.number().int(),
   activity: z
     .string()
@@ -378,6 +399,8 @@ const sessionToolOutputShape = {
   model: z.string().optional(),
   approvalPolicy: z.enum(APPROVAL_POLICIES).optional(),
   sandbox: z.enum(SANDBOX_MODES).optional(),
+  permissions: z.string().optional(),
+  approvalsReviewer: z.enum(APPROVALS_REVIEWERS).optional(),
   pendingRequestCount: z.number().int().optional(),
   activity: z.string().optional(),
   lastTurn: lastTurnSchema.optional(),
