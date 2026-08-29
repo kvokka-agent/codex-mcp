@@ -317,7 +317,9 @@ by `owner.json`.
   parameters it was created with, and what `turn/start` takes on every turn —
   reasoning effort, summary mode and personality are not thread state, so a turn
   that omits them falls back to `~/.codex/config.toml` rather than to what the
-  session was started with. `PersistedSessionMeta` in
+  session was started with, plus `effective`, the settings Codex answered the
+  thread call with, so a listing served from disk reports what a session runs
+  with. `PersistedSessionMeta` in
   `src/session/persistence.ts` is the field list; read it there rather than from
   a copy. The file is rewritten when any of those fields changes — the thread id
   reaches it the moment Codex hands it over, and a turn's parameters when the
@@ -534,6 +536,30 @@ and the server reads the id at `thread.id` and nowhere else: a session needs a
 real thread id, so a differently shaped answer raises `INTERNAL` rather than
 carrying on with an invented one. `turn/start` answers `{ turn: Turn }` and the
 id there is only a seed — the `turn/started` notification settles `activeTurnId`.
+
+### Reading the settings out of the same responses
+
+The three thread responses carry one more block: `model`, `modelProvider`,
+`cwd`, `approvalPolicy` and `sandbox`, required on each of them, plus an
+optional `reasoningEffort`. It says what the thread runs with, which is not what
+the call asked for — a `thread/start` naming neither model nor provider on
+`codex-cli 0.150.1` answered `"model":"gpt-5.6-luna","modelProvider":"myproxy"`.
+The server writes that block onto the session as its effective settings and
+`codex_session` reports it. Where the two differ Codex's answer is what the
+session runs on, so the request's own values stay under the session's `model`,
+`approvalPolicy` and `sandbox` and never overwrite the answer.
+
+`thread/resume` is where it decides most: it restores the thread from Codex's
+rollout log, so the thread's own persisted metadata says what it runs with and
+this server's `meta.json` does not.
+
+Unlike the id, none of it is load-bearing. A field the answer does not carry in
+the shape the schema gives it is a setting the session reports as unknown; the
+session runs on, and nothing stands in for the value Codex did not send.
+
+`codex-mcp:///server-info` reports `defaultModel` from the same place: the model
+answered to a `thread/start` this server sent with none. Until a start has
+measured it, it is null.
 
 ## Security
 

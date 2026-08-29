@@ -179,7 +179,7 @@ single read.
 | Action | Needs | Answers |
 | --- | --- | --- |
 | `list` | — | `{ sessions[] }` — every session of the state directory, this server's and every other server's |
-| `get` | `sessionId` | one session; `includeSensitive: true` adds `threadId`, `cwd`, `profile`, `config` |
+| `get` | `sessionId` | one session; `includeSensitive: true` adds `threadId`, `cwd`, `profile`, `config` and `effective.cwd` |
 | `resume` | `sessionId` | `{ sessionId, threadId, status: "idle", pollInterval, progress }` |
 | `cancel` | `sessionId` | `{ success, message }` — terminal |
 | `interrupt` | `sessionId` | `{ success, message }` — stops the current turn, session stays usable |
@@ -192,9 +192,20 @@ only when asked for), `olderThanMs`, `dryRun`, and `includeDisk` (default
 `true`).
 
 Each listed session carries `status`, `createdAt`, `lastActiveAt`,
-`pendingRequestCount`, the `model`, `approvalPolicy` and `sandbox` it runs with,
-`activity`, `lastTurn`, and `owner` — `{ pid, state: "self" | "other" }` for a
-session a running server holds, and nothing at all for a free one.
+`pendingRequestCount`, the `model`, `approvalPolicy` and `sandbox` it was asked
+to run with, `effective`, `activity`, `lastTurn`, and `owner` —
+`{ pid, state: "self" | "other" }` for a session a running server holds, and
+nothing at all for a free one.
+
+`effective` is what Codex answered the thread call with: `model`,
+`modelProvider`, `reasoningEffort`, `approvalPolicy` and `sandbox` — the policy
+object, not the mode string the call takes — plus `cwd` with
+`includeSensitive: true`. Those are the settings the session runs with, so a
+`codex` call naming no model reads its model there and nowhere else. A field the
+answer did not carry is absent, which says unknown; the whole block is absent
+when the answer carried none of them. `model`, `approvalPolicy` and `sandbox`
+beside it stay what the call asked for, so the two together say what was asked
+and what is.
 
 `lastTurn` is `{ turnId, outcome, status, completedAt, error }` for the last turn
 that ended, absent until one does. `status` says what the session is now and
@@ -244,7 +255,7 @@ A client that reads MCP resources gets seven, all read-only:
 
 | URI | Type | What it holds |
 | --- | --- | --- |
-| `codex-mcp:///server-info` | JSON | Version, detected Codex CLI version and the minimum this server drives, platform, stdio mode, the supported enums, active session count |
+| `codex-mcp:///server-info` | JSON | Version, detected Codex CLI version and the minimum this server drives, platform, stdio mode, the supported enums, active session count, and `defaultModel` — the model Codex answered a `thread/start` that named none with, null until one has |
 | `codex-mcp:///compat-report` | JSON | Which features this build carries, for a client adapting to it |
 | `codex-mcp:///config` | Markdown | Parameter guide and the `config.toml` mapping |
 | `codex-mcp:///gotchas` | Markdown | The practical limits and the traps |

@@ -451,7 +451,10 @@ Pass criteria:
 Validate:
 
 1. `action="list"` returns every session of the state directory, each with its `activity` and its `owner` when a running server holds it.
-2. `action="get"` returns details.
+2. `action="get"` returns details, `effective` among them: the model, provider,
+   reasoning effort, approval policy and sandbox Codex answered the thread call
+   with. Start a session naming no `model` and confirm `effective.model` names
+   the model `config.toml` picked, while `model` stays absent.
 3. `action="cancel"` moves to `cancelled`.
 4. `action="interrupt"` works only while active turn is running.
 5. `action="fork"` creates a new session/thread branch.
@@ -644,7 +647,7 @@ Expected:
 1. The session is present with `status: "abandoned"` and no `owner` — the work was cut off, nothing failed, and nobody holds it.
 2. Its `activity` says what it was cut off doing.
 3. `codex_reply` on it answers `SESSION_NOT_RUNNING` and names `resume`.
-4. `codex_session(action="resume", sessionId=...)` answers `status: "idle"`, and `codex_reply` then carries the same thread on — the agent knows what the interrupted turn was about.
+4. `codex_session(action="resume", sessionId=...)` answers `status: "idle"`, and `codex_reply` then carries the same thread on — the agent knows what the interrupted turn was about. Its `effective` block now carries what the rollout log says the thread runs with, which the server before the restart never recorded.
 5. A completed session recovered the same way still returns its last `result`.
 6. The `codex` child process from before the restart is gone; the server logs the reap count to stderr.
 7. Starting a second server against the same state directory reports how many sessions belong to another running codex-mcp and keeps serving; each server lists the other's sessions and acts on none of them.

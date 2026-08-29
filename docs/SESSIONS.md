@@ -132,6 +132,26 @@ them one at a time avoids that entirely.
 `denyMessage` is recorded in the event log for the person reading it later; it
 is not sent to Codex.
 
+## What a session runs with
+
+Two sets of settings, and `codex_session(action="get")` answers both.
+
+`model`, `approvalPolicy`, `sandbox` and the rest are what the call asked for.
+`effective` is what Codex answered the thread call with — `model`,
+`modelProvider`, `reasoningEffort`, `approvalPolicy`, `sandbox`, and `cwd` with
+`includeSensitive: true` — and that is what the session runs with. A `codex`
+call naming no model leaves `model` absent and reads the model Codex picked from
+`config.toml` in `effective.model`; a call whose model the backend swapped reads
+the swap there too.
+
+An answer that did not carry a field leaves it out of `effective`, which says
+unknown. Nothing is filled in from the request: the request is already reported
+beside it.
+
+A resume replaces the whole block. `thread/resume` restores the thread from
+Codex's rollout log, so a session picked up by another server reports what that
+log says it runs with, including settings no `meta.json` ever recorded.
+
 ## Permission model
 
 Three layers, and the first two are the caller's to set on every `codex` call.

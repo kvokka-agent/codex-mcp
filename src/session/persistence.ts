@@ -24,6 +24,7 @@ import {
 
 import type {
   ApprovalPolicy,
+  EffectiveSettings,
   EffortLevel,
   Personality,
   SandboxMode,
@@ -42,6 +43,10 @@ import type {
  * was created with, and what `turn/start` takes per turn — `effort` and
  * `summary` are not thread state, so a turn that omits them silently falls back
  * to `~/.codex/config.toml` instead of the values the session was started with.
+ *
+ * `effective` is the other half: the fields above are what the session was
+ * asked to run with, and `effective` is what Codex answered it runs with, so a
+ * listing served from disk reports the settings rather than the request.
  */
 interface PersistedSessionMeta {
   schemaVersion: number;
@@ -64,6 +69,7 @@ interface PersistedSessionMeta {
   baseInstructions?: string;
   developerInstructions?: string;
   approvalTimeoutMs?: number;
+  effective?: EffectiveSettings;
 }
 
 interface PidInfo {
@@ -169,6 +175,7 @@ export class SessionPersistence {
       baseInstructions: session.baseInstructions,
       developerInstructions: session.developerInstructions,
       approvalTimeoutMs: session.approvalTimeoutMs,
+      effective: session.effective,
     };
     const dir = join(this.sessionsDir, session.sessionId);
     atomicWriteJson(join(dir, "meta.json"), meta);

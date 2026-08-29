@@ -157,6 +157,20 @@ describe.skipIf(!HARNESS_RUNS_HERE)("session metadata", () => {
     );
     expect(meta.threadId).toBe(threadId);
     expect(meta.status).toBe("running");
+
+    // The call named no model, so what the session runs on is only knowable
+    // from the answer — and it reaches both the tool and the directory.
+    const got = await server.callTool("codex_session", {
+      action: "get",
+      sessionId,
+      includeSensitive: true,
+    });
+    expect(got.effective).toMatchObject({
+      model: "fake-default-model",
+      modelProvider: "fake-provider",
+      approvalPolicy: "on-request",
+    });
+    expect(meta.effective).toMatchObject({ model: "fake-default-model" });
   }, 40_000);
 
   it("sends the turn's activity to the client while the poll is still held", async () => {

@@ -14,8 +14,11 @@ import { type OwnerState, ownerState, readOwner } from "./session-owner.js";
 
 /**
  * The version of the session directory format. Version 3 records the owner of the
- * session, the parameters `thread/resume` takes, and the parameters `turn/start`
- * takes per turn — `effort` and `summary`, which the thread does not hold.
+ * session, the parameters `thread/resume` takes, the parameters `turn/start`
+ * takes per turn — `effort` and `summary`, which the thread does not hold — and
+ * the settings Codex answered the thread call with. A directory a build that
+ * wrote no answered settings left behind reads as a session whose effective
+ * settings are unknown, which is what it is.
  */
 export const SCHEMA_VERSION = 3;
 

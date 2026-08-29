@@ -57,6 +57,140 @@ class MockAppServerClient extends EventEmitter {
   }
 }
 
+/**
+ * A thread answer carrying every field `codex-schema/v2/ThreadStartResponse.json`
+ * requires of one, which `thread/fork` and `thread/resume` answer with too.
+ */
+function threadAnswer(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    thread: { id: "thread_mock" },
+    model: "gpt-5.6-luna",
+    modelProvider: "myproxy",
+    cwd: "/srv/work",
+    approvalPolicy: "on-request",
+    sandbox: { type: "workspaceWrite", networkAccess: false },
+    reasoningEffort: "medium",
+    ...overrides,
+  };
+}
+
+describe("the settings a session runs with", () => {
+  let manager: SessionManager;
+  let client: MockAppServerClient;
+  const workspace = path.resolve(os.tmpdir(), "codex-mcp-tests");
+
+  beforeEach(() => {
+    client = new MockAppServerClient();
+    manager = new SessionManager({
+      disableCleanup: true,
+      createClient: () => client as unknown as AppServerClient,
+    });
+  });
+
+  afterEach(() => {
+    manager.destroy();
+  });
+
+  it("reports what Codex answered, not what the call asked for", async () => {
+    client.threadStartResult = threadAnswer();
+
+    const { sessionId } = await manager.createSession(
+      "hi",
+      workspace,
+      { model: "o4-mini", approvalPolicy: "never", sandbox: "read-only" },
+      "medium"
+    );
+
+    const session = manager.getSession(sessionId, true);
+    expect(session.effective).toEqual({
+      model: "gpt-5.6-luna",
+      modelProvider: "myproxy",
+      reasoningEffort: "medium",
+      approvalPolicy: "on-request",
+      sandbox: { type: "workspaceWrite", networkAccess: false },
+      cwd: "/srv/work",
+    });
+    // What the call asked for is still there, under the session's own fields.
+    expect(session.model).toBe("o4-mini");
+    expect(session.approvalPolicy).toBe("never");
+  });
+
+  it("keeps the path out of a listing and out of an unprivileged get", async () => {
+    client.threadStartResult = threadAnswer();
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    const redacted = manager.getSession(sessionId);
+    const listed = present(
+      manager.listSessions().find((s) => s.sessionId === sessionId),
+      "the started session in the listing"
+    );
+
+    expect(redacted.effective).not.toHaveProperty("cwd");
+    expect(listed.effective).toMatchObject({ model: "gpt-5.6-luna" });
+    expect(listed.effective).not.toHaveProperty("cwd");
+  });
+
+  it("reports the reasoning effort as unknown when the answer omits it", async () => {
+    // `reasoningEffort` is the one optional field of the response, and null
+    // where the model advertises no effort.
+    client.threadStartResult = threadAnswer({ reasoningEffort: undefined });
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "xhigh");
+
+    const session = manager.getSession(sessionId, true);
+    expect(session.effective?.reasoningEffort).toBeUndefined();
+    expect(session.effective?.model).toBe("gpt-5.6-luna");
+  });
+
+  it("carries on with the settings unknown when the answer carries none of them", async () => {
+    // A thread id and nothing else: the session runs, and says it does not know
+    // what it runs with rather than reporting the request back as the answer.
+    client.threadStartResult = { thread: { id: "thread_bare" } };
+
+    const started = await manager.createSession("hi", workspace, { model: "o4-mini" }, "medium");
+
+    expect(started.threadId).toBe("thread_bare");
+    expect(manager.getSession(started.sessionId, true).effective).toBeUndefined();
+    expect(manager.getSession(started.sessionId).model).toBe("o4-mini");
+  });
+
+  it("drops a policy and a sandbox the schema does not describe", async () => {
+    client.threadStartResult = threadAnswer({
+      approvalPolicy: "on-failure",
+      sandbox: { type: "quantumTunnel" },
+    });
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    const effective = manager.getSession(sessionId, true).effective;
+    expect(effective?.approvalPolicy).toBeUndefined();
+    expect(effective?.sandbox).toBeUndefined();
+    expect(effective?.model).toBe("gpt-5.6-luna");
+  });
+
+  it("reads the granular approval policy the schema's object branch carries", async () => {
+    const granular = { granular: { mcp_elicitations: true, rules: false, sandbox_approval: true } };
+    client.threadStartResult = threadAnswer({ approvalPolicy: granular });
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    expect(manager.getSession(sessionId, true).effective?.approvalPolicy).toEqual(granular);
+  });
+
+  it("gives a fork the settings the process driving it answered with", async () => {
+    client.threadStartResult = threadAnswer();
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+    client.threadForkResult = threadAnswer({ thread: { id: "thread_forked" }, model: "forked" });
+    client.threadResumeResult = threadAnswer({
+      thread: { id: "thread_forked" },
+      model: "gpt-5.6-luna-resumed",
+    });
+
+    const forked = await manager.forkSession(sessionId);
+
+    expect(manager.getSession(forked.sessionId, true).effective?.model).toBe(
+      "gpt-5.6-luna-resumed"
+    );
+  });
+});
+
 describe("SessionManager protocol compatibility + approvals", () => {
   let manager: SessionManager;
   let client: MockAppServerClient;
@@ -273,14 +407,23 @@ describe("SessionManager protocol compatibility + approvals", () => {
     expect(terminal.pollInterval).toBeUndefined();
   });
 
-  it("exposes best-effort observed default model from recent sessions", async () => {
-    expect(manager.getObservedDefaultModel()).toBeNull();
+  it("reports the default model as the one Codex answered a start that named none with", async () => {
+    expect(manager.getCodexDefaultModel()).toBeNull();
+    client.threadStartResult = threadAnswer({ model: "gpt-5.6-luna" });
+
+    await manager.createSession("hi", workspace, {}, "medium");
+
+    expect(manager.getCodexDefaultModel()).toBe("gpt-5.6-luna");
+  });
+
+  it("leaves the default model unmeasured while every start names one", async () => {
+    client.threadStartResult = threadAnswer({ model: "gpt-5.6-luna" });
 
     await manager.createSession("hi", workspace, { model: "o4-mini" }, "medium");
-    expect(manager.getObservedDefaultModel()).toBe("o4-mini");
 
-    await manager.createSession("hello", workspace, { model: "o4" }, "medium");
-    expect(manager.getObservedDefaultModel()).toBe("o4");
+    // The answer says what that session runs on, not what a session naming
+    // nothing would run on.
+    expect(manager.getCodexDefaultModel()).toBeNull();
   });
 
   it("responds to command approval and clears pending request", async () => {

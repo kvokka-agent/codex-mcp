@@ -118,6 +118,25 @@ const lastTurnSchema = z
     "How the last turn ended. `status` says what the session is now, and a session closed after it answered reads `cancelled`; this says what the work came to, and closing the session does not touch it."
   );
 
+/**
+ * What Codex answered the session's thread call with. `cwd` is a path, so it
+ * rides with the other sensitive fields of `get` and is absent everywhere else.
+ */
+const effectiveSettingsSchema = z
+  .object({
+    model: z.string().optional(),
+    modelProvider: z.string().optional(),
+    reasoningEffort: z.string().optional(),
+    approvalPolicy: z
+      .union([z.enum(APPROVAL_POLICIES), z.record(z.string(), z.unknown())])
+      .optional(),
+    sandbox: z.record(z.string(), z.unknown()).optional(),
+    cwd: z.string().optional(),
+  })
+  .describe(
+    "The settings Codex answered with, which are the ones the session runs with. A field is absent where the answer did not carry it."
+  );
+
 const publicSessionInfoSchema = z.object({
   sessionId: z.string(),
   status: z.enum(SESSION_STATUSES),
@@ -140,6 +159,7 @@ const publicSessionInfoSchema = z.object({
       "The codex-mcp process holding the session. Absent means nobody holds it, which is what makes it resumable."
     ),
   lastTurn: lastTurnSchema.optional(),
+  effective: effectiveSettingsSchema.optional(),
 });
 
 const errorOutputShape = {
@@ -282,6 +302,7 @@ const sessionToolOutputShape = {
   cwd: z.string().optional(),
   profile: z.string().optional(),
   config: z.record(z.string(), z.unknown()).optional(),
+  effective: effectiveSettingsSchema.optional(),
   pollInterval: z
     .number()
     .int()

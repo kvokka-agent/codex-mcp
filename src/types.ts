@@ -5,6 +5,8 @@
  * TypeScript types can derive from the same source of truth.
  */
 
+import type { AskForApproval, SandboxPolicy } from "./app-server/protocol.js";
+
 // ── Constants ──────────────────────────────────────────────────────
 
 export const APPROVAL_POLICIES = ["untrusted", "on-request", "never"] as const;
@@ -74,6 +76,30 @@ export interface NetworkPolicyAmendment {
 }
 
 // ── Session Types ──────────────────────────────────────────────────
+
+/**
+ * The settings Codex answered the session's thread call with: what the session
+ * runs with, whatever the call asked for.
+ *
+ * A field is absent when the answer did not carry it in the shape
+ * `codex-schema/v2/ThreadStartResponse.json` gives it. Absent means unknown —
+ * the argument the call sent is never copied in to stand for the answer, and
+ * the session reports that argument under its own field.
+ */
+export interface EffectiveSettings {
+  model?: string;
+  modelProvider?: string;
+  /** The response omits it for a model that advertises no reasoning effort. */
+  reasoningEffort?: EffortLevel;
+  /** A policy preset, or the granular object naming each approval channel. */
+  approvalPolicy?: AskForApproval;
+  /** The sandbox policy object the thread runs under, as Codex answered it. */
+  sandbox?: SandboxPolicy;
+  cwd?: string;
+}
+
+/** The effective settings a redacted view carries: `cwd` is a path and stays out. */
+export type PublicEffectiveSettings = Omit<EffectiveSettings, "cwd">;
 
 /**
  * Where a session stands.
@@ -235,6 +261,13 @@ export interface SessionInfo {
   };
   /** Developer instructions the thread was started with, reused when it is forked or resumed. */
   developerInstructions?: string;
+  /**
+   * What Codex answered the last `thread/start`, `thread/fork` or
+   * `thread/resume` of this session with. Absent until one answers something
+   * readable, and each answer replaces the whole block: two answers merged
+   * would report a set of settings that never ran together.
+   */
+  effective?: EffectiveSettings;
 }
 
 /** Which server holds a session, as a listing reports it. */
@@ -271,6 +304,11 @@ export interface PublicSessionInfo {
   lastTurn?: LastTurnInfo;
   /** Absent when no server holds the session, which is what makes it resumable. */
   owner?: SessionOwnership;
+  /**
+   * The settings Codex answered with, which are what the session runs with.
+   * `model`, `approvalPolicy` and `sandbox` above are what the call asked for.
+   */
+  effective?: PublicEffectiveSettings;
 }
 
 /** The end of a turn, as the session reports it after the fact. */
@@ -291,6 +329,8 @@ export interface SensitiveSessionInfo extends PublicSessionInfo {
   cwd?: string;
   profile?: string;
   config?: Record<string, unknown>;
+  /** The full block, `cwd` included. */
+  effective?: EffectiveSettings;
 }
 
 // ── Result Types ───────────────────────────────────────────────────

@@ -74,7 +74,12 @@ export interface InitializeResult {
 
 // ── Shared enums / aliases ─────────────────────────────────────────
 
-export type ApprovalPolicy = "untrusted" | "on-request" | "never";
+/**
+ * The string branch of `AskForApproval`, as a list a reader can hold a response
+ * field against.
+ */
+export const APPROVAL_POLICY_PRESETS = ["untrusted", "on-request", "never"] as const;
+export type ApprovalPolicy = (typeof APPROVAL_POLICY_PRESETS)[number];
 
 /**
  * Object branch of the schema's `AskForApproval` union: names each approval
@@ -235,12 +240,32 @@ export interface ThreadStartParams {
 }
 
 /**
- * thread/start response — schema v2/ThreadStartResponse.json.
- * Only `thread.id` is modelled: no caller reads another field off the response.
+ * What `thread/start`, `thread/fork` and `thread/resume` answer with — the
+ * settings the thread runs with, which are not the settings the request asked
+ * for. On `codex-cli 0.150.1` a `thread/start` naming neither model nor
+ * provider answered `"model":"gpt-5.6-luna","modelProvider":"myproxy"`.
+ *
+ * The three responses carry the same block (v2/ThreadStartResponse.json,
+ * v2/ThreadForkResponse.json, v2/ThreadResumeResponse.json). Modelled here are
+ * the id and the settings a session reports; the rest of the block —
+ * `approvalsReviewer`, `activePermissionProfile`, `instructionSources`,
+ * `runtimeWorkspaceRoots`, `serviceTier`, `multiAgentMode` and the resume
+ * cursors — has no reader.
  */
-export interface ThreadStartResult {
+export interface ThreadSettingsResult {
   thread: { id: string };
+  model: string;
+  modelProvider: string;
+  cwd: string;
+  approvalPolicy: AskForApproval;
+  /** The policy object, not the `sandbox` mode string `thread/start` takes. */
+  sandbox: SandboxPolicy;
+  /** Optional on the response, and null for a model advertising no effort. */
+  reasoningEffort?: ReasoningEffort | null;
 }
+
+/** thread/start response — schema v2/ThreadStartResponse.json. */
+export type ThreadStartResult = ThreadSettingsResult;
 
 export interface ThreadForkParams {
   threadId: string;
@@ -282,9 +307,7 @@ export interface ThreadForkParams {
 }
 
 /** thread/fork response — schema v2/ThreadForkResponse.json. */
-export interface ThreadForkResult {
-  thread: { id: string };
-}
+export type ThreadForkResult = ThreadSettingsResult;
 
 /** How much of each turn a `thread/resume` answer carries back. */
 export type TurnItemsView = "notLoaded" | "summary" | "full";
@@ -332,9 +355,7 @@ export interface ThreadResumeParams {
 }
 
 /** thread/resume response — schema v2/ThreadResumeResponse.json. */
-export interface ThreadResumeResult {
-  thread: { id: string };
-}
+export type ThreadResumeResult = ThreadSettingsResult;
 
 export interface ThreadBackgroundTerminalsCleanParams {
   threadId: string;
@@ -346,6 +367,14 @@ export interface ThreadDeleteParams {
 }
 
 // ── SandboxPolicy ──────────────────────────────────────────────────
+
+/** The `type` discriminators of `SandboxPolicy`, in the order the schema lists them. */
+export const SANDBOX_POLICY_TYPES = [
+  "dangerFullAccess",
+  "readOnly",
+  "externalSandbox",
+  "workspaceWrite",
+] as const;
 
 export type SandboxPolicy =
   | { type: "dangerFullAccess" }
