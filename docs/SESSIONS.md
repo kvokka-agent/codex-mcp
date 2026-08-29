@@ -7,8 +7,9 @@ How the five tools are used together. Each tool's inputs are in
 
 ```text
 1. codex(prompt=…, approvalPolicy=…, sandbox=…)   → { sessionId, status: "running" }
-2. codex_check(action="poll", waitMs=300000)      → status, progress, actions[]
-3. write progress.activity out where the person waiting reads it
+2. codex_check(action="poll", waitMs=300000)      → status, progress, actions[], warnings[]
+3. write progress.activity and every new warnings[] entry out where the person
+   waiting reads them
 4. answer every entry of actions[]                → respond_permission / respond_user_input
 5. repeat 2 until status is idle, error or cancelled
 6. read result from the check that first saw the terminal status
@@ -22,10 +23,11 @@ the session.
 ## Checking
 
 `codex_check(action="poll")` answers at once. With `waitMs` it holds the call
-until the status changes, an action arrives, the turn ends, or Codex says it is
-working on something new — one call covering a stretch that would otherwise be
-dozens of round trips. Message deltas, reasoning, command output and token
-counters move nothing the caller reports and do not end the wait.
+until the status changes, an action arrives, the turn ends, a new warning
+arrives, or Codex says it is working on something new — one call covering a
+stretch that would otherwise be dozens of round trips. Message deltas,
+reasoning, command output and token counters move nothing the caller reports and
+do not end the wait.
 
 `waitedMs` says how long the call was held, and `progress.activityStandingMs` how
 long the session has been on the line it answers with. A caller that polls in
@@ -87,6 +89,27 @@ whenever it starts something new, in the language of the request.
 Every extracted line is also appended to the session's `events.jsonl` as an
 `activity` record, so a reader of the state directory gets the sequence of what
 a session was doing without reading the raw stream around it.
+
+### When it is doing nothing
+
+A turn can be quiet because it is blocked rather than because it is thinking, and
+the marker cannot say so — a model writing nothing writes no marker either. What
+the backend says instead arrives in `warnings[]`, each entry
+`{ method, message, at }`:
+
+- `warning` and `guardianWarning` — free text the backend wrote for the person.
+- `model/safetyBuffering/updated` — the model's output is being held back, with
+  the reasons the backend named.
+- `hook/completed` — a hook of the user's own `~/.codex` config blocked, failed
+  or was stopped, with whatever the hook said about it.
+
+A `hook/started` or `hook/completed` that carries a `statusMessage` its author
+wrote for display — "Loading the engineering rules" — also stands in
+`progress.activity`, but only while the turn has written no marker of its own.
+Codex's own words always win, and the next turn starts the hooks speaking again.
+
+The five newest warnings are kept and the backend repeating one adds no entry, so
+a hook that fires per tool call costs one line, not one per call.
 
 ### While the call is still held
 

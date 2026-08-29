@@ -692,6 +692,107 @@ export interface ConfigWarningNotificationParams {
   range?: TextRange | null;
 }
 
+/**
+ * `warning` — free text the backend wants shown to the person, with no code and
+ * no structure to branch on.
+ */
+export interface WarningNotificationParams {
+  message: string;
+  threadId?: string | null;
+}
+
+/** `guardianWarning` — the same free text from the approvals reviewer. */
+export interface GuardianWarningNotificationParams {
+  message: string;
+  threadId: string;
+}
+
+/**
+ * `model/safetyBuffering/updated` — the backend is holding the model's output
+ * back, and `reasons` names why. `showBufferingUi` is the backend saying whether
+ * the person is meant to be told.
+ */
+export interface ModelSafetyBufferingUpdatedNotificationParams {
+  model: string;
+  reasons: string[];
+  showBufferingUi: boolean;
+  threadId: string;
+  turnId: string;
+  useCases: string[];
+  fasterModel?: string | null;
+}
+
+/** Which lifecycle point of a turn a hook is configured to run at. */
+export type HookEventName =
+  | "preToolUse"
+  | "permissionRequest"
+  | "postToolUse"
+  | "preCompact"
+  | "postCompact"
+  | "sessionStart"
+  | "sessionEnd"
+  | "userPromptSubmit"
+  | "subagentStart"
+  | "subagentStop"
+  | "stop"
+  | "interrupt";
+
+/** `blocked` and `stopped` are a hook holding the turn back; `failed` is one that broke. */
+export type HookRunStatus = "running" | "completed" | "failed" | "blocked" | "stopped";
+
+export type HookOutputEntryKind = "warning" | "stop" | "feedback" | "context" | "error";
+
+/** One line a hook wrote for display, tagged with what kind of line it is. */
+export interface HookOutputEntry {
+  kind: HookOutputEntryKind;
+  text: string;
+}
+
+/** Where the hook was configured. The schema defaults it to `unknown`. */
+export type HookSource =
+  | "system"
+  | "user"
+  | "project"
+  | "mdm"
+  | "sessionFlags"
+  | "plugin"
+  | "cloudRequirements"
+  | "cloudManagedConfig"
+  | "legacyManagedConfigFile"
+  | "legacyManagedConfigMdm"
+  | "unknown";
+
+/** One run of one hook, as `hook/started` and `hook/completed` report it. */
+export interface HookRunSummary {
+  id: string;
+  displayOrder: number;
+  entries: HookOutputEntry[];
+  eventName: HookEventName;
+  executionMode: "sync" | "async";
+  handlerType: "command" | "mcpTool" | "prompt" | "agent";
+  scope: "thread" | "turn";
+  /** Absolute, normalized path of the file the hook was configured in. */
+  sourcePath: string;
+  /** Unix milliseconds. */
+  startedAt: number;
+  status: HookRunStatus;
+  /** The line the hook's author wrote for display. Null when they wrote none. */
+  statusMessage?: string | null;
+  completedAt?: number | null;
+  durationMs?: number | null;
+  source?: HookSource;
+}
+
+/**
+ * `hook/started` and `hook/completed`, which carry the same shape. `turnId` is
+ * absent for a hook whose `scope` is the thread.
+ */
+export interface HookNotificationParams {
+  run: HookRunSummary;
+  threadId: string;
+  turnId?: string | null;
+}
+
 // ── Legacy Approval (deprecated) ───────────────────────────────────
 
 export interface LegacyApprovalResponse {
@@ -758,4 +859,9 @@ export const Methods = {
   ACCOUNT_LOGIN_COMPLETED: "account/login/completed",
   DEPRECATION_NOTICE: "deprecationNotice",
   CONFIG_WARNING: "configWarning",
+  WARNING: "warning",
+  GUARDIAN_WARNING: "guardianWarning",
+  MODEL_SAFETY_BUFFERING_UPDATED: "model/safetyBuffering/updated",
+  HOOK_STARTED: "hook/started",
+  HOOK_COMPLETED: "hook/completed",
 } as const;

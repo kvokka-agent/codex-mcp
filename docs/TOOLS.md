@@ -91,7 +91,8 @@ Every action answers with the same payload:
   "progress": { "phase": "acting", "lastEventAt": "…", "activeTurnId": "…", "pendingActionCount": 0, "tokens": {}, "activity": "Fixing the failing session-manager test" },
   "interactionState": "working",
   "recommendedNextAction": "poll",
-  "actions": []
+  "actions": [],
+  "warnings": []
 }
 ```
 
@@ -134,6 +135,16 @@ The payload's parts:
 - `actions[]` — what the caller must answer, each with its `requestId`, `kind`
   (`command`, `fileChange`, `user_input`), the backend's raw `params`, and the
   amendment context a command approval offers.
+- `warnings[]` — why the turn is producing no output, oldest first, each
+  `{ method, message, at }`. `method` is the app-server notification that carried
+  it: `warning` and `guardianWarning` for free text the backend wrote,
+  `model/safetyBuffering/updated` for a model whose output is being held back and
+  the reasons named for it, and `hook/completed` for a hook of the user's own
+  codex config that blocked, failed or was stopped. Report these beside
+  `progress.activity`: the activity line is what the turn is doing, a warning is
+  what stands in its way. The five newest are kept, each cut to 400 characters,
+  and a backend repeating the standing one refreshes its `at` rather than adding
+  an entry.
 - `result` — the finished turn's answer, carried by every check that sees a
   terminal status. `result.outcome` says how the turn ended — `completed`,
   `error` or `cancelled` — as the server saw it end. A caller that lost the
@@ -145,8 +156,9 @@ The payload's parts:
   absent otherwise.
 
 `waitMs` long-polls: the call returns when the status changes, an action
-arrives, the turn ends, or Codex says it is working on something new. Reasoning,
-command output, message deltas and token counters do not end the wait.
+arrives, the turn ends, a new warning arrives, or Codex says it is working on
+something new. Reasoning, command output, message deltas, token counters and a
+warning the backend has already sent do not end the wait.
 
 A round of `300000` is what the driver is written for: the caller writes
 `progress.activity` out after each round and calls again, so the person waiting
@@ -154,9 +166,9 @@ reads the work as it happens. `3600000` is this server's own maximum, and a
 round that long says nothing for an hour when the turn stays on one line.
 
 A poll that carries `_meta.progressToken` also gets `notifications/progress`
-while it is held — the standing line, each new line, and the standing line again
-every 30 s (`CODEX_MCP_PROGRESS_HEARTBEAT_MS`) with how long it has stood. Those
-reach the client that made the call and nobody else.
+while it is held — the standing line, each new line, each new warning, and the
+standing line again every 30 s (`CODEX_MCP_PROGRESS_HEARTBEAT_MS`) with how long
+it has stood. Those reach the client that made the call and nobody else.
 
 What ends an otherwise silent wait is the MCP client, which cuts a tool call
 that runs too long. The server returns 5 seconds inside that ceiling with the

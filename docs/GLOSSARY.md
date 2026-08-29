@@ -79,6 +79,18 @@ backend reported, and the activity.
 carried as `progress.activity`. It is a heading, not a percentage: the newest
 line overwrites the one before it, and nothing accumulates.
 
+**warning** — one thing the backend said about a turn that is producing no
+output, carried in `warnings[]`: a `warning` or `guardianWarning` message, a
+model whose output is being held back, or a hook that blocked the turn. The
+activity says what the turn is doing; a warning says what stands in its way. The
+five newest are kept.
+
+**hook** — a command, prompt or agent the user configured in their own `~/.codex`
+config to run at a point of a turn. Codex reports each run as `hook/started` and
+`hook/completed`; the line its author wrote for display stands in the activity
+while the turn has written no marker, and a run that blocked the turn becomes a
+warning.
+
 **progress notification** — `notifications/progress`, sent to a client that put
 `_meta.progressToken` on its call, while that call is still being held. It
 carries one activity line as its `message`, which is what the client shows under
