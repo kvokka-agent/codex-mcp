@@ -61,6 +61,7 @@ import {
   type SessionSignal,
   type SessionStartResult,
   type SessionStatus,
+  type SessionWarning,
   type SummaryMode,
   type TurnResult,
   WAITING_APPROVAL_POLL_INTERVAL,
@@ -81,6 +82,13 @@ import {
   stripActivityMarkersFromTurn,
 } from "./activity-marker.js";
 import type { PidDetails } from "./persistence.js";
+import {
+  bufferingWarningMessage,
+  displayText,
+  hookActivityLine,
+  hookWarningMessage,
+  MAX_SESSION_WARNINGS,
+} from "./warnings.js";
 
 /**
  * Pages of `thread/backgroundTerminals/list` one call reads. The cursor is
@@ -1508,6 +1516,7 @@ export class SessionManager {
         Array.from(new Set(actions.map((action) => action.type)))
       ),
       actions,
+      warnings: warningsOf(session),
       result: this.terminalTurnResult(sessionId),
     };
   }
@@ -1946,10 +1955,112 @@ export class SessionManager {
         this.onThreadStatusChanged(session, method, p);
         break;
 
+      case Methods.WARNING:
+      case Methods.GUARDIAN_WARNING:
+        this.onWarningNotification(session, method, p);
+        break;
+
+      case Methods.MODEL_SAFETY_BUFFERING_UPDATED:
+        this.onSafetyBufferingUpdated(session, method, p);
+        break;
+
+      case Methods.HOOK_STARTED:
+      case Methods.HOOK_COMPLETED:
+        this.onHookNotification(session, method, p);
+        break;
+
       default:
         // Ignore other notifications (account, config, etc.)
         break;
     }
+  }
+
+  /**
+   * `warning` and `guardianWarning` — free text the backend wrote for the person.
+   *
+   * There is no code and no structure on either notification to act on, so the
+   * message is the whole of it and it goes where a waiting caller reads it.
+   */
+  private onWarningNotification(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    recordEvent(session, "progress", { method, ...p });
+    this.recordWarning(session, method, displayText(p.message));
+  }
+
+  /**
+   * `model/safetyBuffering/updated` — a named reason the turn is answering nothing.
+   *
+   * `showBufferingUi` is the backend deciding whether the person is meant to be
+   * told, so a buffering it marks silent stays in the event log and out of the
+   * check answer.
+   */
+  private onSafetyBufferingUpdated(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    recordEvent(session, "progress", { method, ...p });
+    if (p.showBufferingUi !== true) return;
+    this.recordWarning(session, method, bufferingWarningMessage(p));
+  }
+
+  /**
+   * `hook/started` and `hook/completed` — the intervals a hook of the user's own
+   * codex config holds the turn for.
+   *
+   * Two things come off a run. A hook that blocked, failed or was stopped is a
+   * turn held with nothing else said about why, so it becomes a warning. The
+   * `statusMessage` its author wrote is a line for display, so it stands where
+   * `progress.activity` stands — but only while the turn has written no marker
+   * of its own, because a hook says nothing about what the model is doing.
+   */
+  private onHookNotification(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    recordEvent(session, "progress", { method, ...p });
+    if (!isRecord(p.run)) return;
+    const run = p.run;
+    this.recordWarning(session, method, hookWarningMessage(run));
+
+    const line = hookActivityLine(run);
+    if (line === undefined || markerStands(session)) return;
+    if (session.progressState?.activity === line) return;
+    recordActivity(session, line, normalizeOptionalString(run.id), true);
+    this.notifyWaiters(session.sessionId);
+  }
+
+  /**
+   * Keep one thing the backend said about a quiet turn, and wake what is waiting.
+   *
+   * The backend repeating itself said nothing new: the standing entry keeps its
+   * place with a fresh instant, `warningSeq` does not move, and the poll holding
+   * this session sleeps on. Anything new moves `warningSeq`, which `signalOf`
+   * carries, so the poll answers with it — a warning is the only thing that will
+   * be said while a turn stalls, and a caller holding a long window would
+   * otherwise never learn why.
+   */
+  private recordWarning(session: SessionInfo, method: string, message?: string): void {
+    if (message === undefined) return;
+    const warnings = session.warnings ?? [];
+    const standing = warnings[warnings.length - 1];
+    const at = new Date().toISOString();
+    if (standing?.method === method && standing.message === message) {
+      standing.at = at;
+      return;
+    }
+    warnings.push({ method, message, at });
+    while (warnings.length > MAX_SESSION_WARNINGS) warnings.shift();
+    session.warnings = warnings;
+    session.warningSeq = (session.warningSeq ?? 0) + 1;
+    // The same listeners the activity line reaches: a held poll shows the person
+    // waiting why nothing is arriving, without waiting for the poll to return.
+    notifyActivityListeners(session, message);
+    this.notifyWaiters(session.sessionId);
   }
 
   /** `item/commandExecution/outputDelta` — the stream shell profile noise is cut from. */
@@ -3018,15 +3129,6 @@ function scannerOf(session: SessionInfo): ActivityMarkerScanner {
   return scanner;
 }
 
-/**
- * Record what Codex said it is doing: overwrite the one line a poll reports,
- * stamp when it arrived, and append one `activity` record to the session's
- * events.jsonl.
- *
- * The caller wakes the long-poll waiters after it — `signalOf` carries the line,
- * so a poll answers with each new heading and the person waiting reads the work
- * as it happens. One line per heading is what travels, not the turn's stream.
- */
 /** What a turn may override for the session it continues. */
 interface TurnOverrides {
   model?: string;
@@ -3157,6 +3259,7 @@ function onTurnStarted(session: SessionInfo, method: string, p: Record<string, u
   if (session.progressState) {
     session.progressState.activity = undefined;
     session.progressState.activityAt = undefined;
+    session.progressState.activityFromHook = undefined;
   }
   recordEvent(session, "progress", {
     method,
@@ -3204,15 +3307,54 @@ function onItemNotification(
   });
 }
 
-function recordActivity(session: SessionInfo, activity: string, itemId?: string): void {
+/**
+ * Record what the session is doing: overwrite the one line a poll reports, stamp
+ * when it arrived, and append one `activity` record to the session's
+ * events.jsonl.
+ *
+ * The caller wakes the long-poll waiters after it — `signalOf` carries the line,
+ * so a poll answers with each new heading and the person waiting reads the work
+ * as it happens. One line per heading is what travels, not the turn's stream.
+ *
+ * `fromHook` marks a line a hook wrote rather than one Codex wrote, which is
+ * what `markerStands` reads to keep a hook off a marker's place.
+ */
+function recordActivity(
+  session: SessionInfo,
+  activity: string,
+  itemId?: string,
+  fromHook = false
+): void {
   const next = session.progressState ?? { lastEventAt: new Date().toISOString() };
   next.activity = activity;
   next.activityAt = new Date().toISOString();
+  next.activityFromHook = fromHook;
   session.progressState = next;
-  recordEvent(session, "activity", { activity, turnId: session.activeTurnId, itemId });
+  recordEvent(session, "activity", { activity, turnId: session.activeTurnId, itemId, fromHook });
+  notifyActivityListeners(session, activity);
+}
+
+/**
+ * The turn has written a marker and the line standing is that marker.
+ *
+ * A hook line fills the silence before the turn says anything of its own; once
+ * the turn has spoken, its own words are the standing line for the rest of it.
+ */
+function markerStands(session: SessionInfo): boolean {
+  const state = session.progressState;
+  return state?.activity !== undefined && state.activityFromHook !== true;
+}
+
+/** A copy of what the backend said about this session, oldest first. */
+function warningsOf(session: SessionInfo): SessionWarning[] {
+  return (session.warnings ?? []).map((warning) => ({ ...warning }));
+}
+
+/** Tell everyone holding a call open on this session one line about it. */
+function notifyActivityListeners(session: SessionInfo, line: string): void {
   for (const listener of activityListeners.get(session) ?? []) {
     try {
-      listener(activity);
+      listener(line);
     } catch (err: unknown) {
       // A listener writes to a client this server does not own. Its failure is
       // the caller's to survive, and the turn goes on either way.
@@ -3276,6 +3418,8 @@ function signalOf(session: SessionInfo): string {
     openRequests,
     session.lastResult?.completedAt ?? "",
     session.progressState?.activityAt ?? "",
+    // Each new warning moves this; the backend repeating one does not.
+    String(session.warningSeq ?? 0),
   ].join("|");
 }
 

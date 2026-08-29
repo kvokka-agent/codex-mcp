@@ -142,6 +142,16 @@ delivered the closing sentinel as `"%%"` then `"%\n"`. The scanner decides on
 the concatenation of the deltas and holds at most eleven characters between
 markers, or 480 inside one.
 
+**What fills the silence before it.** A hook of the user's own codex config
+writes a `statusMessage` for display — `hooks/list` on Codex CLI 0.150.1 answers
+one carrying `"Loading the engineering rules"` — and `hook/started` and
+`hook/completed` carry it. That line stands in `activity` only while the turn has
+written no marker of its own: `progressState.activityFromHook` records which of
+the two the standing line came from, a marker always overwrites a hook line, and
+a hook line never overwrites a marker. `turn/started` clears both, so each turn
+starts with the hooks speaking again until Codex does. Whatever the hook rate,
+the session keeps one line.
+
 **Why it wakes a long poll.** `signalOf` carries the instant the line arrived, so
 each new heading ends the wait and the poll answers with it. That is what the
 person waiting reads: the caller writes the line out and polls again, and a turn
@@ -149,6 +159,36 @@ of an hour reads as a list of what the work was on rather than as an hour of
 silence. A turn writes a handful of headings, so the round trips stay in the
 handful too — the deltas, the reasoning and the token counters underneath them
 move `signalOf` not at all.
+
+### Why a turn is quiet
+
+The marker is a scrape: it reports what Codex wrote, and a turn blocked,
+throttled or held by a hook writes nothing. Four notifications say why on the
+wire, and each becomes one entry of `warnings[]` on the `codex_check` answer —
+`{ method, message, at }`, the method being the one that carried it.
+
+| Notification | What becomes a warning |
+| --- | --- |
+| `warning` | The `message`, which is free text with no code to branch on |
+| `guardianWarning` | The `message`, the same way |
+| `model/safetyBuffering/updated` | The model and the `reasons`, when `showBufferingUi` is true. The flag is the backend deciding whether the person is told, so a buffering it marks silent stays in the event log alone |
+| `hook/completed` | A run whose `status` is `blocked`, `failed` or `stopped`: its `eventName`, its `status`, its `statusMessage` and the `stop`, `error` and `warning` entries it wrote |
+
+The message is free text this server did not write, so `redactPaths` runs over
+it before it is stored, the same as on the error path.
+
+**The bound.** A `preToolUse` hook fires once per tool call and the backend sends
+a `warning` whenever it wants to, and neither rate is measured. So a session
+holds a ring of the five newest warnings, each cut to 400 characters, and the
+backend repeating the standing one refreshes its `at` and adds no entry.
+
+**Why a new one wakes a long poll.** `signalOf` carries `warningSeq`, which
+counts the entries recorded. While a turn stalls, a warning is the only thing
+that will be said, and a caller holding a window of minutes would otherwise
+learn why only after the window ran out. A repeat moves `warningSeq` not at all,
+so a hook repeating itself per tool call wakes a poll once. A warning also
+travels to the activity listeners, so a held call's `notifications/progress`
+carries it before the poll it wakes returns.
 
 ## The event log
 
@@ -188,6 +228,10 @@ log at `data.method`.
 | `thread/closed`, `thread/compacted` | progress | Neither is a failure |
 | `thread/archived`, `thread/unarchived`, `thread/name/updated`, `thread/tokenUsage/updated` | progress | |
 | `deprecationNotice`, `configWarning` | progress | |
+| `warning`, `guardianWarning` | progress | Also one `warnings[]` entry on the check answer |
+| `model/safetyBuffering/updated` | progress | A `warnings[]` entry when `showBufferingUi` is true |
+| `hook/started` | progress | The run's `statusMessage` stands in `activity` while the turn has written no marker |
+| `hook/completed` | progress | The same, plus a `warnings[]` entry for a run that blocked, failed or was stopped |
 | `model/rerouted` | progress | |
 | `fuzzyFileSearch/sessionUpdated`, `fuzzyFileSearch/sessionCompleted` | progress | |
 | `windows/worldWritableWarning` | progress | |

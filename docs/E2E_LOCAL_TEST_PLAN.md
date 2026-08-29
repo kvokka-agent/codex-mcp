@@ -268,12 +268,12 @@ For `codex_reply`, required:
 
 After `codex` or `codex_reply`:
 
-1. Check with `codex_check(action="poll")`. Every action — `poll`, `respond_permission`, `respond_user_input` — answers with the same payload: `{ sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }`.
+1. Check with `codex_check(action="poll")`. Every action — `poll`, `respond_permission`, `respond_user_input` — answers with the same payload: `{ sessionId, status, progress, actions[], warnings[], result?, interactionState, recommendedNextAction }`.
 2. No check returns the events of the turn. Codex writes the whole run to its rollout log under `~/.codex/sessions/**/rollout-*.jsonl`, and codex-mcp writes its own view to `events.jsonl` in the state directory. Read either from disk; the tool reports state.
 3. Terminal statuses are `idle`, `error`, `cancelled`. `abandoned` also ends the turn, but the session is resumable rather than finished.
 4. `result` arrives with the first check that sees a terminal status and carries the turn's final answer. Every later check of that terminal session carries the same result again.
-5. `waitMs` long-polls: the call blocks until the status changes, a new action arrives, or the turn ends. Reasoning, command output and token counters do not end the wait. It is capped at `3600000` ms and cut further to what the MCP client sits through in one tool call, and a session accepts 4 concurrent long polls — the fifth returns immediately instead of waiting.
-6. `progress` reports `phase`, `lastEventAt`, `activeTurnId`, `pendingActionCount`, `tokens` when the backend reports them, and `activity` — one line in Codex's own words saying what it is doing, absent until the turn writes one. `interactionState` and `recommendedNextAction` tell you what to call next.
+5. `waitMs` long-polls: the call blocks until the status changes, a new action arrives, a new warning arrives, or the turn ends. Reasoning, command output and token counters do not end the wait. It is capped at `3600000` ms and cut further to what the MCP client sits through in one tool call, and a session accepts 4 concurrent long polls — the fifth returns immediately instead of waiting.
+6. `progress` reports `phase`, `lastEventAt`, `activeTurnId`, `pendingActionCount`, `tokens` when the backend reports them, and `activity` — one line in Codex's own words saying what it is doing, or the line a hook wrote while the turn has written none, absent until one of them arrives. `warnings[]` says why a turn is producing no output at all. `interactionState` and `recommendedNextAction` tell you what to call next.
 7. Inputs the tool no longer takes — `cursor`, `nextCursor`, `maxEvents`, `responseMode`, `pollOptions` — are refused with a message naming what replaced them.
 
 codex-mcp does not poll the app-server. The backend pushes JSON-RPC notifications as they happen, and the only recurring timer in the server is the once-a-minute TTL sweep. During long reasoning phases 30-60+ seconds with no notification is normal.
@@ -632,7 +632,18 @@ Checks:
 2. Poll a turn that stays on one line for longer than the window. Expect `waitedMs` at the window, the same `progress.activity`, and `progress.activityStandingMs` grown by about the window.
 3. Poll with `_meta.progressToken` set. Expect a `notifications/progress` for the standing line, one per new line, and one every 30 s carrying the standing line with how long it has stood. Set `CODEX_MCP_PROGRESS_HEARTBEAT_MS=5000` and expect the repeat every five seconds instead.
 
-## 7.7 Restart Recovery And Orphan Reaping
+## 7.7 Why a turn is quiet
+
+Requires a hook in the user's own `~/.codex` config; `hooks/list` on the installed CLI shows what is configured.
+
+Checks:
+
+1. Configure a `preToolUse` hook carrying a `statusMessage` and start a turn. Expect `progress.activity` to read that message before Codex writes its first marker, and to be replaced by the marker when it arrives — the hook line does not come back for the rest of that turn.
+2. Configure a hook that refuses the command it is asked about. Expect `warnings[]` to carry an entry whose `method` is `hook/completed` and whose `message` names the event, the `blocked` status and whatever the hook said.
+3. Poll with `waitMs: 300000` while such a hook fires. Expect the call to answer on the warning rather than sitting out the window, and a repeat of the same warning not to end a later wait.
+4. Confirm `<STATE_DIR>/sessions/<sessionId>/events.jsonl` carries a `progress` record for every `hook/started` and `hook/completed`, whether or not it reached `warnings[]`.
+
+## 7.8 Restart Recovery And Orphan Reaping
 
 Requires control over the server process, so run it only when you launched codex-mcp yourself.
 

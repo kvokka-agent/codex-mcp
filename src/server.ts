@@ -396,6 +396,18 @@ const checkToolOutputShape = {
     )
     .optional()
     .describe("What the caller must answer. Empty while the turn needs nothing."),
+  warnings: z
+    .array(
+      z.object({
+        method: z.string(),
+        message: z.string(),
+        at: z.string(),
+      })
+    )
+    .optional()
+    .describe(
+      "Why the turn is producing no output, newest last: a backend warning, a model buffering reason, or a hook that blocked it. Report these beside progress.activity — the activity line is what the turn is doing, a warning is what stands in its way."
+    ),
   result: z
     .object({
       turnId: z.string(),

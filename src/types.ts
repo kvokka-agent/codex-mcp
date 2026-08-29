@@ -187,6 +187,22 @@ export interface ProgressInfo {
   activityStandingMs?: number;
 }
 
+/**
+ * One thing the backend said about a turn that is producing no output.
+ *
+ * The message is free text this server did not write — a backend warning, a
+ * named safety-buffering reason, a hook that blocked the turn — so it is
+ * path-redacted before it leaves the process. It says why the session is quiet;
+ * `progress.activity` says what the session is doing.
+ */
+export interface SessionWarning {
+  /** The app-server method that carried it, so a caller can tell the kinds apart. */
+  method: string;
+  message: string;
+  /** When it arrived. A repeat of the standing line refreshes this and adds no entry. */
+  at: string;
+}
+
 export type SessionEventType =
   | "output"
   | "progress"
@@ -259,7 +275,18 @@ export interface SessionInfo {
     activity?: string;
     /** When that line arrived, which is how long the session has been on it. */
     activityAt?: string;
+    /**
+     * The standing line came from a hook, not from an activity marker.
+     *
+     * A marker overwrites a hook line and a hook line never overwrites a marker,
+     * so the turn's own words win for as long as it writes any.
+     */
+    activityFromHook?: boolean;
   };
+  /** The newest warnings, oldest first, capped at `MAX_SESSION_WARNINGS`. */
+  warnings?: SessionWarning[];
+  /** How many warnings this session has recorded, which is what wakes a long poll. */
+  warningSeq?: number;
   /** Developer instructions the thread was started with, reused when it is forked or resumed. */
   developerInstructions?: string;
   /**
@@ -441,6 +468,13 @@ export interface CheckResult {
   recommendedNextAction: RecommendedNextAction;
   /** What the caller must answer. Empty while the turn needs nothing. */
   actions: PendingAction[];
+  /**
+   * Why the turn is producing no output, newest last. Empty while nothing said so.
+   *
+   * A caller writes these out beside `progress.activity`: the activity line is
+   * what the turn is doing, and a warning is what is standing in its way.
+   */
+  warnings: SessionWarning[];
   /** The final answer of the turn, carried by the first check that sees it. */
   result?: TurnResult;
   /**
