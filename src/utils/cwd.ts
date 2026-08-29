@@ -4,8 +4,8 @@
  * - Resolves relative paths against a provided base (not process.cwd()).
  * - Ensures the resolved path exists and is a directory.
  */
-import { existsSync, statSync } from "fs";
-import path from "path";
+import { existsSync, statSync } from "node:fs";
+import path from "node:path";
 import { ErrorCode } from "../types.js";
 
 export function resolveAndValidateCwd(inputCwd: string | undefined, baseCwd: string): string {

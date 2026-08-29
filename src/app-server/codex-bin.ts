@@ -8,8 +8,8 @@
  * When `codexIsPath` is true, the value is treated as a direct filesystem path
  * and PATH resolution is skipped.
  */
-import { existsSync, readFileSync } from "fs";
-import path from "path";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { stripSurroundingQuotes } from "../utils/strip-quotes.js";
 
 export interface CodexInvocation {
@@ -93,7 +93,7 @@ function resolveWindowsInvocation(codexArgs: string[], ctx: ResolverContext): Co
     ".cmd",
     ".bat",
   ]);
-  if (shim && shim.toLowerCase().endsWith(".exe")) {
+  if (shim?.toLowerCase().endsWith(".exe")) {
     return { cmd: shim, args: codexArgs, spawnedViaCmd: false };
   }
 

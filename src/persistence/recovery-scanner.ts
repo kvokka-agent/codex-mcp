@@ -6,11 +6,11 @@
  * - Reads result.json if present
  * - Returns recovered sessions for the SessionManager to ingest
  */
-import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { isMissing } from "./fs-errors.js";
-import { ownerState, readOwner, type OwnerState } from "./session-owner.js";
+import { type OwnerState, ownerState, readOwner } from "./session-owner.js";
 
 /**
  * The version of the session directory format. Version 3 records the owner of the

@@ -2,22 +2,22 @@
  * codex_check tool — report session status and answer what it waits for.
  */
 import type { SessionManager } from "../session/manager.js";
+import {
+  ALL_DECISIONS,
+  type ApprovalDecision,
+  type CheckAction,
+  type CheckResult,
+  ErrorCode,
+  MAX_LONG_POLL_WAIT_MS,
+  type NetworkPolicyAmendment,
+  type SessionSignal,
+} from "../types.js";
 import { PollWindow } from "../utils/poll-window.js";
 import {
   activityLine,
   heartbeatIntervalMs,
   type ProgressReporter,
 } from "../utils/progress-notifier.js";
-import {
-  ALL_DECISIONS,
-  ErrorCode,
-  MAX_LONG_POLL_WAIT_MS,
-  type NetworkPolicyAmendment,
-  type ApprovalDecision,
-  type CheckAction,
-  type CheckResult,
-  type SessionSignal,
-} from "../types.js";
 
 export interface CodexCheckParams {
   action: CheckAction;

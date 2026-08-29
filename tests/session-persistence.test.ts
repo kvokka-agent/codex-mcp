@@ -1,6 +1,6 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { isoMsAgo } from "./helpers/clock.js";
 import { mockModule } from "./helpers/mock.js";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 /** Injected failures, keyed by `${call}\0${path}`, holding the errno code to raise. */
 const { fsFaults } = {
@@ -56,12 +56,11 @@ mockModule("node:fs", realModule1, () => {
   };
 });
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-import { SessionPersistence, startDiskPersistence } from "../src/session/persistence.js";
 import { SCHEMA_VERSION } from "../src/persistence/index.js";
+import { SessionPersistence, startDiskPersistence } from "../src/session/persistence.js";
 import type { SessionInfo } from "../src/types.js";
 
 let root: string;

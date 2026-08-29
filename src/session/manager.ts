@@ -1,84 +1,84 @@
 /**
  * SessionManager — manages Codex session lifecycle, status and approval flow.
  */
-import { randomUUID } from "crypto";
-import { isAbsolute } from "path";
+import { randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { AppServerClient } from "../app-server/client.js";
 import type { ICodexClient } from "../app-server/client-interface.js";
 import type { AppServerSpawnOptions } from "../app-server/lifecycle.js";
-import type { PidDetails } from "./persistence.js";
+import {
+  type CommandApprovalParams,
+  type CommandApprovalResponse,
+  type DynamicToolCallResponse,
+  type FileChangeApprovalResponse,
+  type LegacyApprovalResponse,
+  Methods,
+  type RequestId,
+  type TurnStartParams,
+  toSandboxPolicy,
+  type UserInput,
+  type UserInputRequestResponse,
+} from "../app-server/protocol.js";
 import {
   describeOwner,
-  ownerState,
-  readOwner,
   type OwnerState,
+  ownerState,
   type RecoveredSession,
+  readOwner,
 } from "../persistence/index.js";
+import {
+  type ApprovalPolicy,
+  type CheckResult,
+  CLEANUP_INTERVAL_MS,
+  type CleanableStatus,
+  COMMAND_DECISIONS,
+  DEFAULT_APPROVAL_TIMEOUT_MS,
+  DEFAULT_IDLE_CLEANUP_MS,
+  DEFAULT_POLL_INTERVAL,
+  DEFAULT_RUNNING_CLEANUP_MS,
+  DEFAULT_TERMINAL_CLEANUP_MS,
+  type EffortLevel,
+  ErrorCode,
+  FILE_CHANGE_DECISIONS,
+  type LastTurnInfo,
+  MAX_LONG_POLL_WAIT_MS,
+  type NetworkPolicyAmendment,
+  type PendingAction,
+  type PendingRequest,
+  type Personality,
+  type ProgressInfo,
+  type ProgressPhase,
+  type ProgressTokens,
+  type PublicSessionInfo,
+  type SandboxMode,
+  SESSION_STATUSES,
+  type SensitiveSessionInfo,
+  type SessionEventType,
+  type SessionInfo,
+  type SessionOwnership,
+  type SessionSignal,
+  type SessionStartResult,
+  type SessionStatus,
+  type SummaryMode,
+  type TurnResult,
+  WAITING_APPROVAL_POLL_INTERVAL,
+} from "../types.js";
 import { resolveAndValidateCwd } from "../utils/cwd.js";
-import { redactPaths } from "../utils/redact.js";
 import { interactionStateForStatus, recommendedNextActionForStatus } from "../utils/execution.js";
 import { resolveAndValidateFilePath } from "../utils/files.js";
-import {
-  ActivityMarkerScanner,
-  composeDeveloperInstructions,
-  stripActivityMarkers,
-  stripActivityMarkersFromTurn,
-} from "./activity-marker.js";
+import { redactPaths } from "../utils/redact.js";
 import {
   buildEffortFallbackWarning,
   classifyTurnCompatibilityError,
   toFriendlyTurnCompatibilityError,
 } from "../utils/turn-compat.js";
 import {
-  type RequestId,
-  type CommandApprovalParams,
-  type CommandApprovalResponse,
-  type FileChangeApprovalResponse,
-  type UserInputRequestResponse,
-  type DynamicToolCallResponse,
-  type LegacyApprovalResponse,
-  type TurnStartParams,
-  type UserInput,
-  Methods,
-  toSandboxPolicy,
-} from "../app-server/protocol.js";
-import {
-  type ApprovalPolicy,
-  type EffortLevel,
-  type Personality,
-  type SessionInfo,
-  type SessionOwnership,
-  type SessionSignal,
-  type SessionStatus,
-  type SandboxMode,
-  type SummaryMode,
-  type PublicSessionInfo,
-  type SensitiveSessionInfo,
-  type SessionEventType,
-  type PendingRequest,
-  type ProgressInfo,
-  type ProgressPhase,
-  type ProgressTokens,
-  type SessionStartResult,
-  type CheckResult,
-  type PendingAction,
-  type TurnResult,
-  type LastTurnInfo,
-  type NetworkPolicyAmendment,
-  ErrorCode,
-  SESSION_STATUSES,
-  type CleanableStatus,
-  COMMAND_DECISIONS,
-  FILE_CHANGE_DECISIONS,
-  DEFAULT_POLL_INTERVAL,
-  WAITING_APPROVAL_POLL_INTERVAL,
-  MAX_LONG_POLL_WAIT_MS,
-  DEFAULT_APPROVAL_TIMEOUT_MS,
-  DEFAULT_IDLE_CLEANUP_MS,
-  DEFAULT_RUNNING_CLEANUP_MS,
-  DEFAULT_TERMINAL_CLEANUP_MS,
-  CLEANUP_INTERVAL_MS,
-} from "../types.js";
+  ActivityMarkerScanner,
+  composeDeveloperInstructions,
+  stripActivityMarkers,
+  stripActivityMarkersFromTurn,
+} from "./activity-marker.js";
+import type { PidDetails } from "./persistence.js";
 
 const AUTH_REFRESH_UNSUPPORTED_CODE = -32000;
 const AUTH_REFRESH_UNSUPPORTED_MESSAGE =

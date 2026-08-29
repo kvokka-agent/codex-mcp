@@ -1,16 +1,16 @@
-import { mockModule } from "./helpers/mock.js";
-import { EventEmitter } from "events";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, jest } from "bun:test";
+import { EventEmitter } from "node:events";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { PassThrough } from "stream";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, jest } from "bun:test";
+import { PassThrough } from "node:stream";
 import { Methods } from "../src/app-server/protocol.js";
 import { _resetForTesting } from "../src/utils/codex-executable.js";
+import { mockModule } from "./helpers/mock.js";
 
 const spawnMock = jest.fn();
 
-const realModule1 = { ...(await import("child_process")) };
+const realModule1 = { ...(await import("node:child_process")) };
 mockModule("child_process", realModule1, () => {
   const actual = realModule1;
   return { ...actual, spawn: spawnMock };
@@ -58,7 +58,7 @@ function createMockProcess() {
       const msg = JSON.parse(line) as { id?: number; method?: string };
       if (msg.id && msg.method === "initialize") {
         const resp = JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { userAgent: "mock" } });
-        proc.stdout.write(Buffer.from(resp + "\n", "utf8"));
+        proc.stdout.write(Buffer.from(`${resp}\n`, "utf8"));
       }
     }
 

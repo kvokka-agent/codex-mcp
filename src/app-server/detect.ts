@@ -4,7 +4,7 @@
  * Falls back to exec mode when app-server is unavailable.
  * Can be overridden via CODEX_MCP_MODE env var.
  */
-import { spawn, type ChildProcess } from "child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { resolveCodexInvocation } from "./codex-bin.js";
 
 export type ClientMode = "app-server" | "exec";

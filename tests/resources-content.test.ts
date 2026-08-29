@@ -1,9 +1,9 @@
-import { mockModule } from "./helpers/mock.js";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { EventEmitter } from "node:events";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { mockModule } from "./helpers/mock.js";
 
 /**
  * `detectCodexCliVersion` shells out to `codex --version`; the stub keeps the suite off the
@@ -17,7 +17,7 @@ const spawnState = {
   ) => unknown,
 };
 
-const realModule1 = { ...(await import("child_process")) };
+const realModule1 = { ...(await import("node:child_process")) };
 mockModule("child_process", realModule1, () => {
   const actual = realModule1;
   return {
@@ -32,6 +32,7 @@ mockModule("child_process", realModule1, () => {
 
 const { createServer } = await import("../src/server.js");
 const { Methods } = await import("../src/app-server/protocol.js");
+
 import type { SessionDefaults } from "../src/utils/session-defaults.js";
 
 const { registerResources, RESOURCE_URIS } = await import("../src/resources/register-resources.js");

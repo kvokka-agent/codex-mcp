@@ -1,8 +1,8 @@
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
+import type { RecoveredSession } from "../src/persistence/index.js";
+import { reapOrphanProcesses } from "../src/session/orphan-reaper.js";
 import { advanceAsync, msAgo } from "./helpers/clock.js";
 import { mockModule } from "./helpers/mock.js";
-import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
-import { reapOrphanProcesses } from "../src/session/orphan-reaper.js";
-import type { RecoveredSession } from "../src/persistence/index.js";
 
 const { execSyncMock, spawnMock, readFileSyncMock, uptimeMock } = {
   execSyncMock: jest.fn(),

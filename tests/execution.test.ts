@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import type { ProgressInfo } from "../src/types.js";
 import {
   coerceProgressForStatus,
   interactionStateForStatus,
   recommendedNextActionForStatus,
 } from "../src/utils/execution.js";
-import { type ProgressInfo } from "../src/types.js";
 
 describe("interactionStateForStatus", () => {
   it("maps every status to its interaction state", () => {

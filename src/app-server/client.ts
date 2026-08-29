@@ -4,34 +4,34 @@
  * Manages a single codex app-server child process via stdio.
  * Handles request/response correlation, notifications, and server-initiated requests.
  */
-import { spawn, type ChildProcess } from "child_process";
-import { EventEmitter } from "events";
+import { type ChildProcess, spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { ErrorCode } from "../types.js";
+import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
+import { LineReader, readChildOutput } from "./child-stdio.js";
+import type { ICodexClient } from "./client-interface.js";
+import { resolveCodexInvocation } from "./codex-bin.js";
+import { type AppServerSpawnOptions, buildAppServerArgs } from "./lifecycle.js";
 import {
-  type RequestId,
-  type JsonRpcRequest,
-  type JsonRpcResponse,
-  type JsonRpcNotification,
-  type JsonRpcMessage,
   type InitializeParams,
   type InitializeResult,
-  type ThreadStartParams,
-  type ThreadStartResult,
+  type JsonRpcMessage,
+  type JsonRpcNotification,
+  type JsonRpcRequest,
+  type JsonRpcResponse,
+  Methods,
+  type RequestId,
+  type ThreadBackgroundTerminalsCleanParams,
   type ThreadForkParams,
   type ThreadForkResult,
   type ThreadResumeParams,
   type ThreadResumeResult,
-  type ThreadBackgroundTerminalsCleanParams,
+  type ThreadStartParams,
+  type ThreadStartResult,
+  type TurnInterruptParams,
   type TurnStartParams,
   type TurnStartResult,
-  type TurnInterruptParams,
-  Methods,
 } from "./protocol.js";
-import { buildAppServerArgs, type AppServerSpawnOptions } from "./lifecycle.js";
-import { resolveCodexInvocation } from "./codex-bin.js";
-import { LineReader, readChildOutput } from "./child-stdio.js";
-import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
-import { ErrorCode } from "../types.js";
-import type { ICodexClient } from "./client-interface.js";
 
 declare const __PKG_VERSION__: string;
 const CLIENT_VERSION = typeof __PKG_VERSION__ !== "undefined" ? __PKG_VERSION__ : "0.0.0-dev";
@@ -288,7 +288,7 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   private send(msg: JsonRpcMessage): void {
     if (!this.process?.stdin) throw new Error("app-server process not started");
     if (!this.process.stdin.writable) throw new Error("app-server stdin not writable");
-    const payload = JSON.stringify(msg) + "\n";
+    const payload = `${JSON.stringify(msg)}\n`;
     this.enqueueWrite(payload);
   }
 

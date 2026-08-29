@@ -9,8 +9,8 @@
  *
  * CODEX_MCP_PATH and CODEX_MCP_COMMAND are mutually exclusive.
  */
-import { accessSync, constants, existsSync, statSync } from "fs";
-import path from "path";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
+import path from "node:path";
 import { stripSurroundingQuotes } from "./strip-quotes.js";
 
 // ── Env var names ─────────────────────────────────────────────────

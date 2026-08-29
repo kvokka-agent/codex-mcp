@@ -1,8 +1,8 @@
-import { mockModule } from "./helpers/mock.js";
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import path from "path";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { mockModule } from "./helpers/mock.js";
 
 /**
  * `statSync` is the only dependency whose failure mode cannot be produced from a real
@@ -11,7 +11,7 @@ import path from "path";
  */
 const fsState = { statError: null as Error | null };
 
-const realModule1 = { ...(await import("fs")) };
+const realModule1 = { ...(await import("node:fs")) };
 mockModule("fs", realModule1, () => {
   const actual = realModule1;
   return {

@@ -3,31 +3,31 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerResources } from "./resources/register-resources.js";
 import { SessionManager, type SessionManagerOptions } from "./session/manager.js";
 import { executeCodex } from "./tools/codex.js";
+import { executeCodexCheck } from "./tools/codex-check.js";
 import { executeCodexReply } from "./tools/codex-reply.js";
 import { executeCodexSession } from "./tools/codex-session.js";
-import { executeCodexCheck } from "./tools/codex-check.js";
 import { executeCodexSetup } from "./tools/codex-setup.js";
-import { registerResources } from "./resources/register-resources.js";
 import {
+  ALL_DECISIONS,
   APPROVAL_POLICIES,
-  SANDBOX_MODES,
-  PERSONALITIES,
+  CHECK_ACTIONS,
+  CLEANABLE_STATUSES,
   EFFORT_LEVELS,
-  SUMMARY_MODES,
+  ErrorCode,
+  MAX_LONG_POLL_WAIT_MS,
+  PERSONALITIES,
+  SANDBOX_MODES,
   SESSION_ACTIONS,
   SESSION_STATUSES,
-  CLEANABLE_STATUSES,
-  CHECK_ACTIONS,
-  ALL_DECISIONS,
-  MAX_LONG_POLL_WAIT_MS,
-  ErrorCode,
+  SUMMARY_MODES,
 } from "./types.js";
 import { PollWindow } from "./utils/poll-window.js";
-import { resolveSessionDefaults, type SessionDefaults } from "./utils/session-defaults.js";
 import { progressReporterFor } from "./utils/progress-notifier.js";
 import { redactPaths } from "./utils/redact.js";
+import { resolveSessionDefaults, type SessionDefaults } from "./utils/session-defaults.js";
 import { classifyTurnCompatibilityError, compatibilityErrorMessage } from "./utils/turn-compat.js";
 
 declare const __PKG_VERSION__: string;

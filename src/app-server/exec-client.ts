@@ -6,34 +6,34 @@
  * and transforms JSONL stdout events into the app-server notification format
  * that SessionManager expects.
  */
-import { spawn, type ChildProcess } from "child_process";
-import { writeFileSync, mkdtempSync, rmSync } from "fs";
-import { EventEmitter } from "events";
-import { randomUUID } from "crypto";
-import { tmpdir } from "os";
-import { join } from "path";
+import { type ChildProcess, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ErrorCode } from "../types.js";
+import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
+import { LineReader, readChildOutput } from "./child-stdio.js";
 import type { ICodexClient } from "./client-interface.js";
+import { resolveCodexInvocation } from "./codex-bin.js";
 import type { AppServerSpawnOptions } from "./lifecycle.js";
 import {
-  type RequestId,
   type InitializeResult,
-  type ThreadStartParams,
-  type ThreadStartResult,
+  Methods,
+  type RequestId,
+  type SandboxPolicy,
+  type ThreadBackgroundTerminalsCleanParams,
   type ThreadForkParams,
   type ThreadForkResult,
   type ThreadResumeParams,
   type ThreadResumeResult,
-  type ThreadBackgroundTerminalsCleanParams,
+  type ThreadStartParams,
+  type ThreadStartResult,
+  type TurnInterruptParams,
   type TurnStartParams,
   type TurnStartResult,
-  type TurnInterruptParams,
-  type SandboxPolicy,
-  Methods,
 } from "./protocol.js";
-import { resolveCodexInvocation } from "./codex-bin.js";
-import { LineReader, readChildOutput } from "./child-stdio.js";
-import { ErrorCode } from "../types.js";
-import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 
 type NotificationHandler = (method: string, params: unknown) => void;
 type ServerRequestHandler = (id: RequestId, method: string, params: unknown) => void;
@@ -280,7 +280,6 @@ export class ExecClient extends EventEmitter implements ICodexClient {
 
   // Handlers
   private notificationHandler: NotificationHandler | null = null;
-  private serverRequestHandler: ServerRequestHandler | null = null;
 
   private lines = new LineReader();
 
@@ -431,9 +430,12 @@ export class ExecClient extends EventEmitter implements ICodexClient {
     this.notificationHandler = handler;
   }
 
-  onServerRequest(handler: ServerRequestHandler): void {
-    this.serverRequestHandler = handler;
-  }
+  /**
+   * `codex exec` raises no server-initiated requests, so the handler this
+   * registers would never be called; keeping it would claim exec mode can
+   * deliver an approval request.
+   */
+  onServerRequest(_handler: ServerRequestHandler): void {}
 
   /**
    * `codex exec` raises no server-initiated requests, so there is no request to

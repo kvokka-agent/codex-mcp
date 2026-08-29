@@ -15,7 +15,7 @@ import { readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { atomicWriteJson } from "./atomic-writer.js";
-import { START_TIME_SLOP_MS, identifyProcess, ownStartedAt, probePid } from "./process-identity.js";
+import { identifyProcess, ownStartedAt, probePid, START_TIME_SLOP_MS } from "./process-identity.js";
 
 /** The file a session's owner writes into the session directory. */
 const OWNER_FILE = "owner.json";

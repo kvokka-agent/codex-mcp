@@ -1,9 +1,9 @@
-import { mockModule } from "./helpers/mock.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_EFFORT_LEVEL } from "../src/types.js";
+import { mockModule } from "./helpers/mock.js";
 
 /**
  * `detectCodexCliVersion` runs the resolved executable with `--version` under a
@@ -15,7 +15,7 @@ const cliVersionRun = {
   result: { status: 0, stdout: "codex-cli 0.52.0", stderr: "" } as unknown,
 };
 
-const realModule1 = { ...(await import("child_process")) };
+const realModule1 = { ...(await import("node:child_process")) };
 mockModule("child_process", realModule1, () => {
   const actual = realModule1;
   return {

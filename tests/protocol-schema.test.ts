@@ -7,19 +7,19 @@
  * `codex` CLI therefore fails this file wherever the model drifted.
  */
 
-import { mockModule } from "./helpers/mock.js";
+import { describe, expect, it, jest } from "bun:test";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
-import { describe, expect, it, jest } from "bun:test";
 import type { AppServerSpawnOptions } from "../src/app-server/lifecycle.js";
 import { Methods } from "../src/app-server/protocol.js";
+import { mockModule } from "./helpers/mock.js";
 
 const spawnMock = jest.fn();
 
-const realModule1 = { ...(await import("child_process")) };
+const realModule1 = { ...(await import("node:child_process")) };
 mockModule("child_process", realModule1, () => {
   const actual = realModule1;
   return { ...actual, spawn: spawnMock };
@@ -390,7 +390,7 @@ async function captureInitializeParams(): Promise<JsonObject> {
   proc.stdout.emit(
     "data",
     Buffer.from(
-      JSON.stringify({ jsonrpc: "2.0", id: line.id, result: { userAgent: "mock" } }) + "\n",
+      `${JSON.stringify({ jsonrpc: "2.0", id: line.id, result: { userAgent: "mock" } })}\n`,
       "utf8"
     )
   );

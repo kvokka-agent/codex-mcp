@@ -1,23 +1,23 @@
-import { spawnSync } from "child_process";
+import { spawnSync } from "node:child_process";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
 import type { SessionManager } from "../session/manager.js";
 import {
   APPROVAL_POLICIES,
-  SANDBOX_MODES,
-  EFFORT_LEVELS,
   DEFAULT_APPROVAL_TIMEOUT_MS,
   DEFAULT_EFFORT_LEVEL,
-  MAX_LONG_POLL_WAIT_MS,
   DEFAULT_IDLE_CLEANUP_MS,
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
+  EFFORT_LEVELS,
   ErrorCode,
+  MAX_LONG_POLL_WAIT_MS,
+  SANDBOX_MODES,
 } from "../types.js";
+import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 import type { SessionDefaults } from "../utils/session-defaults.js";
 import { SESSION_DEFAULT_ENV } from "../utils/session-defaults.js";
 import { resolveStdioMode } from "../utils/stdio-guard.js";
-import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 
 const RESOURCE_SCHEME = "codex-mcp";
 

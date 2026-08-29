@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { createServer } from "../src/server.js";
 import { RESOURCE_URIS } from "../src/resources/register-resources.js";
+import { createServer } from "../src/server.js";
 import { SESSION_DEFAULT_ENV } from "../src/utils/session-defaults.js";
 
 type RequestHandler = (req: unknown, extra: unknown) => Promise<unknown>;

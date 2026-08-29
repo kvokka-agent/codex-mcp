@@ -1,7 +1,7 @@
 /**
  * Retention policy — prune old session directories by age, count, and disk size.
  */
-import { readdirSync, rmSync, statSync, readFileSync, type Dirent } from "node:fs";
+import { type Dirent, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { isMissing } from "./fs-errors.js";

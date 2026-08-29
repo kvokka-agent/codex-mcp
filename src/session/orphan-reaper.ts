@@ -19,10 +19,10 @@
 import { spawn } from "node:child_process";
 import type { RecoveredSession } from "../persistence/index.js";
 import {
-  UNKNOWN_PROCESS,
   identifyProcess,
-  probePid,
   type ProcessCheck,
+  probePid,
+  UNKNOWN_PROCESS,
 } from "../persistence/process-identity.js";
 
 export interface ReapSummary {

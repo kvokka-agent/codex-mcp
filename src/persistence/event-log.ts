@@ -46,7 +46,7 @@ export class EventLog {
   append(event: unknown, criticality: EventCriticality = "normal"): number {
     if (this.destroyed) return -1;
     const seq = this.nextSeq++;
-    const line = JSON.stringify({ seq, ...(event as Record<string, unknown>) }) + "\n";
+    const line = `${JSON.stringify({ seq, ...(event as Record<string, unknown>) })}\n`;
     this.buffer.push({ line });
 
     if (criticality === "critical") {

@@ -4,21 +4,22 @@
  * Uses shared primitives (atomic writer, event log, recovery scanner, retention)
  * to persist session state across MCP server restarts.
  */
-import { join } from "node:path";
-import { mkdirSync, existsSync, rmSync } from "node:fs";
+
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 
 import {
   atomicWriteJson,
   claimSession,
-  releaseSession,
-  EventLog,
   type EventCriticality,
-  scanRecoverableSessions,
+  EventLog,
   pruneSessionDirs,
-  SCHEMA_VERSION,
   type RecoveredSession,
   type RetentionPolicy,
+  releaseSession,
+  SCHEMA_VERSION,
+  scanRecoverableSessions,
 } from "../persistence/index.js";
 
 import type {
@@ -26,8 +27,8 @@ import type {
   EffortLevel,
   Personality,
   SandboxMode,
-  SessionInfo,
   SessionEventType,
+  SessionInfo,
   SummaryMode,
 } from "../types.js";
 

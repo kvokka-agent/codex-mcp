@@ -17,8 +17,8 @@
  * unsolicited line.
  */
 
-import { PROGRESS_HEARTBEAT_MS } from "../types.js";
 import type { ProgressInfo } from "../types.js";
+import { PROGRESS_HEARTBEAT_MS } from "../types.js";
 
 /** The token the client put on its request, which every notification quotes back. */
 export type ProgressToken = string | number;

@@ -5,19 +5,20 @@
  * The session manager is real; only the app-server client is a stand-in, so
  * every asserted value is produced by the code under test.
  */
-import { useFakeClock } from "./helpers/clock.js";
-import { EventEmitter } from "events";
-import os from "os";
-import path from "path";
+
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
+import { EventEmitter } from "node:events";
+import os from "node:os";
+import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
 import { executeCodexCheck } from "../src/tools/codex-check.js";
-import { POLL_WINDOW_MARGIN_MS, PollWindow } from "../src/utils/poll-window.js";
-import { DEFAULT_APPROVAL_TIMEOUT_MS, MAX_LONG_POLL_WAIT_MS } from "../src/types.js";
-import { ProgressReporter, type ProgressNotification } from "../src/utils/progress-notifier.js";
 import type { CheckResult } from "../src/types.js";
+import { DEFAULT_APPROVAL_TIMEOUT_MS, MAX_LONG_POLL_WAIT_MS } from "../src/types.js";
+import { POLL_WINDOW_MARGIN_MS, PollWindow } from "../src/utils/poll-window.js";
+import { type ProgressNotification, ProgressReporter } from "../src/utils/progress-notifier.js";
+import { useFakeClock } from "./helpers/clock.js";
 
 class MockClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;

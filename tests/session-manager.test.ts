@@ -1,15 +1,15 @@
-import { advanceAsync } from "./helpers/clock.js";
-import { EventEmitter } from "events";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
-import os from "os";
-import path from "path";
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
+import { EventEmitter } from "node:events";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
-import { DEFAULT_POLL_INTERVAL, WAITING_APPROVAL_POLL_INTERVAL } from "../src/types.js";
 import { executeCodexCheck } from "../src/tools/codex-check.js";
+import { DEFAULT_POLL_INTERVAL, WAITING_APPROVAL_POLL_INTERVAL } from "../src/types.js";
+import { advanceAsync } from "./helpers/clock.js";
 
 class MockAppServerClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;

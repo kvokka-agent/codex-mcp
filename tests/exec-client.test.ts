@@ -1,12 +1,11 @@
-import { mockModule, mocked } from "./helpers/mock.js";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
-
 import { EXEC_EVENT_TO_METHOD, ExecClient } from "../src/app-server/exec-client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { _resetForTesting } from "../src/utils/codex-executable.js";
+import { mocked, mockModule } from "./helpers/mock.js";
 
 /** Read a file of the vendored schema bundle, the contract the CLI stream follows. */
 function readSchema(file: string): Record<string, unknown> {
@@ -29,7 +28,7 @@ const TURN_STATUSES: string[] = (
 
 const { spawnMock } = { spawnMock: jest.fn() };
 
-const realModule1 = { ...(await import("child_process")) };
+const realModule1 = { ...(await import("node:child_process")) };
 mockModule("child_process", realModule1, () => {
   const actual = realModule1;
   return { ...actual, spawn: spawnMock };
@@ -83,7 +82,7 @@ function spawnArgs(index = 0): string[] {
 
 /** Feed one JSONL line (plus newline) through the client's stdout pipe. */
 function emitLine(proc: FakeProc, obj: unknown): void {
-  proc.stdout.emit("data", Buffer.from(JSON.stringify(obj) + "\n"));
+  proc.stdout.emit("data", Buffer.from(`${JSON.stringify(obj)}\n`));
 }
 
 async function startedClient(): Promise<{

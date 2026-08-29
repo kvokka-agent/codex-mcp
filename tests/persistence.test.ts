@@ -1,6 +1,6 @@
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { isoMsAgo, msSince, useFakeClock } from "./helpers/clock.js";
 import { mockModule } from "./helpers/mock.js";
-import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 
 /** Injected failures, keyed by `${call}\0${path}`, holding the errno code to raise. */
 const { fsFaults } = { fsFaults: new Map<string, string>() };
@@ -78,8 +78,8 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -90,16 +90,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  EventLog,
-  SCHEMA_VERSION,
   atomicWriteJson,
   claimSession,
   describeOwner,
-  ownStartedAt,
+  EventLog,
   ownerState,
+  ownStartedAt,
   pruneSessionDirs,
   readOwner,
   releaseSession,
+  SCHEMA_VERSION,
   scanRecoverableSessions,
 } from "../src/persistence/index.js";
 import { getDirSize } from "../src/persistence/retention.js";

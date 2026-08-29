@@ -6,8 +6,7 @@
  * rather than importing it. `tests/helpers/fake-codex.mjs` stands in for the
  * codex CLI, which keeps the runs hermetic.
  */
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { execFileSync } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -129,11 +128,12 @@ export class ServerProcess {
 
   private onStdout(chunk: string): void {
     this.buffer += chunk;
-    let index: number;
-    while ((index = this.buffer.indexOf("\n")) !== -1) {
+    let index = this.buffer.indexOf("\n");
+    while (index !== -1) {
       const line = this.buffer.slice(0, index).trim();
       this.buffer = this.buffer.slice(index + 1);
       if (line) this.receive(JSON.parse(line) as ServerMessage);
+      index = this.buffer.indexOf("\n");
     }
   }
 
@@ -157,7 +157,7 @@ export class ServerProcess {
   }
 
   private send(msg: unknown): void {
-    this.child.stdin.write(JSON.stringify(msg) + "\n");
+    this.child.stdin.write(`${JSON.stringify(msg)}\n`);
   }
 
   request(method: string, params: unknown, timeoutMs = 30_000): Promise<unknown> {

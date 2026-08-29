@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync } from "fs";
-import os from "os";
-import path from "path";
 import { afterEach, describe, expect, it, jest } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { SessionManager } from "../src/session/manager.js";
 import { executeCodex } from "../src/tools/codex.js";
 import type { SessionDefaults } from "../src/utils/session-defaults.js";

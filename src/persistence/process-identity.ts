@@ -119,7 +119,7 @@ function getWmicCreationTimeMs(pid: number): number | null {
       timeout: 5000,
     }).toString();
     const match = raw.match(/CreationDate=(\d{14})\.\d+([+-]\d{1,4})/);
-    if (!match || !match[1] || !match[2]) return null;
+    if (!match?.[1] || !match[2]) return null;
     const s = match[1];
     const iso = `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T${s.slice(8, 10)}:${s.slice(10, 12)}:${s.slice(12, 14)}.000Z`;
     const ms = new Date(iso).getTime();
@@ -297,7 +297,7 @@ function readPosixProcess(pid: number): LiveProcess | null {
  */
 export function identifyProcess(pid: number, startedAt: string): ProcessCheck {
   const recordedMs = new Date(startedAt).getTime();
-  if (isNaN(recordedMs)) return UNKNOWN_PROCESS;
+  if (Number.isNaN(recordedMs)) return UNKNOWN_PROCESS;
 
   if (process.platform === "win32") {
     const procMs = getWindowsCreationTimeMs(pid);

@@ -1,9 +1,8 @@
-import { advanceAsync } from "./helpers/clock.js";
-import { EventEmitter } from "events";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
-import os from "os";
-import path from "path";
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
+import { EventEmitter } from "node:events";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { SessionManager } from "../src/session/manager.js";
@@ -13,6 +12,7 @@ import {
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
 } from "../src/types.js";
+import { advanceAsync } from "./helpers/clock.js";
 
 class MockClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;

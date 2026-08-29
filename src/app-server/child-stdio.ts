@@ -2,8 +2,8 @@
  * Reading the stdio of a codex child process: the line framing both clients
  * parse JSONL out of, and the stderr both put on this process's stderr.
  */
-import type { ChildProcess } from "child_process";
-import { StringDecoder } from "string_decoder";
+import type { ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 
 /**
  * Splits a child's stdout into whole lines.

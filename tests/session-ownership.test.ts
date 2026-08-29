@@ -1,15 +1,15 @@
 /**
  * Who owns a session, what an abandoned one looks like, and what resuming it does.
  */
-import { EventEmitter } from "events";
+
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
-
+import { ownStartedAt } from "../src/persistence/process-identity.js";
 import { SessionManager } from "../src/session/manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
-import { ownStartedAt } from "../src/persistence/process-identity.js";
 import { ErrorCode } from "../src/types.js";
 
 class MockClient extends EventEmitter {
