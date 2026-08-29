@@ -19,9 +19,9 @@ Starts a session and returns as soon as the thread does. Poll it with
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `prompt` | string | yes | — |
-| `approvalPolicy` | `untrusted` \| `on-failure` \| `on-request` \| `never` | unless `CODEX_MCP_DEFAULT_APPROVAL_POLICY` is set | that variable |
+| `approvalPolicy` | `untrusted` \| `on-request` \| `never` | unless `CODEX_MCP_DEFAULT_APPROVAL_POLICY` is set | that variable |
 | `sandbox` | `read-only` \| `workspace-write` \| `danger-full-access` | unless `CODEX_MCP_DEFAULT_SANDBOX` is set | that variable |
-| `effort` | `none` \| `minimal` \| `low` \| `medium` \| `high` \| `xhigh` | no | `CODEX_MCP_DEFAULT_EFFORT`, else `low` |
+| `effort` | any non-empty string; Codex 0.150.1 advertises `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | no | `CODEX_MCP_DEFAULT_EFFORT`, else `low` |
 | `cwd` | string | no | the server's cwd |
 | `model` | string | no | `CODEX_MCP_DEFAULT_MODEL`, else config.toml |
 | `profile` | string | no | the CLI's default profile |
@@ -78,10 +78,6 @@ An override sticks. `effort`, `summary` and `personality` travel on every turn
 rather than living on the thread, so the session remembers the newest value and
 later turns — including the first turn after a resume — run with it instead of
 falling back to `config.toml`.
-
-In `exec` mode a `sandbox`, `cwd` or `outputSchema` override after the first
-turn cannot be applied — `codex exec resume` takes no such flag — and the
-response says so in `compatWarnings`.
 
 ## `codex_check` — where it stands, and answering it
 
@@ -206,16 +202,17 @@ that ended, absent until one does. `status` says what the session is now and
 it alone, so a session closed after it answered reads `status: "cancelled"` with
 `lastTurn.outcome: "completed"`.
 
-`resume` and `fork` need app-server mode. In `exec` mode both fail with
-`THREAD_FORK_RESUME_FAILED` carrying `EXEC_NOT_SUPPORTED`.
-
 ## `codex_setup` — is this machine ready
 
 Takes an optional `cwd` and answers `ready`, the resolved `executable`, the
 `auth` state (`authenticated`, `unauthenticated` or `unknown`, from
-`codex login status`), the `runtime` (backend mode and state directory),
-`projectContext` (whether a user and a project `config.toml` exist), and
-`warnings` with `nextSteps`.
+`codex login status`), the `backend` (the Codex CLI version `codex --version`
+printed, the minimum this server drives, and whether the one found clears it),
+the `runtime` (state directory), `projectContext` (whether a user and a project
+`config.toml` exist), and `warnings` with `nextSteps`.
+
+`ready` is true only when all three clear: the executable resolves, the login
+probe answered `authenticated`, and the CLI is at or above `minimumCliVersion`.
 
 A binary named `codex-internal` skips the login probe and reports
 `auth.state: "unknown"`.
@@ -236,7 +233,6 @@ A binary named `codex-internal` skips the login probe and reports
 | `THREAD_FORK_RESUME_FAILED` | Fork or resume did not take; the message carries the backend's reason |
 | `PROTOCOL_PARSE_ERROR` | A non-JSON line arrived from the backend — usually shell noise on its stdout |
 | `WRITE_QUEUE_DROPPED` | The backend stopped reading stdin and the queued writes were dropped |
-| `EXEC_NOT_SUPPORTED` | The action needs app-server mode |
 | `INTERNAL` | Anything else; filesystem paths in the message are replaced by `<path>` |
 
 `TIMEOUT` and `APP_SERVER_START_FAILED` are declared and carried by the
@@ -248,7 +244,7 @@ A client that reads MCP resources gets seven, all read-only:
 
 | URI | Type | What it holds |
 | --- | --- | --- |
-| `codex-mcp:///server-info` | JSON | Version, detected Codex CLI version, backend mode, platform, stdio mode, the supported enums, active session count |
+| `codex-mcp:///server-info` | JSON | Version, detected Codex CLI version and the minimum this server drives, platform, stdio mode, the supported enums, active session count |
 | `codex-mcp:///compat-report` | JSON | Which features this build carries, for a client adapting to it |
 | `codex-mcp:///config` | Markdown | Parameter guide and the `config.toml` mapping |
 | `codex-mcp:///gotchas` | Markdown | The practical limits and the traps |

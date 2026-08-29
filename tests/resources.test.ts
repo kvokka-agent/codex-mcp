@@ -13,7 +13,7 @@ import { present } from "./helpers/present.js";
  * decides what the binary answered instead.
  */
 const cliVersionRun = {
-  result: { status: 0, stdout: "codex-cli 0.52.0", stderr: "" } as unknown,
+  result: { status: 0, stdout: "codex-cli 0.150.1", stderr: "" } as unknown,
 };
 
 const realModule1 = { ...(await import("node:child_process")) };
@@ -80,7 +80,6 @@ function pinEnv(overrides: Record<string, string | undefined>): void {
 function collect(
   overrides: {
     version?: string;
-    clientMode?: string;
     activeSessions?: number;
     observedModel?: string;
     diskPersistence?: boolean;
@@ -108,7 +107,6 @@ function collect(
 
   registerResources(fakeServer as never, {
     version: overrides.version ?? "0.0.0-test",
-    clientMode: overrides.clientMode ?? "app-server",
     diskPersistence: overrides.diskPersistence ?? true,
     sessionDefaults: {
       effort: DEFAULT_EFFORT_LEVEL,
@@ -156,7 +154,7 @@ describe("resources", () => {
 
   beforeEach(() => {
     envBackup = Object.fromEntries(PINNED_ENV_KEYS.map((key) => [key, process.env[key]]));
-    cliVersionRun.result = { status: 0, stdout: "codex-cli 0.52.0", stderr: "" };
+    cliVersionRun.result = { status: 0, stdout: "codex-cli 0.150.1", stderr: "" };
     pinEnv({ PATH: emptyBinDir, CODEX_MCP_PATH: process.execPath, CODEX_MCP_STDIO_MODE: "strict" });
   });
 
@@ -190,39 +188,33 @@ describe("resources", () => {
   });
 
   it("reports the running process and the injected runtime in server-info", () => {
-    const registered = collect({ version: "9.9.9-test", clientMode: "exec", activeSessions: 7 });
+    const registered = collect({ version: "9.9.9-test", activeSessions: 7 });
     const payload = readJson(resource(registered, RESOURCE_URIS.serverInfo));
 
     expect(payload.name).toBe("codex-mcp");
     expect(payload.version).toBe("9.9.9-test");
-    expect(payload.clientMode).toBe("exec");
     expect(payload.runtime).toBe(`bun v${process.versions.bun}`);
     expect(payload.platform).toBe(process.platform);
     expect(payload.arch).toBe(process.arch);
     expect(payload.stdioMode).toBe("strict");
-    expect(payload.codexCliVersion).toBe("0.52.0");
+    expect(payload.codexCliVersion).toBe("0.150.1");
     expect(payload.activeSessions).toBe(7);
     expect(payload.defaultModel).toBe("o4-mini");
     expect(payload.defaultModelSource).toBe("session-default");
 
-    expect(payload.supportedApprovalPolicies).toEqual([
-      "untrusted",
-      "on-failure",
-      "on-request",
-      "never",
-    ]);
+    expect(payload.supportedApprovalPolicies).toEqual(["untrusted", "on-request", "never"]);
     expect(payload.supportedSandboxModes).toEqual([
       "read-only",
       "workspace-write",
       "danger-full-access",
     ]);
-    expect(payload.supportedEffortLevels).toEqual([
-      "none",
-      "minimal",
+    expect(payload.advertisedEffortLevels).toEqual([
       "low",
       "medium",
       "high",
       "xhigh",
+      "max",
+      "ultra",
     ]);
 
     const advertised = payload.resources as Array<{
@@ -270,7 +262,7 @@ describe("resources", () => {
     expect(runtime, "compat report has no runtime block").toBeDefined();
     expect(runtime.codexMcpVersion).toBe("9.9.9-test");
     expect(runtime.activeSessions).toBe(7);
-    expect(runtime.codexCliVersion).toBe("0.52.0");
+    expect(runtime.codexCliVersion).toBe("0.150.1");
 
     // toolCounts.core is compared against the tools the server really registers in
     // tests/tools-list.test.ts; here only its shape is fixed.

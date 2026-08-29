@@ -1,14 +1,16 @@
 /**
- * ICodexClient — abstract interface for codex client implementations.
+ * ICodexClient — what a session's codex backend must answer.
  *
- * Both AppServerClient (JSON-RPC over stdio) and ExecClient (codex exec --json)
- * implement this interface, allowing SessionManager to work with either backend.
+ * `AppServerClient` is the implementation the server runs on. The interface is
+ * also the type of `SessionManagerOptions.createClient`, so a test stands its
+ * own client in without spawning a child process.
  */
 import type { AppServerSpawnOptions } from "./lifecycle.js";
 import type {
   InitializeResult,
   RequestId,
   ThreadBackgroundTerminalsCleanParams,
+  ThreadDeleteParams,
   ThreadForkParams,
   ThreadForkResult,
   ThreadResumeParams,
@@ -23,23 +25,8 @@ import type {
 export interface ICodexClient {
   readonly destroyed: boolean;
 
-  /**
-   * Whether the client supports cwd/sandbox/profile overrides on subsequent turns.
-   * AppServerClient: always true (app-server supports per-turn overrides).
-   * ExecClient: false after the first turn (exec resume does not support -s/-p/-C).
-   */
-  readonly supportsTurnOverrides: boolean;
-
   /** PID of the spawned codex process, undefined before start or after exit. */
   readonly childPid: number | undefined;
-
-  /**
-   * Names of the overrides the last started turn asked for and the backend did
-   * not apply (for example "sandbox" when `codex exec resume` takes no `-s`).
-   * Empty when every requested override reached the backend. Read it after
-   * `turnStart` resolves to report what did not take effect.
-   */
-  readonly unappliedTurnOverrides?: readonly string[];
 
   /** Initialize the client (spawn subprocess / prepare resources). */
   start(opts: AppServerSpawnOptions): Promise<InitializeResult>;
@@ -53,15 +40,13 @@ export interface ICodexClient {
   /** Resume a previously forked/saved thread. */
   threadResume(params: ThreadResumeParams): Promise<ThreadResumeResult>;
 
-  /**
-   * Clean background terminals for a thread.
-   *
-   * ExecClient rejects with EXEC_NOT_SUPPORTED: `codex exec` owns no background
-   * terminals to clean.
-   */
+  /** Clean background terminals for a thread. */
   threadBackgroundTerminalsClean(
     params: ThreadBackgroundTerminalsCleanParams
   ): Promise<Record<string, never>>;
+
+  /** Delete a thread and the history Codex keeps for it. */
+  threadDelete(params: ThreadDeleteParams): Promise<Record<string, never>>;
 
   /** Start a new agent turn within a thread. */
   turnStart(params: TurnStartParams, timeout?: number): Promise<TurnStartResult>;
@@ -80,8 +65,7 @@ export interface ICodexClient {
    *
    * Throws when the response was not handed to the backend, so a caller that
    * resolved an approval can undo that instead of reporting a decision codex
-   * never received. ExecClient throws unconditionally: it raises no server
-   * requests, so it has nothing to respond to.
+   * never received.
    */
   respondToServer(id: RequestId, result: unknown): void;
 
@@ -94,11 +78,6 @@ export interface ICodexClient {
   /** EventEmitter subset used by SessionManager. */
   on(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
   on(event: "error", listener: (err: Error) => void): this;
-  /**
-   * A codex process was spawned: its pid and the ISO instant of the spawn.
-   *
-   * AppServerClient emits once per `start()`; ExecClient emits once per turn,
-   * since `codex exec` runs a fresh process for every turn.
-   */
+  /** A codex process was spawned: its pid and the ISO instant of the spawn. Once per `start()`. */
   on(event: "spawn", listener: (pid: number, spawnedAt: string) => void): this;
 }

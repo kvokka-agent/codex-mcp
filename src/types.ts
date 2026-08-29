@@ -7,7 +7,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────
 
-export const APPROVAL_POLICIES = ["untrusted", "on-failure", "on-request", "never"] as const;
+export const APPROVAL_POLICIES = ["untrusted", "on-request", "never"] as const;
 export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
 
 export const SANDBOX_MODES = ["read-only", "workspace-write", "danger-full-access"] as const;
@@ -16,8 +16,16 @@ export type SandboxMode = (typeof SANDBOX_MODES)[number];
 export const PERSONALITIES = ["none", "friendly", "pragmatic"] as const;
 export type Personality = (typeof PERSONALITIES)[number];
 
-export const EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
-export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+/**
+ * The reasoning efforts every model of Codex CLI 0.150.1 answered `model/list`
+ * with, least to most. The set belongs to the model, not to this server, so it
+ * feeds the `effort` description and `codex-mcp:///server-info` and gates
+ * nothing; the backend refuses an effort the chosen model does not advertise.
+ */
+export const ADVERTISED_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
+
+/** Any non-empty reasoning effort. `TurnStartParams.effort` carries it through. */
+export type EffortLevel = string;
 
 export const SUMMARY_MODES = ["auto", "concise", "detailed", "none"] as const;
 export type SummaryMode = (typeof SUMMARY_MODES)[number];
@@ -298,10 +306,8 @@ export interface TurnResult {
    * that did not record one.
    */
   outcome?: TurnOutcome;
-  /** Stable final assistant text for this turn: `output` when the backend sent one, else the last completed agent message. */
+  /** Final assistant text for this turn: the last completed agent message. */
   text?: string;
-  /** `turn.output` as sent. Only `codex exec` sends one; the app-server Turn has no such field. */
-  output?: string;
   structuredOutput?: unknown;
   /** Raw turn object from app-server notifications/responses (shape depends on schema version). */
   turn?: unknown;
@@ -385,7 +391,6 @@ export enum ErrorCode {
   THREAD_FORK_RESUME_FAILED = "THREAD_FORK_RESUME_FAILED",
   PROTOCOL_PARSE_ERROR = "PROTOCOL_PARSE_ERROR",
   WRITE_QUEUE_DROPPED = "WRITE_QUEUE_DROPPED",
-  EXEC_NOT_SUPPORTED = "EXEC_NOT_SUPPORTED",
   INTERNAL = "INTERNAL",
 }
 

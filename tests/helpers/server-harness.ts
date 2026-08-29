@@ -101,7 +101,6 @@ export class ServerProcess {
         ...process.env,
         CODEX_MCP_STATE_DIR: this.stateDir,
         CODEX_MCP_PATH: FAKE_CODEX,
-        CODEX_MCP_MODE: "app-server",
         ...opts.env,
       },
       stdio: ["pipe", "pipe", "pipe"],

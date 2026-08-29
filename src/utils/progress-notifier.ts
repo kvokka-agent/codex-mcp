@@ -116,9 +116,8 @@ export function formatDuration(ms: number): string {
  * long it has been doing it.
  *
  * Codex writes the first half. Where it has written nothing yet — the turn is
- * starting, or the backend is `codex exec`, which takes no activity instruction
- * — the phase stands in its place, so the line still moves and still says the
- * work is alive.
+ * starting — the phase stands in its place, so the line still moves and still
+ * says the work is alive.
  */
 export function activityLine(progress: ProgressInfo, heldMs: number): string {
   const standing = progress.activityStandingMs ?? heldMs;

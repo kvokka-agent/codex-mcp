@@ -47,9 +47,13 @@ describe("resolveSessionDefaults", () => {
     });
   });
 
-  it("refuses an effort level the enum does not define", () => {
-    expect(() => resolveSessionDefaults({ [SESSION_DEFAULT_ENV.effort]: "highest" })).toThrow(
-      `${SESSION_DEFAULT_ENV.effort}="highest" is not a reasoning effort`
+  it("carries through an effort level this server does not know", () => {
+    expect(resolveSessionDefaults({ [SESSION_DEFAULT_ENV.effort]: "ultra" }).effort).toBe("ultra");
+  });
+
+  it("refuses a blank effort level", () => {
+    expect(() => resolveSessionDefaults({ [SESSION_DEFAULT_ENV.effort]: "  " })).toThrow(
+      `${SESSION_DEFAULT_ENV.effort}="  " is not a reasoning effort`
     );
   });
 

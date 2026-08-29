@@ -128,7 +128,7 @@ function stripShellNoise(delta: string): string {
 }
 
 export interface SessionManagerOptions {
-  /** Inject client factory (for tests or to select exec mode). */
+  /** Inject client factory, so a test stands its own client in. */
   createClient?: () => ICodexClient;
   /** Disable background cleanup timer (useful for tests). */
   disableCleanup?: boolean;
@@ -613,8 +613,7 @@ export class SessionManager {
       const startedTurnId = extractTurnId(turnStartResult);
       if (startedTurnId) session.activeTurnId = startedTurnId;
 
-      const unappliedWarning = this.recordTurnOverrides(session, client, overrides, resolvedCwd);
-      if (unappliedWarning) compatWarnings = [...(compatWarnings ?? []), unappliedWarning];
+      this.recordTurnOverrides(session, overrides, resolvedCwd);
     } catch (err) {
       session.status = "error";
       recordEvent(session, "error", {
@@ -1235,9 +1234,17 @@ export class SessionManager {
       };
     } catch (err) {
       const errorMessage = redactPaths(err instanceof Error ? err.message : String(err));
-      console.error(
-        `[codex-mcp] forkSession failed after thread/fork created thread=${forkedThreadId}. The app-server protocol does not currently expose a guaranteed thread-delete RPC, so manual cleanup may be required.`
-      );
+      // The fork is this server's own leftover: `thread/fork` answered, nothing
+      // else ever saw the thread, and the caller gets an error instead of it.
+      // `thread/delete` runs on the original client, which is the process that
+      // created it — the new one is the half that failed.
+      try {
+        await originalClient.threadDelete({ threadId: forkedThreadId });
+      } catch (deleteErr) {
+        console.error(
+          `[codex-mcp] forkSession failed after thread/fork created thread=${forkedThreadId}, and thread/delete did not remove it: ${deleteErr instanceof Error ? deleteErr.message : String(deleteErr)}. It stays in the rollout log until it is deleted there.`
+        );
+      }
       newSession.status = "error";
       try {
         await newClient.destroy();
@@ -1592,63 +1599,26 @@ export class SessionManager {
   }
 
   /**
-   * Record what the turn actually ran with, and name what it could not apply.
+   * Record what the turn actually ran with.
    *
-   * Read after `turnStart` because that is the call the answer describes.
-   * `unappliedTurnOverrides` is the client naming what its command line could
-   * not carry; a client that reports none still says through
-   * `supportsTurnOverrides` that cwd and sandbox do not reach a turn past the
-   * first. The return is the sentence for `compatWarnings`, or nothing when the
-   * turn applied everything it was asked for.
+   * Read after `turnStart` because that is the call the answer describes:
+   * app-server applies every per-turn override, so what the turn was asked for
+   * is what it runs with.
    */
   private recordTurnOverrides(
     session: SessionInfo,
-    client: ICodexClient,
     overrides: TurnOverrides | undefined,
     resolvedCwd: string | undefined
-  ): string | undefined {
-    const canOverride = client.supportsTurnOverrides;
-    const requestedValue: Record<string, string | undefined> = {
-      sandbox: overrides?.sandbox,
-      cwd: resolvedCwd,
-    };
-    const requestedNames = Object.entries(requestedValue)
-      .filter(([, value]) => value !== undefined)
-      .map(([name]) => name);
-    const unapplied = client.unappliedTurnOverrides ?? (canOverride ? [] : requestedNames);
-
-    applyTurnOverrides(
-      session,
-      overrides,
-      resolvedCwd,
-      (name) => canOverride && !unapplied.includes(name)
-    );
+  ): void {
+    applyTurnOverrides(session, overrides, resolvedCwd);
     // The turn runs for minutes and the server can die inside it; what the session
     // now runs with reaches meta.json here rather than at the next status change.
     this.persistSessionIfChanged(session);
-
-    if (unapplied.length === 0) return undefined;
-
-    if (unapplied.includes("outputSchema")) {
-      // The turn output is not schema-constrained, so reading its text as structured
-      // output would hand the caller a shape the model was never asked for.
-      this.schemaConstrainedTurns.delete(session.sessionId);
-    }
-    // A caller narrowing the sandbox and reading `status: "running"` would otherwise
-    // take the narrower permissions for granted while codex keeps writing under the
-    // wider ones.
-    return unappliedTurnWarning(unapplied, requestedValue, {
-      sandbox: session.sandbox,
-      cwd: session.cwd,
-    });
   }
 
   /** `thread/started` — the notification that carries the real thread id. */
   private onThreadStarted(session: SessionInfo, method: string, p: Record<string, unknown>): void {
     const thread = isRecord(p.thread) ? p.thread : undefined;
-    // Update session.threadId if the notification provides a real thread ID
-    // (e.g. ExecClient returns a synthetic ID from threadStart(), then the
-    // real ID arrives via the thread.started JSONL event).
     const notifiedThreadId =
       normalizeOptionalString(p.threadId) ?? normalizeOptionalString(thread?.id);
     if (notifiedThreadId && notifiedThreadId !== session.threadId) {
@@ -1672,8 +1642,7 @@ export class SessionManager {
   private onTurnCompleted(session: SessionInfo, method: string, p: Record<string, unknown>): void {
     const turnObj = p.turn as Record<string, unknown> | undefined;
     const completedTurnId = turnIdOfCompleted(session, turnObj);
-    const rawTurnOutput = outputOfCompleted(turnObj);
-    const finalText = rawTurnOutput ?? session.lastAgentMessageText;
+    const finalText = session.lastAgentMessageText;
     const askedForSchema = this.schemaConstrainedTurns.delete(session.sessionId);
     session.status = "idle";
     session.activeTurnId = undefined;
@@ -1681,20 +1650,14 @@ export class SessionManager {
       turnId: completedTurnId,
       outcome: "completed",
       text: finalText,
-      output: rawTurnOutput,
       structuredOutput: askedForSchema ? parseStructuredOutput(finalText) : undefined,
       // The turn record carries the assistant text a second time, in
-      // `output` or `items[].text`, and that copy has seen no stripping.
+      // `items[].text`, and that copy has seen no stripping.
       turn: stripActivityMarkersFromTurn(p.turn),
       status: turnObj?.status as string | undefined,
       turnError: turnObj?.error,
       completedAt: new Date().toISOString(),
     };
-    // Like `output`, `usage` is ExecClient's addition — it forwards the
-    // `usage` of the exec `turn.completed` record. App-server mode counts
-    // tokens through `thread/tokenUsage/updated` only, so this merge adds
-    // nothing there.
-    mergeProgressTokens(session, extractTokens(turnObj?.usage));
     recordEvent(session, "result", {
       method,
       ...p,
@@ -1855,7 +1818,6 @@ export class SessionManager {
 
       case Methods.ITEM_STARTED:
       case Methods.ITEM_COMPLETED:
-      case Methods.RAW_RESPONSE_ITEM_COMPLETED:
         onItemNotification(session, method, p);
         break;
 
@@ -2080,8 +2042,8 @@ export class SessionManager {
     const { sessionId } = session;
 
     // Persist PID info for orphan detection on the next startup. The client
-    // reports every process it spawns: app-server spawns one in `start()`,
-    // exec spawns one per turn, so the file follows the live child.
+    // reports the process it spawns in `start()`, so the file follows the live
+    // child.
     client.on("spawn", (pid: number, spawnedAt: string) => {
       this.persistSpawnedPid(session, pid, spawnedAt);
     });
@@ -2395,7 +2357,7 @@ function sessionOfRecovered(
       typeof rec.meta.approvalTimeoutMs === "number" ? rec.meta.approvalTimeoutMs : undefined,
     pendingRequests: new Map(),
     lastResult: result,
-    lastAgentMessageText: recoveredAgentMessageText(result),
+    lastAgentMessageText: typeof result?.text === "string" ? result.text : undefined,
     progressState: {
       lastEventAt: lastActiveAt,
       tokens: extractTokens(result?.turn),
@@ -2405,13 +2367,6 @@ function sessionOfRecovered(
       activityAt: rec.lastActivity === undefined ? undefined : lastActiveAt,
     },
   };
-}
-
-/** The answer a recovered turn left, read from whichever field its result carries it in. */
-function recoveredAgentMessageText(result: TurnResult | undefined): string | undefined {
-  if (typeof result?.text === "string") return result.text;
-  if (typeof result?.output === "string") return result.output;
-  return undefined;
 }
 
 /** How a listing names the server holding a session, or nothing when none does. */
@@ -2493,9 +2448,8 @@ function buildProgressInfo(session: SessionInfo): ProgressInfo {
     activeTurnId: session.activeTurnId,
     pendingActionCount: countPendingRequests(session),
     // Every counter the wire carries is merged into progressState as it arrives —
-    // by `thread/tokenUsage/updated`, by the exec turn's `usage`, and by the
-    // restore path. Re-reading the finished turn here would let those older
-    // counters win over a later update.
+    // by `thread/tokenUsage/updated` and by the restore path. Re-reading the
+    // finished turn here would let those older counters win over a later update.
     tokens: session.progressState?.tokens,
     activity: session.progressState?.activity,
     activitySince: session.progressState?.activityAt,
@@ -2618,21 +2572,14 @@ function parseStructuredOutput(text?: string): unknown {
  * The record that carries the token counters.
  *
  * `thread/tokenUsage/updated` nests them under `tokenUsage.total` and
- * `tokenUsage.last` (codex-schema/v2/ThreadTokenUsageUpdatedNotification.json);
- * the exec `token_count` event nests them under `info.total_token_usage` and
- * `info.last_token_usage` (codex-schema/EventMsg.json, TokenCountEventMsg).
- * Cumulative counts win over the last turn's. Other payloads keep the counters
- * in `usage` or in the record itself.
+ * `tokenUsage.last` (codex-schema/v2/ThreadTokenUsageUpdatedNotification.json),
+ * and the cumulative count wins over the last turn's. Other payloads keep the
+ * counters in `usage` or in the record itself.
  */
 function tokenCounterSource(value: Record<string, unknown>): Record<string, unknown> {
   const tokenUsage = isRecord(value.tokenUsage) ? value.tokenUsage : undefined;
   if (tokenUsage) {
     const nested = pickRecord(tokenUsage, ["total", "last"]);
-    if (nested) return nested;
-  }
-  const info = isRecord(value.info) ? value.info : undefined;
-  if (info) {
-    const nested = pickRecord(info, ["total_token_usage", "last_token_usage"]);
     if (nested) return nested;
   }
   return isRecord(value.usage) ? value.usage : value;
@@ -2999,16 +2946,14 @@ function assertSessionAcceptsTurn(session: SessionInfo, sessionId: string): void
 
 /**
  * Put on the session what the turn runs with, so the next turn — and a turn
- * after a resume — starts from it. `reaches` answers whether the client carried
- * that override to this turn at all.
+ * after a resume — starts from it.
  */
 function applyTurnOverrides(
   session: SessionInfo,
   overrides: TurnOverrides | undefined,
-  resolvedCwd: string | undefined,
-  reaches: (name: string) => boolean
+  resolvedCwd: string | undefined
 ): void {
-  if (resolvedCwd && reaches("cwd")) session.cwd = resolvedCwd;
+  if (resolvedCwd) session.cwd = resolvedCwd;
   if (overrides?.model) session.model = overrides.model;
   if (overrides?.approvalPolicy) {
     session.approvalPolicy = overrides.approvalPolicy as ApprovalPolicy;
@@ -3016,29 +2961,7 @@ function applyTurnOverrides(
   if (overrides?.effort) session.effort = overrides.effort;
   if (overrides?.summary) session.summary = overrides.summary;
   if (overrides?.personality) session.personality = overrides.personality;
-  if (overrides?.sandbox && reaches("sandbox")) {
-    session.sandbox = overrides.sandbox as SandboxMode;
-  }
-}
-
-/** The `compatWarnings` sentence naming what the turn was asked for and did not apply. */
-function unappliedTurnWarning(
-  unapplied: readonly string[],
-  requested: Record<string, string | undefined>,
-  effective: Record<string, string | undefined>
-): string {
-  const named = unapplied.map((name) => {
-    const asked = requested[name];
-    const kept = effective[name];
-    if (asked !== undefined && kept !== undefined) {
-      return `${name} '${asked}' (the turn keeps '${kept}')`;
-    }
-    return asked !== undefined ? `${name} '${asked}'` : name;
-  });
-  return (
-    `This turn did not apply ${named.join(", ")}. Start a new session to change ` +
-    `${unapplied.length === 1 ? "it" : "them"}.`
-  );
+  if (overrides?.sandbox) session.sandbox = overrides.sandbox as SandboxMode;
 }
 
 /** The cwd a reply's override asks the turn to run in, or nothing when it names none. */
@@ -3106,22 +3029,6 @@ function turnIdOfCompleted(
   return knownTurnId ?? "";
 }
 
-/**
- * The text a finished turn carries of its own, with the activity markers gone.
- *
- * The protocol Turn carries `{error, id, items, status}` and no final
- * text (codex-schema/ServerNotification.json → definitions.Turn), so
- * app-server mode always answers from `lastAgentMessageText`. `output`
- * is ExecClient's own addition, set from the last `item.completed`
- * agentMessage of the turn (src/app-server/exec-client.ts).
- * `output` comes straight off the exec turn and has seen no stripping yet;
- * `lastAgentMessageText` was stripped when its item completed.
- */
-function outputOfCompleted(turnObj: Record<string, unknown> | undefined): string | undefined {
-  const sentTurnOutput = normalizeOptionalString(turnObj?.output);
-  return sentTurnOutput === undefined ? undefined : stripActivityMarkers(sentTurnOutput);
-}
-
 /** `turn/started` — the notification that opens a turn and clears the last activity. */
 function onTurnStarted(session: SessionInfo, method: string, p: Record<string, unknown>): void {
   const turnObj = p.turn as Record<string, unknown> | undefined;
@@ -3151,12 +3058,8 @@ function onItemNotification(
   const item = p.item as Record<string, unknown> | undefined;
   const itemType = item && typeof item.type === "string" ? item.type : undefined;
   const status = normalizeOptionalString(item?.status);
-  // Only `item/completed` carries a ThreadItem. `rawResponseItem/completed`
-  // carries a ResponseItem — `message` (text in `content[].text`),
-  // `reasoning`, `function_call` and so on
-  // (codex-schema/v2/RawResponseItemCompletedNotification.json → ResponseItem)
-  // — a second, lower-level view of the same turn, so the final answer is
-  // read from the ThreadItem stream alone.
+  // `item/started` and `item/completed` carry the same ThreadItem; only the
+  // completed one carries the finished text.
   const completedItem = method === Methods.ITEM_COMPLETED;
   // AgentMessageThreadItem carries `id`, `text` and an optional `phase`
   // and no status (codex-schema/v2/ItemCompletedNotification.json), so
@@ -3483,7 +3386,7 @@ function parseAvailableDecisionSet(available: unknown[] | null | undefined): Set
  * Read the thread id of a `thread/start` or `thread/fork` response.
  *
  * Both answer `{thread: Thread}` (codex-schema/v2/ThreadStartResponse.json,
- * v2/ThreadForkResponse.json), and so does ExecClient. No response of the bundle
+ * v2/ThreadForkResponse.json). No response of the bundle
  * puts a thread id anywhere else, so a differently shaped answer is a backend
  * this server cannot drive: the session needs the id, so it throws rather than
  * carrying on with an id it made up.

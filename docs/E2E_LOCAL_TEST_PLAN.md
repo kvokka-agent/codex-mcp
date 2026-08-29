@@ -109,7 +109,7 @@ Expected tool names:
 4. `codex_session`
 5. `codex_check`
 
-Call `codex_setup` first. It reports executable resolution, `codex login status`, the detected backend mode (`app-server` or `exec`), the state directory, and whether user/project `config.toml` files are visible. Fix anything in `nextSteps` before TC1; `ready: false` means later tests will fail for environment reasons, not server reasons.
+Call `codex_setup` first. It reports executable resolution, `codex login status`, the Codex CLI version against the minimum this server drives, the state directory, and whether user/project `config.toml` files are visible. Fix anything in `nextSteps` before TC1; `ready: false` means later tests will fail for environment reasons, not server reasons.
 
 ## 3.2 Resource Discovery
 
@@ -117,7 +117,7 @@ Run `resources/list`, then read each resource that appears.
 
 The server registers 7 resources:
 
-1. `codex-mcp:///server-info` — JSON metadata (server version, platform, `clientMode`, resource index)
+1. `codex-mcp:///server-info` — JSON metadata (server version, platform, `codexCliVersion`, resource index)
 2. `codex-mcp:///compat-report` — JSON metadata (feature flags, compatibility warnings)
 3. `codex-mcp:///config` — markdown (parameter guide and config.toml mapping)
 4. `codex-mcp:///gotchas` — markdown (practical limits and common issues)
@@ -129,7 +129,7 @@ Expected:
 
 1. `resources/list` returns 7 entries. A smaller count means an older build; run `bun run build` when testing from source, or update the package.
 2. JSON resources parse cleanly; markdown resources return non-empty text.
-3. `server-info.clientMode` reports `app-server` or `exec`; record which one, because exec mode skips the approval tests.
+3. `server-info.codexCliVersion` reports the CLI on PATH, and `server-info.minCodexCliVersion` the oldest this server drives.
 
 Stop and troubleshoot only if `resources/list` itself fails or returns 0 resources.
 
@@ -255,9 +255,9 @@ Important:
 When starting a session with `codex`, these are required:
 
 1. `prompt`
-2. `approvalPolicy`: `untrusted|on-failure|on-request|never`
+2. `approvalPolicy`: `untrusted|on-request|never`
 3. `sandbox`: `read-only|workspace-write|danger-full-access`
-4. `effort` is optional: `none|minimal|low|medium|high|xhigh` (default: `low`). For complex tasks, explicitly set `medium`/`high`/`xhigh`.
+4. `effort` is optional: any non-empty string, and Codex 0.150.1 advertises `low|medium|high|xhigh|max|ultra` (default: `low`). For complex tasks, explicitly set `medium`, `high` or `xhigh`.
 
 For `codex_reply`, required:
 
@@ -310,7 +310,6 @@ Not all commands trigger an approval request. The codex CLI applies its own safe
 
 - `untrusted`: Read-only commands (e.g., `ls`, `cat`, `dir`, `type`) are typically auto-approved by codex internally and will **not** generate an `actions[]` entry. Commands with side effects (e.g., `bun test`, `bun run`, write operations) require explicit approval.
 - `on-request`: Similar to `untrusted` but with a broader set of auto-approved commands. Most read operations pass through; write operations and unknown commands require approval.
-- `on-failure`: Commands are auto-approved on first attempt; approval is only requested if a command fails.
 - `never`: All commands are auto-approved. No `actions[]` will appear for command approvals (file-change approvals may still appear depending on sandbox mode).
 
 If you expect an approval request but none appears, the command was likely auto-approved by codex's internal policy. This is normal behavior, not a bug.
@@ -649,8 +648,6 @@ Expected:
 5. A completed session recovered the same way still returns its last `result`.
 6. The `codex` child process from before the restart is gone; the server logs the reap count to stderr.
 7. Starting a second server against the same state directory reports how many sessions belong to another running codex-mcp and keeps serving; each server lists the other's sessions and acts on none of them.
-
-In `exec` mode step 4 fails with `THREAD_FORK_RESUME_FAILED` carrying `EXEC_NOT_SUPPORTED`, and the session stays `abandoned`.
 
 ## 8. Generic Troubleshooting
 

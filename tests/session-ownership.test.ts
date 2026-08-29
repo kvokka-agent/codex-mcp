@@ -17,7 +17,6 @@ class MockClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;
   serverRequestHandler: ((id: number, method: string, params: unknown) => void) | null = null;
 
-  supportsTurnOverrides = true;
   unappliedTurnOverrides: readonly string[] | undefined = undefined;
   childPid: number | undefined = undefined;
   destroyed = false;

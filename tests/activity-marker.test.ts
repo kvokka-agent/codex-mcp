@@ -214,16 +214,14 @@ describe("stripActivityMarkersFromTurn", () => {
     const turn = stripActivityMarkersFromTurn({
       id: "turn_1",
       status: "completed",
-      output: "%%%ACTIVITY: Читаю тест%%%\nответ",
       items: [
         { id: "i1", type: "agentMessage", text: "%%%ACTIVITY: Читаю тест%%%\nответ" },
         { id: "i2", type: "commandExecution", command: "ls" },
       ],
-    }) as { id: string; output: string; items: Array<Record<string, unknown>> };
+    }) as { id: string; items: Array<Record<string, unknown>> };
 
-    expect(turn.output).toBe("ответ");
     expect(turn.items[0].text).toBe("ответ");
-    // Everything the turn carries beyond those two fields is passed through.
+    // Everything the turn carries beyond `items[].text` is passed through.
     expect(turn.id).toBe("turn_1");
     expect(turn.items[1]).toEqual({ id: "i2", type: "commandExecution", command: "ls" });
   });
@@ -259,7 +257,6 @@ describe("composeDeveloperInstructions", () => {
 class MockClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;
 
-  supportsTurnOverrides = true;
   childPid: number | undefined = undefined;
 
   start = jest.fn(async () => ({ userAgent: "mock" }));
@@ -369,20 +366,6 @@ describe("SessionManager and the activity marker", () => {
     const result = poll().result;
     expect(result?.text).toBe("Готово: тест падал на неверном поле.");
     expect(result?.text).not.toContain("%%%");
-  });
-
-  it("cuts the markers out of an exec turn's own output too", () => {
-    client.emit_(Methods.TURN_COMPLETED, {
-      turn: {
-        id: "turn_mock",
-        status: "completed",
-        output: "%%%ACTIVITY: Считаю строки%%%\nВ файле 2660 строк.",
-      },
-    });
-
-    const result = poll().result;
-    expect(result?.output).toBe("В файле 2660 строк.");
-    expect(result?.text).toBe("В файле 2660 строк.");
   });
 
   it("drops the previous turn's activity when a new turn starts", () => {

@@ -21,7 +21,6 @@ class MockAppServerClient extends EventEmitter {
   threadForkResult: unknown = { thread: { id: "thread_forked" } };
   threadResumeResult: unknown = { thread: { id: "thread_forked" } };
 
-  supportsTurnOverrides = true;
   childPid: number | undefined = undefined;
   /** Spawn instant reported with the "spawn" event, as the real clients report theirs. */
   spawnedAt = "2024-05-05T10:00:00.000Z";
@@ -33,6 +32,7 @@ class MockAppServerClient extends EventEmitter {
   threadStart = jest.fn(async () => this.threadStartResult);
   threadFork = jest.fn(async () => this.threadForkResult);
   threadResume = jest.fn(async () => this.threadResumeResult);
+  threadDelete = jest.fn(async (_params: { threadId: string }) => ({}));
   turnStart = jest.fn(async () => this.turnStartResult);
   turnInterrupt = jest.fn(async () => {});
 
@@ -120,6 +120,9 @@ describe("SessionManager protocol compatibility + approvals", () => {
         "THREAD_FORK_RESUME_FAILED"
       );
       expect(forkClient.destroy).toHaveBeenCalledTimes(1);
+      // The fork answered and nothing else ever saw the thread, so the server
+      // takes it back off the process that made it.
+      expect(originalClient.threadDelete).toHaveBeenCalledWith({ threadId: "thread_forked" });
       const sessions = forkManager.listSessions();
       expect(sessions).toHaveLength(1);
       expect(sessions[0]?.sessionId).toBe(started.sessionId);
@@ -151,6 +154,9 @@ describe("SessionManager protocol compatibility + approvals", () => {
         "THREAD_FORK_RESUME_FAILED"
       );
       expect(forkClient.destroy).toHaveBeenCalledTimes(1);
+      // The fork answered and nothing else ever saw the thread, so the server
+      // takes it back off the process that made it.
+      expect(originalClient.threadDelete).toHaveBeenCalledWith({ threadId: "thread_forked" });
       const sessions = forkManager.listSessions();
       expect(sessions).toHaveLength(1);
       expect(sessions[0]?.sessionId).toBe(started.sessionId);
@@ -187,6 +193,40 @@ describe("SessionManager protocol compatibility + approvals", () => {
       const sessions = forkManager.listSessions();
       expect(sessions).toHaveLength(1);
       expect(sessions[0]?.sessionId).toBe(started.sessionId);
+    } finally {
+      forkManager.destroy();
+    }
+  });
+
+  it("still reports the fork failure when thread/delete cannot remove the leftover", async () => {
+    const originalClient = new MockAppServerClient();
+    originalClient.threadDelete = jest.fn(async () => {
+      throw new Error("delete failed");
+    });
+    const forkClient = new MockAppServerClient();
+    forkClient.threadResume = jest.fn(async () => {
+      throw new Error("resume failed");
+    });
+
+    const queue = [originalClient, forkClient];
+    const forkManager = new SessionManager({
+      disableCleanup: true,
+      createClient: () => {
+        const next = queue.shift();
+        if (!next) throw new Error("No mock client available");
+        return next as unknown as AppServerClient;
+      },
+    });
+
+    try {
+      const started = await forkManager.createSession("hi", workspace, {}, "medium");
+      // The caller is told why the fork failed; a leftover thread it cannot act
+      // on does not change that error.
+      await expect(forkManager.forkSession(started.sessionId)).rejects.toThrow(
+        "THREAD_FORK_RESUME_FAILED"
+      );
+      expect(originalClient.threadDelete).toHaveBeenCalledTimes(1);
+      expect(forkManager.listSessions()).toHaveLength(1);
     } finally {
       forkManager.destroy();
     }
@@ -1571,27 +1611,25 @@ describe("SessionManager disk persistence", () => {
     expect(recoveredPid.pid).toBe(client.childPid);
   });
 
-  it("records a process the client spawns after start, as exec does per turn", async () => {
-    // ExecClient has no process until its first turn, so the pid reaches disk
-    // when the client reports the spawn, not when start() returns.
-    const execLike = new MockAppServerClient();
-    const execManager = new SessionManager({
+  it("records the pid when the client reports the spawn, not when start resolves", async () => {
+    const lateSpawn = new MockAppServerClient();
+    const lateManager = new SessionManager({
       disableCleanup: true,
       persistence,
-      createClient: () => execLike as unknown as AppServerClient,
+      createClient: () => lateSpawn as unknown as AppServerClient,
     });
     try {
-      const { sessionId } = await execManager.createSession("hi", workspace, {}, "medium");
+      const { sessionId } = await lateManager.createSession("hi", workspace, {}, "medium");
       expect(existsSync(path.join(root, "sessions", sessionId, "pid.json"))).toBe(false);
 
-      execLike.emit("spawn", 777, "2024-05-05T11:22:33.000Z");
+      lateSpawn.emit("spawn", 777, "2024-05-05T11:22:33.000Z");
 
       const pidInfo = JSON.parse(
         readFileSync(path.join(root, "sessions", sessionId, "pid.json"), "utf-8")
       );
       expect(pidInfo.pid).toBe(777);
     } finally {
-      execManager.destroy();
+      lateManager.destroy();
     }
   });
 

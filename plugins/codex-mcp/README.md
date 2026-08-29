@@ -172,14 +172,8 @@ that denial is the whole design. The subagent is the only path the list travels
 to the person asking, which is why it answers the list alone — no session
 started, nothing polled, no context spent.
 
-Two things this cannot do:
-
-- `codex_reply` to an abandoned session that was not resumed answers
-  `SESSION_NOT_RUNNING` and names `resume`.
-- On a codex CLI with no `app-server` the server runs in `exec` mode, where
-  `resume` fails with `THREAD_FORK_RESUME_FAILED` carrying `EXEC_NOT_SUPPORTED`:
-  `codex exec` implements no thread resume. The session stays `abandoned`, and
-  the work has to be handed to a new session.
+Resume the session before replying to it: `codex_reply` to an abandoned session
+answers `SESSION_NOT_RUNNING` and names `resume`.
 
 ## What the pieces are
 

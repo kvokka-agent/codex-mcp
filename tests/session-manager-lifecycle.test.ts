@@ -18,9 +18,6 @@ class MockClient extends EventEmitter {
   threadStartResult: unknown = { thread: { id: "thread_mock" } };
   turnStartResult: unknown = { turn: { id: "turn_mock" } };
 
-  supportsTurnOverrides = true;
-  /** Undefined unless a test makes this client report what its last turn dropped. */
-  unappliedTurnOverrides: readonly string[] | undefined = undefined;
   childPid: number | undefined = undefined;
 
   /** Spawn instant reported with the "spawn" event, as the real clients report theirs. */
@@ -512,11 +509,11 @@ describe("SessionManager session operations", () => {
   it("pushes no event when the client refuses to clean background terminals", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
     client.threadBackgroundTerminalsClean = jest.fn(async () => {
-      throw new Error("Error [EXEC_NOT_SUPPORTED]: not supported in exec mode");
+      throw new Error("Error [INTERNAL]: thread/backgroundTerminals/clean refused");
     });
 
     await expect(manager.cleanBackgroundTerminals(started.sessionId)).rejects.toThrow(
-      "EXEC_NOT_SUPPORTED"
+      "thread/backgroundTerminals/clean refused"
     );
 
     expect(
@@ -912,7 +909,7 @@ describe("SessionManager persistence failures", () => {
   });
 });
 
-describe("SessionManager unapplied turn overrides", () => {
+describe("SessionManager turn overrides", () => {
   let client: MockClient;
   let manager: SessionManager;
 
@@ -938,43 +935,12 @@ describe("SessionManager unapplied turn overrides", () => {
     );
     client.emitNotification(Methods.TURN_COMPLETED, {
       threadId: started.threadId,
-      turn: { id: "turn_1", status: "completed", output: "done" },
+      turn: { id: "turn_1", status: "completed", items: [] },
     });
     return started.sessionId;
   }
 
-  it("warns the caller that a narrowed sandbox was not applied", async () => {
-    const sessionId = await idleSession();
-    client.supportsTurnOverrides = false;
-
-    const reply = await manager.replyToSession(sessionId, "again", { sandbox: "read-only" });
-
-    expect(reply.status).toBe("running");
-    expect(reply.compatWarnings).toHaveLength(1);
-    const warnings = present(reply.compatWarnings, "the compat warnings of the reply");
-    expect(warnings[0]).toContain("read-only");
-    expect(warnings[0]).toContain("workspace-write");
-    // The session keeps the permissions the turn actually runs under.
-    expect((manager.getSession(sessionId) as { sandbox?: string }).sandbox).toBe("workspace-write");
-  });
-
-  it("names an unapplied cwd override alongside the sandbox", async () => {
-    const otherCwd = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-other-cwd-"));
-    try {
-      const sessionId = await idleSession();
-      client.supportsTurnOverrides = false;
-
-      const reply = await manager.replyToSession(sessionId, "again", { cwd: otherCwd });
-
-      const warnings = present(reply.compatWarnings, "the compat warnings of the reply");
-      expect(warnings[0]).toContain(otherCwd);
-      expect(warnings[0]).toContain("cwd");
-    } finally {
-      rmSync(otherCwd, { recursive: true, force: true });
-    }
-  });
-
-  it("stays silent when the client applies the overrides", async () => {
+  it("puts what the reply asked for on the session, and warns about nothing", async () => {
     const sessionId = await idleSession();
 
     const reply = await manager.replyToSession(sessionId, "again", { sandbox: "read-only" });
@@ -983,61 +949,19 @@ describe("SessionManager unapplied turn overrides", () => {
     expect((manager.getSession(sessionId) as { sandbox?: string }).sandbox).toBe("read-only");
   });
 
-  it("reports the overrides the client says it dropped", async () => {
+  it("reads the turn output as structured when the reply named a schema", async () => {
     const sessionId = await idleSession();
-    client.unappliedTurnOverrides = ["sandbox", "outputSchema"];
-
-    const reply = await manager.replyToSession(sessionId, "again", {
-      sandbox: "read-only",
-      outputSchema: { type: "object" },
-    });
-
-    expect(reply.compatWarnings).toHaveLength(1);
-    const warnings = present(reply.compatWarnings, "the compat warnings of the reply");
-    expect(warnings[0]).toContain("sandbox 'read-only'");
-    expect(warnings[0]).toContain("workspace-write");
-    expect(warnings[0]).toContain("outputSchema");
-  });
-
-  it("does not read the turn output as structured when the schema was dropped", async () => {
-    const sessionId = await idleSession();
-    client.unappliedTurnOverrides = ["outputSchema"];
 
     await manager.replyToSession(sessionId, "again", { outputSchema: { type: "object" } });
+    client.emitNotification(Methods.ITEM_COMPLETED, {
+      turnId: "turn_2",
+      item: { id: "item_2", type: "agentMessage", text: '{"a":1}' },
+    });
     client.emitNotification(Methods.TURN_COMPLETED, {
-      turn: { id: "turn_2", status: "completed", output: '{"a":1}' },
+      turn: { id: "turn_2", status: "completed", items: [] },
     });
 
-    expect(manager.getLastResult(sessionId)?.structuredOutput).toBeUndefined();
-  });
-
-  it("keeps the session sandbox when the client says the override was dropped", async () => {
-    const sessionId = await idleSession();
-    // The client applies overrides in general, and still dropped this one.
-    client.unappliedTurnOverrides = ["sandbox"];
-
-    await manager.replyToSession(sessionId, "again", { sandbox: "read-only" });
-
-    expect((manager.getSession(sessionId) as { sandbox?: string }).sandbox).toBe("workspace-write");
-  });
-
-  it("stays silent when the client reports an empty list", async () => {
-    const sessionId = await idleSession();
-    client.unappliedTurnOverrides = [];
-    client.supportsTurnOverrides = false;
-
-    const reply = await manager.replyToSession(sessionId, "again", { sandbox: "read-only" });
-
-    expect(reply.compatWarnings).toBeUndefined();
-  });
-
-  it("stays silent when nothing that needs applying was asked for", async () => {
-    const sessionId = await idleSession();
-    client.supportsTurnOverrides = false;
-
-    const reply = await manager.replyToSession(sessionId, "again", { model: "gpt-b" });
-
-    expect(reply.compatWarnings).toBeUndefined();
+    expect(manager.getLastResult(sessionId)?.structuredOutput).toEqual({ a: 1 });
   });
 });
 
@@ -1221,39 +1145,6 @@ describe("SessionManager notification handling", () => {
     expect(manager.getLastResult(started.sessionId)?.text).toBe("the answer");
   });
 
-  it("keeps the final answer of the ThreadItem stream when a raw response item repeats it", async () => {
-    const started = await manager.createSession("hi", workspace, {}, "medium");
-
-    client.emitNotification(Methods.ITEM_COMPLETED, {
-      threadId: started.threadId,
-      turnId: "turn_1",
-      item: { id: "item_1", type: "agentMessage", text: "the answer" },
-    });
-    // MessageResponseItem requires [content, role, type] and keeps its text in
-    // content[].text — no `agentMessage` type and no top-level `text`
-    // (codex-schema/v2/RawResponseItemCompletedNotification.json → ResponseItem).
-    client.emitNotification(Methods.RAW_RESPONSE_ITEM_COMPLETED, {
-      threadId: started.threadId,
-      turnId: "turn_1",
-      item: {
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: "a lower-level copy" }],
-      },
-    });
-    client.emitNotification(Methods.TURN_COMPLETED, {
-      threadId: started.threadId,
-      turn: { id: "turn_1", status: "completed", items: [] },
-    });
-
-    expect(manager.getLastResult(started.sessionId)?.text).toBe("the answer");
-    const rawEvent = present(
-      events(started.sessionId).find((e) => e.data?.method === Methods.RAW_RESPONSE_ITEM_COMPLETED),
-      "the raw response item event"
-    );
-    expect(rawEvent.type).toBe("progress");
-  });
-
   it("reads the final message as structured output when the turn asked for a schema", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium", {
       outputSchema: { type: "object", properties: { answer: { type: "number" } } },
@@ -1344,41 +1235,6 @@ describe("SessionManager notification handling", () => {
     });
   });
 
-  it("counts the tokens the exec token_count event nests under info", async () => {
-    const started = await manager.createSession("hi", workspace, {}, "medium");
-
-    // Shape of TokenCountEventMsg (codex-schema/EventMsg.json), which exec mode
-    // forwards under the same method.
-    client.emitNotification(Methods.THREAD_TOKEN_USAGE_UPDATED, {
-      threadId: started.threadId,
-      turnId: "turn_1",
-      type: "token_count",
-      info: {
-        total_token_usage: {
-          cached_input_tokens: 1,
-          input_tokens: 100,
-          output_tokens: 20,
-          reasoning_output_tokens: 5,
-          total_tokens: 120,
-        },
-        last_token_usage: {
-          cached_input_tokens: 0,
-          input_tokens: 10,
-          output_tokens: 2,
-          reasoning_output_tokens: 0,
-          total_tokens: 12,
-        },
-        model_context_window: 272000,
-      },
-    });
-
-    expect(manager.getProgress(started.sessionId).tokens).toEqual({
-      input: 100,
-      output: 20,
-      total: 120,
-    });
-  });
-
   it("reports the progress a tool-call progress notification carries and no percentage", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
 
@@ -1452,16 +1308,9 @@ describe("SessionManager notification handling", () => {
   it("keeps the token counters a tokenUsage update reports after the turn completed", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
 
-    // `usage` on a completed turn is ExecClient's addition, carrying the `usage`
-    // of the exec `turn.completed` record (src/app-server/exec-client.ts).
     client.emitNotification(Methods.TURN_COMPLETED, {
       threadId: started.threadId,
-      turn: {
-        id: "turn_1",
-        status: "completed",
-        items: [],
-        usage: { input_tokens: 100, cached_input_tokens: 0, output_tokens: 20 },
-      },
+      turn: { id: "turn_1", status: "completed", items: [] },
     });
     client.emitNotification(Methods.THREAD_TOKEN_USAGE_UPDATED, {
       threadId: started.threadId,

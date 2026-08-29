@@ -173,20 +173,16 @@ export function stripActivityMarkers(text: string): string {
  * The turn record without the markers its own copy of the text carries.
  *
  * `TurnResult.turn` is the backend's record of the finished turn, and it holds
- * the assistant text a second time: `turn.output` in exec mode,
- * `turn.items[].text` in app-server mode. `TurnResult.text` is stripped, that
- * second copy was not, and a caller reading the turn put a raw
+ * the assistant text a second time in `turn.items[].text`. `TurnResult.text` is
+ * stripped, that second copy was not, and a caller reading the turn put a raw
  * `%%%ACTIVITY: …%%%` line back into the answer it reported.
  *
- * Only those two fields are rewritten. Everything else of the turn is passed
+ * Only `items[].text` is rewritten. Everything else of the turn is passed
  * through as the backend sent it.
  */
 export function stripActivityMarkersFromTurn(turn: unknown): unknown {
   if (!isPlainRecord(turn)) return turn;
   const stripped: Record<string, unknown> = { ...turn };
-  if (typeof stripped.output === "string") {
-    stripped.output = stripActivityMarkers(stripped.output);
-  }
   if (Array.isArray(stripped.items)) {
     stripped.items = stripped.items.map((item) =>
       isPlainRecord(item) && typeof item.text === "string"

@@ -11,7 +11,6 @@ import {
   APPROVAL_POLICIES,
   DEFAULT_APPROVAL_TIMEOUT_MS,
   DEFAULT_EFFORT_LEVEL,
-  EFFORT_LEVELS,
   SANDBOX_MODES,
 } from "../types.js";
 
@@ -53,6 +52,23 @@ function readOneOf<T extends string>(
   return value as T;
 }
 
+/**
+ * Read a value the backend, not this server, decides the vocabulary of.
+ *
+ * A variable set to whitespace is a client that meant to name something and
+ * wrote nothing, so it stops the server rather than resolving to the built-in
+ * default.
+ */
+function readNonBlank(env: NodeJS.ProcessEnv, name: string, what: string): string | undefined {
+  const raw = env[name];
+  if (raw === undefined) return undefined;
+  const value = raw.trim();
+  if (!value) {
+    throw new Error(`${name}="${raw}" is not ${what}. Name a non-empty value.`);
+  }
+  return value;
+}
+
 function readApprovalTimeoutMs(env: NodeJS.ProcessEnv): number {
   const value = readValue(env, SESSION_DEFAULT_ENV.approvalTimeoutMs);
   if (value === undefined) return DEFAULT_APPROVAL_TIMEOUT_MS;
@@ -77,8 +93,7 @@ export function resolveSessionDefaults(env: NodeJS.ProcessEnv = process.env): Se
   return {
     model: readValue(env, SESSION_DEFAULT_ENV.model),
     effort:
-      readOneOf(env, SESSION_DEFAULT_ENV.effort, EFFORT_LEVELS, "a reasoning effort") ??
-      DEFAULT_EFFORT_LEVEL,
+      readNonBlank(env, SESSION_DEFAULT_ENV.effort, "a reasoning effort") ?? DEFAULT_EFFORT_LEVEL,
     approvalTimeoutMs: readApprovalTimeoutMs(env),
     approvalPolicy: readOneOf(
       env,

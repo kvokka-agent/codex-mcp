@@ -17,15 +17,10 @@ that client, holding every session that client starts.
 `codex-mcp` spawns it and never replaces it: the model, the profile and the
 sandbox defaults all come from the user's own `~/.codex/config.toml`.
 
-**app-server mode** — the backend where `codex-mcp` spawns `codex app-server`
-and speaks JSON-RPC to it over stdio. Full capability: approvals, user input,
-fork, resume.
-
-**exec mode** — the fallback backend for a codex binary that carries no
-`app-server` subcommand. `codex-mcp` spawns `codex exec --json` and continues a
-thread with `codex exec resume`. No approvals, no user input, no fork, no
-resume, and no activity marker. [DESIGN.md](DESIGN.md) states what each
-mode reaches.
+**app-server** — the backend `codex-mcp` runs on: it spawns `codex app-server`
+and speaks JSON-RPC to it over stdio, which carries approvals, user input, fork
+and resume. [INSTALL.md](INSTALL.md) states the oldest Codex CLI that carries
+the subcommand.
 
 **the plugin** — the Claude Code plugin published from this repository: the MCP
 server, a `codex` subagent that proxies one prompt to Codex and reports the
@@ -121,7 +116,7 @@ file, when the approval policy asks for one. The caller answers it with
 `codex_check(action="respond_permission")` and a decision.
 
 **approval policy** — how much Codex asks before acting: `untrusted`,
-`on-failure`, `on-request` or `never`. Required on every `codex` call — the
+`on-request` or `never`. Required on every `codex` call — the
 caller states its own permission level rather than inheriting a default.
 
 **sandbox** — what Codex may touch: `read-only`, `workspace-write` or
@@ -152,10 +147,10 @@ resumed. An owner whose fate no source can establish counts as held.
 
 **resume** — `codex_session(action="resume")`: take a free session, start a
 codex process for it and restore the thread from the rollout log, including the
-turn that was cut off. app-server mode only.
+turn that was cut off.
 
 **fork** — `codex_session(action="fork")`: copy the current thread into a new
-session and leave the source untouched. app-server mode only.
+session and leave the source untouched.
 
 **orphan reaper** — the startup pass that kills the codex child processes left
 behind by a dead server, after proving each pid's recorded spawn time still

@@ -13,7 +13,7 @@ MCP client
 codex-mcp server (bun)
     │  JSON-RPC over stdio, one child process per session
     ▼
-codex app-server        ── or ──  codex exec --json
+codex app-server
     │
     ▼
 Codex
@@ -52,9 +52,7 @@ top.
 Each session owns one child process. `AppServerClient` speaks JSON-RPC over its
 stdin and stdout: request ids map to a pending `{resolve, reject, timeout}`,
 notifications dispatch by method, and server-initiated requests dispatch to a
-handler that must answer. `ExecClient` presents the same interface over
-`codex exec --json`, translating the JSONL stream into the same notification
-methods and spawning one process per turn.
+handler that must answer.
 
 The stdin write queue holds at most 5 MB. On overflow every pending request
 fails with `WRITE_QUEUE_DROPPED` and the child is terminated, because a backend
@@ -68,7 +66,7 @@ A child that exits while its session was running moves that session to `error`.
    stdout-contamination risk — a TTY on stdin or stdout, or a PowerShell
    environment on Windows. `CODEX_MCP_STDIO_MODE=strict` refuses to start on a
    blocking risk; `auto` reports and carries on; `off` skips the check.
-2. The codex executable is resolved and the backend mode probed
+2. The codex executable is resolved
    ([INSTALL.md](INSTALL.md#picking-the-codex-binary)). A misconfiguration
    fails here, before anything else runs.
 3. The state directory is opened: prune first, then scan. Pruning first keeps a
@@ -116,7 +114,7 @@ seconds, 15 on Windows.
 | `lastEventAt` | The last notification or server request |
 | `activeTurnId` | `turn/started`, seeded from the `turn/start` response |
 | `pendingActionCount` | Unresolved pending requests |
-| `tokens` | Merged from `thread/tokenUsage/updated`, the exec turn's `usage`, and a recovered result, accepting camelCase and snake_case alike |
+| `tokens` | Merged from `thread/tokenUsage/updated` and a recovered result, accepting camelCase and snake_case alike |
 | `activity` | The last activity marker of the turn, cleared when a turn starts |
 | `activitySince`, `activityStandingMs` | When that marker arrived, and how long the session has been on it |
 
@@ -136,8 +134,7 @@ things about it belong here.
 `["string","null"]` and does not require. The server sets it, so a marker
 reaches every client rather than the one that read the documentation.
 `thread/fork` and `thread/resume` carry the same composed string, so a forked or
-resumed session keeps the protocol. `codex exec` has no field to put it on,
-which is why exec mode reports no activity.
+resumed session keeps the protocol.
 
 **Why the scanner buffers.** `item/agentMessage/delta` carries model tokens,
 measured at a median of three characters over 626 real deltas, and a live run
@@ -177,7 +174,6 @@ log at `data.method`.
 | activity marker (internal) | activity | One extracted `%%%ACTIVITY: …%%%` line, flushed at once |
 | `item/completed` | output / progress | `agentMessage` and `userMessage` → output; every other item type → progress |
 | `item/started` | progress | |
-| `rawResponseItem/completed` | progress | ExecClient's `raw_response_item`; a ResponseItem, so no final answer to read |
 | `item/commandExecution/outputDelta` | progress | After shell-noise filtering |
 | `item/commandExecution/terminalInteraction` | progress | |
 | `item/fileChange/outputDelta` | progress | |

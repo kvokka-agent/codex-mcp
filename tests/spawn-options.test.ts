@@ -87,7 +87,7 @@ describe("extractSpawnOptions", () => {
       {
         prompt: "hello",
         cwd: "/tmp/project",
-        approvalPolicy: "on-failure",
+        approvalPolicy: "on-request",
         sandbox: "workspace-write",
         effort: "high",
         advanced: {
@@ -108,7 +108,7 @@ describe("extractSpawnOptions", () => {
     expect(opts).toEqual({
       profile: undefined,
       model: undefined,
-      approvalPolicy: "on-failure",
+      approvalPolicy: "on-request",
       sandbox: "workspace-write",
       config: { model_reasoning_effort: "high" },
     });

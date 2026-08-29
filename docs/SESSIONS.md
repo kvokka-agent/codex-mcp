@@ -83,8 +83,6 @@ whenever it starts something new, in the language of the request.
 - `advanced.developerInstructions` is appended after this instruction, not
   instead of it. `CODEX_MCP_DISABLE_ACTIVITY_MARKER=1` stops the server sending
   it, and `progress.activity` then stays empty.
-- **`exec` mode has no activity line.** `codex exec` takes no developer
-  instructions, so no marker is ever written.
 
 Every extracted line is also appended to the session's `events.jsonl` as an
 `activity` record, so a reader of the state directory gets the sequence of what
@@ -140,7 +138,7 @@ Three layers, and the first two are the caller's to set on every `codex` call.
 
 | Layer | What it is | Values |
 | --- | --- | --- |
-| Approval policy | How often Codex asks before acting | `untrusted`, `on-failure`, `on-request`, `never` |
+| Approval policy | How often Codex asks before acting | `untrusted`, `on-request`, `never` |
 | Sandbox | What Codex may touch | `read-only`, `workspace-write`, `danger-full-access` |
 | Arbitration | Who answers each request | the caller, through `codex_check`, within `approvalTimeoutMs` |
 
@@ -179,11 +177,8 @@ with, and the newest reasoning effort, summary mode and personality any turn of
 it set — and lands the session `idle`. It does not replay the interrupted turn — `codex_reply` carries the work
 on, and the caller says what to do about the part that was cut off.
 
-Three places resume does not go:
+Two places resume does not go:
 
-- **`exec` mode.** `codex exec` implements no thread resume, so the call fails
-  with `THREAD_FORK_RESUME_FAILED` carrying `EXEC_NOT_SUPPORTED`. The session
-  keeps its `abandoned` status and the work goes to a new session.
 - **A session with no recorded `threadId`.** Nothing was started that could be
   resumed.
 - **A session whose owner cannot be checked.** When the recorded pid answers

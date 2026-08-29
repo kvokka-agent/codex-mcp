@@ -1,17 +1,12 @@
 /**
  * codex-mcp — MCP server entry point
  *
- * Starts the MCP server with stdio transport.
- * Spawns codex app-server child processes for each session,
- * or falls back to codex exec --json when app-server is unavailable.
+ * Starts the MCP server with stdio transport and spawns one
+ * `codex app-server` child process per session.
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { AppServerClient } from "./app-server/client.js";
-import type { ICodexClient } from "./app-server/client-interface.js";
-import { detectClientMode } from "./app-server/detect.js";
-import { ExecClient } from "./app-server/exec-client.js";
 import type { RecoveredSession } from "./persistence/index.js";
 import { createServer } from "./server.js";
 import type { SessionManager } from "./session/manager.js";
@@ -356,10 +351,7 @@ async function main(): Promise<void> {
   // Throws immediately if env vars are misconfigured (e.g. both set, or path missing).
   checkDefaultCodexExecutableAvailability();
   const executable = getDefaultCodexExecutable();
-  const clientMode = await detectClientMode(executable.command, executable.isPath);
-  console.error(`[codex-mcp] client mode: ${clientMode} (binary: ${executable.command})`);
-  const createClient = (): ICodexClient =>
-    clientMode === "exec" ? new ExecClient() : new AppServerClient();
+  console.error(`[codex-mcp] codex binary: ${executable.command}`);
 
   // Open the state directory. A failure here leaves persistence undefined and is
   // reported on stderr by startDiskPersistence; the server serves requests without it.
@@ -367,11 +359,7 @@ async function main(): Promise<void> {
   reportRecoveredSessions(recovered, pruned);
 
   const serverCwd = process.cwd();
-  const ctx = createServer(serverCwd, {
-    createClient,
-    clientMode,
-    persistence,
-  });
+  const ctx = createServer(serverCwd, { persistence });
   const server = ctx.server;
   const sessionManager = ctx.sessionManager;
 

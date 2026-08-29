@@ -81,35 +81,104 @@ const SERVER_TO_CLIENT_METHODS = ENVELOPES.filter(
 ).flatMap((e) => e.methods.map((m) => m.method));
 
 /**
- * `Methods` values that are deliberately absent from the schema, with the reason.
- * Anything else in `Methods` must be a real protocol method.
- */
-const SYNTHETIC_METHODS: Record<string, string> = {
-  "rawResponseItem/completed":
-    "ExecClient label for the `raw_response_item` event of `codex exec --json`. " +
-    "The schema carries the payload (v2/RawResponseItemCompletedNotification.json) but binds it to no app-server method.",
-  sessionConfigured:
-    "ExecClient label for the `session_configured` event of `codex exec --json`. " +
-    "The app-server equivalent is the v1 notification `codex/event/session_configured`, which this code does not use.",
-};
-
-/**
- * Server → client methods this codebase does not model, with the reason each one
- * costs nothing to drop. A method leaving this list without entering `Methods`
- * fails the reverse check below.
+ * Server → client methods this codebase does not model, each with the reason it
+ * is not modelled. A method leaving this list without entering `Methods` fails
+ * the reverse check below.
+ *
+ * Four of these are server → *requests*, which stall the turn if nothing
+ * answers. `SessionManager.handleServerRequest` answers every method it does
+ * not model with JSON-RPC -32601, so an unmodelled request is refused rather
+ * than left hanging.
  */
 const UNMODELED_SERVER_METHODS: Record<string, string> = {
+  // Realtime audio threads.
   "thread/realtime/started": "realtime audio threads; codex-mcp starts text turns only",
   "thread/realtime/itemAdded": "realtime audio threads; codex-mcp starts text turns only",
+  "thread/realtime/item/started": "realtime audio threads; codex-mcp starts text turns only",
+  "thread/realtime/item/transcript/delta":
+    "realtime audio threads; codex-mcp starts text turns only",
+  "thread/realtime/item/completed": "realtime audio threads; codex-mcp starts text turns only",
+  "thread/realtime/transcript/delta": "realtime audio threads; codex-mcp starts text turns only",
+  "thread/realtime/transcript/done": "realtime audio threads; codex-mcp starts text turns only",
   "thread/realtime/outputAudio/delta": "realtime audio threads; codex-mcp starts text turns only",
+  "thread/realtime/sdp": "realtime audio threads; codex-mcp starts text turns only",
   "thread/realtime/error": "realtime audio threads; codex-mcp starts text turns only",
   "thread/realtime/closed": "realtime audio threads; codex-mcp starts text turns only",
+
+  // Server → client requests. Each is refused with -32601.
+  "attestation/generate":
+    "gated behind capabilities.requestAttestation, which initialize leaves at the schema default false; codex-mcp holds no attestation signer to answer with",
+  "currentTime/read":
+    "asks the client for a clock it owns; codex-mcp owns none, so the request is refused rather than answered with a manufactured time",
+  "item/permissions/requestApproval":
+    "sent only under a granular approval policy carrying request_permissions: true; codex-mcp sends a policy preset string and never the granular object",
+  "mcpServer/elicitation/request":
+    "an MCP server from the user's own codex config asking the end user a question; codex-mcp models the item/tool/requestUserInput question flow and not this one, so the elicitation is declined rather than answered",
+
+  // Thread and project bookkeeping this server does not report.
+  "thread/deleted": "codex-mcp exposes no thread browser; a session is addressed by its own id",
+  "thread/reverted": "codex-mcp exposes no thread history view to revert in",
+  "thread/goal/updated": "thread goals are a TUI affordance; codex-mcp reports turns",
+  "thread/goal/cleared": "thread goals are a TUI affordance; codex-mcp reports turns",
+  "thread/queue/changed":
+    "the app-server's queued-input view; codex-mcp submits one turn at a time and reports its own session state",
+  "thread/settings/updated":
+    "echoes back settings the caller already passed to thread/start or turn/start",
+  "thread/project/updated": "project assignment; codex-mcp never sets projectId",
+  "project/changed": "project assignment; codex-mcp never sets projectId",
+  "thread/environment/connected":
+    "execution environments; codex-mcp never sets environments and runs every turn in the local cwd",
+  "thread/environment/disconnected":
+    "execution environments; codex-mcp never sets environments and runs every turn in the local cwd",
+  "skills/changed": "an invalidation signal for skills/list, which codex-mcp never calls",
+  "fs/changed": "answers an fs/watch subscription, which codex-mcp never opens",
+
+  // Features this server never starts, so their streams never open.
+  "command/exec/outputDelta": "streams a command/exec session, which codex-mcp never starts",
+  "process/outputDelta": "streams a process/spawn session, which codex-mcp never starts",
+  "process/exited": "ends a process/spawn session, which codex-mcp never starts",
+  "externalAgentConfig/import/progress":
+    "progress of an externalAgentConfig/import, which codex-mcp never starts",
+  "externalAgentConfig/import/completed":
+    "result of an externalAgentConfig/import, which codex-mcp never starts",
+  "remoteControl/status/changed":
+    "remote control of the app-server; codex-mcp drives the child it spawned over stdio",
+  "mcpServer/startupStatus/updated":
+    "startup status of MCP servers from the user's own codex config; codex-mcp configures none",
+  "mcpServer/event/stream/notification":
+    "forwards a notification from an MCP server subscription, which codex-mcp never opens",
+  "mcpServer/oauthLogin/completed":
+    "MCP server logins are configured in the codex CLI, not through this server",
+  "serverRequest/resolved":
+    "tells one client that another answered a shared server request; codex-mcp is the only client of the app-server it spawned",
+
+  // The auto_review approvals reviewer, which codex-mcp never selects.
+  "item/autoApprovalReview/started":
+    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
+  "item/autoApprovalReview/completed":
+    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
+  "autoApprovalReview/strictReviewRequired":
+    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
+  guardianWarning:
+    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
+
+  // Advisory payloads with no field in this server's tool output.
+  "model/verification": "model-side verification metadata; codex-mcp reports the turn's answer",
+  "model/safetyBuffering/updated": "drives a buffering UI; codex-mcp renders none",
+  "turn/moderationMetadata": "moderation metadata for a UI; codex-mcp reports the turn's answer",
+  warning:
+    "free-text display warning; the tool output carries errors and the compat warnings codex-mcp produced itself, and no field for a server warning",
+  "item/fileChange/patchUpdated":
+    "an updated patch preview for a file-change item; codex-mcp answers the approval from the request params and reports the item off item/completed",
+  "hook/started": "hooks from the user's own codex config; codex-mcp reports the turn around them",
+  "hook/completed":
+    "hooks from the user's own codex config; codex-mcp reports the turn around them",
+
+  // Account and catalogue state owned by the codex CLI.
   "account/updated": "account management is done in the codex CLI, not through this server",
   "account/rateLimits/updated":
     "account management is done in the codex CLI, not through this server",
   "app/list/updated": "ChatGPT app catalogue; codex-mcp exposes no app picker",
-  "mcpServer/oauthLogin/completed":
-    "MCP server logins are configured in the codex CLI, not through this server",
   "windowsSandbox/setupCompleted":
     "answers the windowsSandbox/setupStart request, which this server never sends",
 };
@@ -167,6 +236,7 @@ const MODELLED_TYPES: Record<string, string> = {
   ThreadResumeParams: "ThreadResumeParams",
   ThreadForkParams: "ThreadForkParams",
   ThreadBackgroundTerminalsCleanParams: "ThreadBackgroundTerminalsCleanParams",
+  ThreadDeleteParams: "ThreadDeleteParams",
   TurnStartParams: "TurnStartParams",
   TurnSteerParams: "TurnSteerParams",
   TurnInterruptParams: "TurnInterruptParams",
@@ -184,8 +254,8 @@ const MODELLED_TYPES: Record<string, string> = {
   ContextCompactedNotification: "ContextCompactedNotificationParams",
   DeprecationNoticeNotification: "DeprecationNoticeNotificationParams",
   ConfigWarningNotification: "ConfigWarningNotificationParams",
-  ItemStartedNotification: "ItemNotificationParams",
-  ItemCompletedNotification: "ItemNotificationParams",
+  ItemStartedNotification: "ItemStartedNotificationParams",
+  ItemCompletedNotification: "ItemCompletedNotificationParams",
   AgentMessageDeltaNotification: "DeltaNotificationParams",
   PlanDeltaNotification: "DeltaNotificationParams",
   CommandExecutionOutputDeltaNotification: "DeltaNotificationParams",
@@ -423,21 +493,11 @@ describe("codex-schema bundle", () => {
 describe("Methods against the schema", () => {
   const entries = Object.entries(Methods);
 
-  it.each(entries)("%s is a schema method or a documented synthetic one", (name, value) => {
-    if (SCHEMA_METHODS.has(value)) return;
-    const reason = SYNTHETIC_METHODS[value];
+  it.each(entries)("%s names a method the schema declares", (name, value) => {
     expect(
-      reason,
-      `Methods.${name} = "${value}" is in no codex-schema envelope and has no entry in SYNTHETIC_METHODS`
-    ).toBeTruthy();
-  });
-
-  it("keeps SYNTHETIC_METHODS free of names the schema does define", () => {
-    for (const [method, reason] of Object.entries(SYNTHETIC_METHODS)) {
-      expect(SCHEMA_METHODS.has(method), `${method} is a real schema method: ${reason}`).toBe(
-        false
-      );
-    }
+      SCHEMA_METHODS.has(value),
+      `Methods.${name} = "${value}" is in no codex-schema envelope file`
+    ).toBe(true);
   });
 
   it("maps every constant to a distinct method", () => {
@@ -574,11 +634,23 @@ describe("AskForApproval union", () => {
       innerSymbol,
       innerSymbol.valueDeclaration as ts.Declaration
     );
-    const declared = checker
-      .getPropertiesOfType(innerType)
-      .map((p) => p.getName())
-      .sort();
-    expect(declared).toEqual([...(inner.required as string[])].sort());
+    const declared = new Map(
+      checker
+        .getPropertiesOfType(innerType)
+        .map((p) => [p.getName(), Boolean(p.flags & ts.SymbolFlags.Optional)] as const)
+    );
+    const required = new Set((inner.required ?? []) as string[]);
+    expect([...declared.keys()].sort()).toEqual(
+      Object.keys((inner.properties ?? {}) as JsonObject).sort()
+    );
+    for (const [name, optional] of declared) {
+      expect(
+        optional,
+        required.has(name)
+          ? `${key}.${name} is required by the schema but optional in protocol.ts`
+          : `${key}.${name} is optional in the schema but non-optional in protocol.ts`
+      ).toBe(!required.has(name));
+    }
   });
 });
 

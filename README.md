@@ -34,7 +34,9 @@ Almost like Caude native agent
 ## Install
 
 - [bun](https://bun.com) >= 1.4
-- [Codex CLI](https://github.com/openai/codex) installed and logged in.
+- [Codex CLI](https://github.com/openai/codex) 0.101.0 or newer, installed and
+  logged in. Every session runs on `codex app-server`, which older builds do not
+  carry.
 
 ### Claude Code
 

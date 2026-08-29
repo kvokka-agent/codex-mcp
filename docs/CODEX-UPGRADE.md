@@ -89,9 +89,14 @@ Then `bun run check`.
 
 ## Latest run
 
-- Date: `2026-02-27`, local environment
-- `codex` version: `codex-cli 0.106.0`
+- Date: `2026-08-29`, local environment
+- `codex` version: `codex-cli 0.150.1`
 - Command: `codex app-server generate-json-schema --experimental --out codex-schema`
-- Result: no diff under `codex-schema`, no change to `codex-schema/metadata.json`
+- Result: a diff across the whole bundle. Client request methods went from 52 to
+  153, server notifications from 41 to 79 and server-to-client requests from 7
+  to 11; the `v1/` conversation API is down to `InitializeParams` and
+  `InitializeResponse`, and `EventMsg.json` — the schema of the
+  `codex exec --json` event stream — is gone. `src/app-server/protocol.ts`, the
+  tests and the documents followed in the same pull request.
 
 Each pass overwrites this section.
