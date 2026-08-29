@@ -31,6 +31,7 @@
     "typecheck": "tsc --noEmit",
     "check": "bun run lint && bun run format:check && bun run typecheck && bun run build && bun test && bun run check:stdio && bun run smoke:mcp && bun run lint:md",
     "test": "bun test",
+    "coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov && bun scripts/coverage-report.mjs",
     "test:watch": "bun test --watch",
     "prepublishOnly": "bun run build",
     "check:stdio": "bun scripts/check-stdio.mjs --timeout-ms 6000",
@@ -38,7 +39,8 @@
     "smoke:mcp": "bun scripts/mcp-smoke.mjs",
     "lint": "eslint src/ tests/",
     "lint:md": "rumdl check .",
-    "lint:fallow": "fallow; code=$?; [ $code -le 1 ] && exit 0; exit $code",
+    "lint:fallow": "bun run coverage && bun run fallow:report",
+    "fallow:report": "fallow; code=$?; [ $code -le 1 ] && exit 0; exit $code",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\""
   },

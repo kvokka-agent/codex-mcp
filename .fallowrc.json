@@ -3,5 +3,8 @@
   "entry": ["scripts/*.mjs"],
   "dynamicallyLoaded": ["plugins/codex-mcp/hooks/*.mjs", "tests/helpers/fake-codex.mjs"],
   "ignorePatterns": ["codex-schema/**"],
-  "includeEntryExports": true
+  "includeEntryExports": true,
+  "health": {
+    "coverage": "coverage/coverage-final.json"
+  }
 }

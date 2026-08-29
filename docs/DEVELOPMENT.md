@@ -132,6 +132,18 @@ live owner's alone, and a resume that carries the thread on — therefore carrie
 evidence from Linux and macOS only. On Windows the run is green without having
 measured them. The pieces underneath are covered per platform by the unit tests.
 
+## Static analysis
+
+```bash
+bun run lint:fallow
+```
+
+Runs the tests with coverage, converts the lcov bun writes into the Istanbul
+report fallow reads, then runs fallow against it. Handed no report fallow
+estimates coverage instead, and every CRAP score comes out inflated. The CI
+`check` job runs this command in place of a bare `bun test`, so the suite runs
+once.
+
 ## The plugin from the working tree
 
 `plugins/codex-mcp/` ships the `codex` subagent and the `PreToolUse` hook
