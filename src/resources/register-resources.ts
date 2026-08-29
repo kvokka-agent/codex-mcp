@@ -477,7 +477,7 @@ function delegationTaskLines(): string[] {
     "| Quick bug fix | `on-request` | `workspace-write` | Codex edits inside the sandbox and asks only to step outside it |",
     "| Feature implementation | `on-request` | `workspace-write` | Same, and the poll loop answers what a longer task raises |",
     "| Sensitive refactor | `untrusted` | `workspace-write` | Codex asks before each command; requires active polling |",
-    "| Full autonomy | `never` | `workspace-write` | No prompts — only for well-scoped, trusted tasks |",
+    "| Unattended run | `never` | `danger-full-access` | No prompts, and nothing to step outside of. `never` refuses a command that needs approval rather than granting it, so pair it with a sandbox wide enough for the work |",
     "| Network access needed | `on-request` | `danger-full-access` | Rare; avoid unless genuinely required |",
     "",
     "**Key rule:** `read-only` sandbox already prevents writes, so `approvalPolicy: 'never'` is safe with it. Avoid `untrusted` + `read-only` — every read command triggers approval for no safety gain.",
@@ -499,7 +499,7 @@ function delegationPolicyLines(defaults: SessionDefaults): string[] {
           )}, which ${SESSION_DEFAULT_ENV.approvalPolicy} and ${SESSION_DEFAULT_ENV.sandbox} set.`
       : "A call states its own approval policy and sandbox; the server carries no default for either.",
     "",
-    "- `never`: no interactive prompts. Best for read-only review or tightly scoped trusted tasks.",
+    "- `never`: no interactive prompts, and no escalation either — a command that needs approval is refused with `approval required by policy, but AskForApproval is set to Never`. Pair it with a sandbox that already permits the work: `read-only` for review, `danger-full-access` for an unattended run.",
     "- `on-request`: Codex works inside the sandbox and asks when it wants to step outside it. The pragmatic choice for implementation work, and it needs a human or outer agent polling to answer.",
     "- `untrusted`: strictest interactive mode; expect frequent prompts and higher timeout sensitivity.",
     `- Default approval timeout is ${defaults.approvalTimeoutMs}ms. If interactive approvals are possible, raise \`advanced.approvalTimeoutMs\` to at least 300000 so requests do not expire between normal running-session polls.`,
