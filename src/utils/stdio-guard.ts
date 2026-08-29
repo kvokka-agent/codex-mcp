@@ -6,7 +6,7 @@
  * - Support caller-selected behavior via CODEX_MCP_STDIO_MODE.
  */
 
-export const STDIO_MODES = ["auto", "strict", "off"] as const;
+const STDIO_MODES = ["auto", "strict", "off"] as const;
 export type StdioMode = (typeof STDIO_MODES)[number];
 
 export interface StdioModeResolution {
@@ -70,17 +70,7 @@ export function runStdioPreflight(opts: StdioPreflightOptions = {}): StdioPrefli
 
   // In "off" mode, guard is intentionally disabled.
   if (modeResolution.mode === "off") {
-    return {
-      mode: modeResolution.mode,
-      modeSource: modeResolution.source,
-      invalidMode: modeResolution.invalidRaw,
-      riskLevel: "low",
-      riskReasons: [],
-      blockingReasons: [],
-      notes,
-      suggestions: [],
-      shouldBlock: false,
-    };
+    return guardDisabledResult(modeResolution, notes);
   }
 
   const blockingReasons: string[] = [];
@@ -112,6 +102,24 @@ export function runStdioPreflight(opts: StdioPreflightOptions = {}): StdioPrefli
     notes,
     suggestions: riskReasons.length > 0 ? buildFixSuggestions(platform) : [],
     shouldBlock,
+  };
+}
+
+/** What the preflight reports when the caller switched the guard off: the mode it read, and nothing else. */
+function guardDisabledResult(
+  modeResolution: StdioModeResolution,
+  notes: string[]
+): StdioPreflightResult {
+  return {
+    mode: modeResolution.mode,
+    modeSource: modeResolution.source,
+    invalidMode: modeResolution.invalidRaw,
+    riskLevel: "low",
+    riskReasons: [],
+    blockingReasons: [],
+    notes,
+    suggestions: [],
+    shouldBlock: false,
   };
 }
 

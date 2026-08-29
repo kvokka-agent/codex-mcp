@@ -18,9 +18,9 @@ import { atomicWriteJson } from "./atomic-writer.js";
 import { START_TIME_SLOP_MS, identifyProcess, ownStartedAt, probePid } from "./process-identity.js";
 
 /** The file a session's owner writes into the session directory. */
-export const OWNER_FILE = "owner.json";
+const OWNER_FILE = "owner.json";
 
-export interface SessionOwner {
+interface SessionOwner {
   /** Process id of the codex-mcp server holding the session. */
   pid: number;
   /** The instant that process started, which proves the pid was not reused. */
@@ -40,7 +40,7 @@ export type OwnerState =
   | { kind: "gone"; owner: SessionOwner };
 
 /** The claim this process writes for a session it drives. */
-export function ownClaim(): SessionOwner {
+function ownClaim(): SessionOwner {
   return { pid: process.pid, startedAt: ownStartedAt() };
 }
 

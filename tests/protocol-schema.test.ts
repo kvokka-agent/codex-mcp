@@ -301,27 +301,49 @@ function assertDeclaredFieldsExist(
   expect(declared.length, `${path} declares no field at all`).toBeGreaterThan(0);
 
   for (const prop of declared) {
-    const name = prop.getName();
-    expect(
-      known,
-      `${path}.${name} is declared in protocol.ts but ${file} defines no such field`
-    ).toContain(name);
-    const optional = Boolean(prop.flags & ts.SymbolFlags.Optional);
-    expect(
-      optional,
-      required.has(name)
-        ? `${path}.${name} is required by ${file} but optional in protocol.ts`
-        : `${path}.${name} is optional in ${file} but non-optional in protocol.ts`
-    ).toBe(!required.has(name));
-
-    const declaration = prop.valueDeclaration ?? prop.declarations?.[0];
-    if (!declaration) continue;
-    const child = resolveNode(properties[name] as JsonObject, doc);
-    if (!child.properties) continue;
-    const childType = checker.getTypeOfSymbolAtLocation(prop, declaration);
-    if (!(childType.flags & ts.TypeFlags.Object) && !childType.isUnion()) continue;
-    assertDeclaredFieldsExist(childType, child, doc, file, `${path}.${name}`);
+    assertFieldMatches(prop, known, required, file, path);
+    descendIntoField(prop, properties, doc, file, path);
   }
+}
+
+/** The field exists in the schema, and carries the optionality the schema gives it. */
+function assertFieldMatches(
+  prop: ts.Symbol,
+  known: string[],
+  required: Set<string>,
+  file: string,
+  path: string
+): void {
+  const name = prop.getName();
+  expect(
+    known,
+    `${path}.${name} is declared in protocol.ts but ${file} defines no such field`
+  ).toContain(name);
+  const optional = Boolean(prop.flags & ts.SymbolFlags.Optional);
+  expect(
+    optional,
+    required.has(name)
+      ? `${path}.${name} is required by ${file} but optional in protocol.ts`
+      : `${path}.${name} is optional in ${file} but non-optional in protocol.ts`
+  ).toBe(!required.has(name));
+}
+
+/** Recurses into a field only where both sides describe an object. */
+function descendIntoField(
+  prop: ts.Symbol,
+  properties: JsonObject,
+  doc: JsonObject,
+  file: string,
+  path: string
+): void {
+  const name = prop.getName();
+  const declaration = prop.valueDeclaration ?? prop.declarations?.[0];
+  if (!declaration) return;
+  const child = resolveNode(properties[name] as JsonObject, doc);
+  if (!child.properties) return;
+  const childType = checker.getTypeOfSymbolAtLocation(prop, declaration);
+  if (!(childType.flags & ts.TypeFlags.Object) && !childType.isUnion()) return;
+  assertDeclaredFieldsExist(childType, child, doc, file, `${path}.${name}`);
 }
 
 class MockStdin extends EventEmitter {

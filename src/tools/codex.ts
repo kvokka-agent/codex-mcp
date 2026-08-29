@@ -6,30 +6,14 @@
  * Codex says it is working on something new.
  */
 import type { SessionManager } from "../session/manager.js";
-import type { ProgressInfo, SessionStartResult } from "../types.js";
+import type { SessionStartResult } from "../types.js";
 import { ErrorCode } from "../types.js";
 import type { CodexToolParams } from "../utils/config.js";
 import { extractSpawnOptions } from "../utils/config.js";
 import type { SessionDefaults } from "../utils/session-defaults.js";
 import { SESSION_DEFAULT_ENV } from "../utils/session-defaults.js";
 import { resolveAndValidateCwd } from "../utils/cwd.js";
-import {
-  coerceProgressForStatus,
-  interactionStateForStatus,
-  recommendedNextActionForStatus,
-} from "../utils/execution.js";
-
-function safeGetProgress(
-  sessionManager: SessionManager,
-  sessionId: string
-): ProgressInfo | undefined {
-  return typeof (sessionManager as SessionManager & { getProgress?: unknown }).getProgress ===
-    "function"
-    ? (
-        sessionManager as SessionManager & { getProgress: (id: string) => ProgressInfo }
-      ).getProgress(sessionId)
-    : undefined;
-}
+import { startedTurnResult } from "../utils/execution.js";
 
 export async function executeCodex(
   args: CodexToolParams,
@@ -66,13 +50,5 @@ export async function executeCodex(
     advanced
   );
 
-  return {
-    ...startResult,
-    progress: coerceProgressForStatus(
-      "running",
-      safeGetProgress(sessionManager, startResult.sessionId) ?? startResult.progress
-    ),
-    interactionState: interactionStateForStatus("running"),
-    recommendedNextAction: recommendedNextActionForStatus("running"),
-  };
+  return startedTurnResult(sessionManager, startResult);
 }

@@ -107,6 +107,32 @@ function loadProtocolMessages(
   return index;
 }
 
+function recordProperties(
+  name: string,
+  properties: SchemaNode,
+  index: Map<string, Set<string>>
+): void {
+  const key = name.toLowerCase();
+  const known = index.get(key) ?? new Set<string>();
+  for (const property of Object.keys(properties)) known.add(property);
+  index.set(key, known);
+}
+
+/** Walks one entry of a node: a named schema container carries its own names. */
+function indexEntry(
+  key: string,
+  value: unknown,
+  name: string | undefined,
+  index: Map<string, Set<string>>
+): void {
+  if ((key === "definitions" || key === "properties") && value && typeof value === "object") {
+    for (const [child, body] of Object.entries(value as SchemaNode))
+      indexMessage(body, child, index);
+    return;
+  }
+  indexMessage(value, name, index);
+}
+
 function indexMessage(
   node: unknown,
   name: string | undefined,
@@ -119,20 +145,8 @@ function indexMessage(
   if (!node || typeof node !== "object") return;
   const record = node as SchemaNode;
   const properties = record.properties as SchemaNode | undefined;
-  if (name && properties) {
-    const key = name.toLowerCase();
-    const known = index.get(key) ?? new Set<string>();
-    for (const property of Object.keys(properties)) known.add(property);
-    index.set(key, known);
-  }
-  for (const [key, value] of Object.entries(record)) {
-    if ((key === "definitions" || key === "properties") && value && typeof value === "object") {
-      for (const [child, body] of Object.entries(value as SchemaNode))
-        indexMessage(body, child, index);
-    } else {
-      indexMessage(value, name, index);
-    }
-  }
+  if (name && properties) recordProperties(name, properties, index);
+  for (const [key, value] of Object.entries(record)) indexEntry(key, value, name, index);
 }
 
 const PROTOCOL_MESSAGES = loadProtocolMessages(

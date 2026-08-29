@@ -54,42 +54,50 @@ let threadId = null;
 let turnCounter = 0;
 let activeTurnId = null;
 
-function handle(msg) {
-  switch (msg.method) {
-    case "initialize":
-      reply(msg.id, { userAgent: "fake-codex/1.0" });
-      return;
-    case "thread/start":
-      threadId = `thr_${randomUUID()}`;
-      reply(msg.id, { thread: { id: threadId, status: { type: "idle" } } });
-      notify("thread/started", { threadId, thread: { id: threadId, status: { type: "idle" } } });
-      return;
-    case "thread/resume":
-      threadId = msg.params?.threadId ?? threadId;
-      reply(msg.id, { thread: { id: threadId, status: { type: "idle" } } });
-      notify("thread/started", { threadId, thread: { id: threadId, status: { type: "idle" } } });
-      return;
-    case "thread/fork": {
-      const forked = `thr_${randomUUID()}`;
-      reply(msg.id, { thread: { id: forked, status: { type: "idle" } } });
-      return;
-    }
-    case "turn/start":
-      startTurn(msg);
-      return;
-    case "turn/interrupt":
-      reply(msg.id, {});
-      if (activeTurnId) {
-        completeTurn(activeTurnId, "interrupted", "");
-      }
-      return;
-    default:
-      send({
-        jsonrpc: "2.0",
-        id: msg.id,
-        error: { code: -32601, message: `fake-codex: no method ${msg.method}` },
-      });
+function startThread(msg) {
+  threadId = `thr_${randomUUID()}`;
+  reply(msg.id, { thread: { id: threadId, status: { type: "idle" } } });
+  notify("thread/started", { threadId, thread: { id: threadId, status: { type: "idle" } } });
+}
+
+function resumeThread(msg) {
+  threadId = msg.params?.threadId ?? threadId;
+  reply(msg.id, { thread: { id: threadId, status: { type: "idle" } } });
+  notify("thread/started", { threadId, thread: { id: threadId, status: { type: "idle" } } });
+}
+
+function forkThread(msg) {
+  const forked = `thr_${randomUUID()}`;
+  reply(msg.id, { thread: { id: forked, status: { type: "idle" } } });
+}
+
+function interruptTurn(msg) {
+  reply(msg.id, {});
+  if (activeTurnId) {
+    completeTurn(activeTurnId, "interrupted", "");
   }
+}
+
+const METHODS = {
+  initialize: (msg) => reply(msg.id, { userAgent: "fake-codex/1.0" }),
+  "thread/start": startThread,
+  "thread/resume": resumeThread,
+  "thread/fork": forkThread,
+  "turn/start": startTurn,
+  "turn/interrupt": interruptTurn,
+};
+
+function handle(msg) {
+  const method = METHODS[msg.method];
+  if (method) {
+    method(msg);
+    return;
+  }
+  send({
+    jsonrpc: "2.0",
+    id: msg.id,
+    error: { code: -32601, message: `fake-codex: no method ${msg.method}` },
+  });
 }
 
 function promptText(params) {
@@ -100,6 +108,10 @@ function promptText(params) {
     .join(" ");
 }
 
+function activityOf(prompt) {
+  return /ACTIVITY=([^\s]+)/.exec(prompt)?.[1] ?? "Reading the request";
+}
+
 function startTurn(msg) {
   const turnId = `turn_${++turnCounter}`;
   activeTurnId = turnId;
@@ -107,10 +119,9 @@ function startTurn(msg) {
   notify("turn/started", { threadId, turn: { id: turnId, status: "in_progress" } });
 
   const prompt = promptText(msg.params);
-  const activity = /ACTIVITY=([^\s]+)/.exec(prompt)?.[1] ?? "Reading the request";
   // The scanner reads the marker out of the delta stream, so it arrives the way
   // a model emits it: split across deltas.
-  for (const delta of [`%%%ACTIVITY: ${activity}`, "%%%\n"]) {
+  for (const delta of [`%%%ACTIVITY: ${activityOf(prompt)}`, "%%%\n"]) {
     notify("item/agentMessage/delta", { threadId, turnId, itemId: "item_0", delta });
   }
 

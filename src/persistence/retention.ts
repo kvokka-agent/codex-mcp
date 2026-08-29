@@ -58,6 +58,113 @@ export function getDirSize(dirPath: string): number {
 }
 
 /**
+ * When the session last did something, as its own meta.json records it.
+ *
+ * A session directory whose meta.json is unusable is dated by its own mtime.
+ */
+function readLastActiveAt(dirPath: string, mtimeMs: number): number {
+  try {
+    const meta = JSON.parse(readFileSync(join(dirPath, "meta.json"), "utf-8"));
+    return new Date(meta.lastActiveAt || meta.createdAt || 0).getTime();
+  } catch {
+    return mtimeMs;
+  }
+}
+
+/**
+ * The session directories retention may act on: every entry that is a directory
+ * and that no running server holds.
+ */
+function collectSessionDirs(sessionsDir: string, entries: string[]): SessionDirInfo[] {
+  const dirs: SessionDirInfo[] = [];
+  for (const entry of entries) {
+    const dirPath = join(sessionsDir, entry);
+    // throwIfNoEntry: false — an entry removed between the listing and this call, and a
+    // dangling symlink, are both nothing to prune. Any other stat failure throws.
+    const stat = statSync(dirPath, { throwIfNoEntry: false });
+    if (!stat?.isDirectory()) continue;
+    if (hasLiveOwner(ownerState(readOwner(dirPath)))) continue;
+
+    dirs.push({
+      path: dirPath,
+      sessionId: entry,
+      lastActiveAt: readLastActiveAt(dirPath, stat.mtimeMs),
+      diskBytes: getDirSize(dirPath),
+    });
+  }
+  return dirs;
+}
+
+/** Take every session that has been idle for longer than `maxAgeMs`. */
+function addExpiredDirs(
+  dirs: SessionDirInfo[],
+  now: number,
+  maxAgeMs: number,
+  toRemove: Set<string>
+): void {
+  for (const dir of dirs) {
+    if (now - dir.lastActiveAt > maxAgeMs) {
+      toRemove.add(dir.path);
+    }
+  }
+}
+
+/** Take the oldest of what is left until at most `maxCount` sessions remain. */
+function addExcessDirs(dirs: SessionDirInfo[], maxCount: number, toRemove: Set<string>): void {
+  const remaining = dirs.filter((d) => !toRemove.has(d.path));
+  if (remaining.length > maxCount) {
+    const excess = remaining.length - maxCount;
+    for (let i = 0; i < excess; i++) {
+      toRemove.add(remaining[i]!.path);
+    }
+  }
+}
+
+/** Take the oldest of what is left until the total holds at most `maxDiskBytes`. */
+function addOversizeDirs(
+  dirs: SessionDirInfo[],
+  maxDiskBytes: number,
+  toRemove: Set<string>
+): void {
+  const remaining = dirs.filter((d) => !toRemove.has(d.path));
+  let totalSize = remaining.reduce((sum, d) => sum + d.diskBytes, 0);
+  for (const dir of remaining) {
+    if (totalSize <= maxDiskBytes) break;
+    toRemove.add(dir.path);
+    totalSize -= dir.diskBytes;
+  }
+}
+
+/** The directories the policy takes, oldest first. */
+function selectDirsToRemove(
+  dirs: SessionDirInfo[],
+  now: number,
+  maxAgeMs: number,
+  maxCount: number,
+  maxDiskBytes: number
+): Set<string> {
+  const toRemove = new Set<string>();
+  addExpiredDirs(dirs, now, maxAgeMs, toRemove);
+  addExcessDirs(dirs, maxCount, toRemove);
+  addOversizeDirs(dirs, maxDiskBytes, toRemove);
+  return toRemove;
+}
+
+/** Remove each directory, reporting the ones that could not go. Returns how many went. */
+function removeSessionDirs(toRemove: Set<string>): number {
+  let pruned = 0;
+  for (const dirPath of toRemove) {
+    try {
+      rmSync(dirPath, { recursive: true, force: true });
+      pruned++;
+    } catch (err) {
+      console.error(`[retention] Failed to remove ${dirPath}:`, err);
+    }
+  }
+  return pruned;
+}
+
+/**
  * Apply retention policy to `sessionsDir`, removing oldest sessions first.
  * Returns the number of sessions pruned.
  *
@@ -80,74 +187,11 @@ export function pruneSessionDirs(sessionsDir: string, policy?: RetentionPolicy):
   if (!statSync(sessionsDir, { throwIfNoEntry: false })) return 0;
   const entries = readdirSync(sessionsDir);
 
-  // Collect info
   const now = Date.now();
-  const dirs: SessionDirInfo[] = [];
-  for (const entry of entries) {
-    const dirPath = join(sessionsDir, entry);
-    // throwIfNoEntry: false — an entry removed between the listing and this call, and a
-    // dangling symlink, are both nothing to prune. Any other stat failure throws.
-    const stat = statSync(dirPath, { throwIfNoEntry: false });
-    if (!stat?.isDirectory()) continue;
-    if (hasLiveOwner(ownerState(readOwner(dirPath)))) continue;
-
-    let lastActiveAt: number;
-    try {
-      const meta = JSON.parse(readFileSync(join(dirPath, "meta.json"), "utf-8"));
-      lastActiveAt = new Date(meta.lastActiveAt || meta.createdAt || 0).getTime();
-    } catch {
-      // A session directory whose meta.json is unusable is dated by its own mtime.
-      lastActiveAt = stat.mtimeMs;
-    }
-
-    dirs.push({
-      path: dirPath,
-      sessionId: entry,
-      lastActiveAt,
-      diskBytes: getDirSize(dirPath),
-    });
-  }
+  const dirs = collectSessionDirs(sessionsDir, entries);
 
   // Sort oldest first
   dirs.sort((a, b) => a.lastActiveAt - b.lastActiveAt);
 
-  const toRemove = new Set<string>();
-
-  // 1. Age-based pruning
-  for (const dir of dirs) {
-    if (now - dir.lastActiveAt > maxAgeMs) {
-      toRemove.add(dir.path);
-    }
-  }
-
-  // 2. Count-based pruning (remove oldest until count <= maxCount)
-  const remaining = dirs.filter((d) => !toRemove.has(d.path));
-  if (remaining.length > maxCount) {
-    const excess = remaining.length - maxCount;
-    for (let i = 0; i < excess; i++) {
-      toRemove.add(remaining[i]!.path);
-    }
-  }
-
-  // 3. Size-based pruning (remove oldest until total size <= maxDiskBytes)
-  const afterCountPrune = dirs.filter((d) => !toRemove.has(d.path));
-  let totalSize = afterCountPrune.reduce((sum, d) => sum + d.diskBytes, 0);
-  for (const dir of afterCountPrune) {
-    if (totalSize <= maxDiskBytes) break;
-    toRemove.add(dir.path);
-    totalSize -= dir.diskBytes;
-  }
-
-  // Execute removal
-  let pruned = 0;
-  for (const dirPath of toRemove) {
-    try {
-      rmSync(dirPath, { recursive: true, force: true });
-      pruned++;
-    } catch (err) {
-      console.error(`[retention] Failed to remove ${dirPath}:`, err);
-    }
-  }
-
-  return pruned;
+  return removeSessionDirs(selectDirsToRemove(dirs, now, maxAgeMs, maxCount, maxDiskBytes));
 }

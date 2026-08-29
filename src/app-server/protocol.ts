@@ -5,6 +5,13 @@
  * Wire format for stdio communication with codex app-server subprocess.
  */
 
+// fallow-ignore-file unused-type -- this file is the wire model, and its consumer
+// reads it by name rather than by import: `tests/protocol-schema.test.ts` walks
+// `checker.getExportsOfModule(protocol.ts)` and holds each exported type against
+// the `codex-schema/` definition its `MODELLED_TYPES` map names. Dropping the
+// `export` keyword takes a type out of that table and out of the conformance
+// check with it.
+
 // ── JSON-RPC Base ──────────────────────────────────────────────────
 
 export type RequestId = string | number;

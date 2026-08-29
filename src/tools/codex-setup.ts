@@ -99,24 +99,21 @@ function probeCodexAuth(info: CodexExecutableInfo): CodexSetupResult["auth"] {
   };
 }
 
-export async function executeCodexSetup(
-  input: CodexSetupInput | undefined,
-  serverCwd: string
-): Promise<CodexSetupResult> {
-  const cwd = input?.cwd && input.cwd.trim() !== "" ? input.cwd : serverCwd;
-  const warnings: string[] = [];
-  const nextSteps: string[] = [];
+/** What the local machine answered about Codex, or what went wrong asking. */
+interface CodexProbe {
+  executable: CodexSetupResult["executable"];
+  auth: CodexSetupResult["auth"];
+  clientMode?: ClientMode;
+  internalExecutable: boolean;
+}
 
-  let executable: CodexSetupResult["executable"];
-  let auth: CodexSetupResult["auth"];
-  let clientMode: ClientMode | undefined;
+async function probeCodexEnvironment(): Promise<CodexProbe> {
   let internalExecutable = false;
-
   try {
     const info = resolveDefaultCodexExecutable();
     const available = info.source !== "default";
     internalExecutable = isCodexInternalExecutable(info);
-    executable = {
+    const executable: CodexSetupResult["executable"] = {
       ok: available,
       source: info.source,
       command: info.command,
@@ -127,46 +124,57 @@ export async function executeCodexSetup(
           : `Codex resolves via ${info.source}.`,
     };
 
-    if (available) {
-      auth = probeCodexAuth(info);
-      clientMode = await detectClientMode(info.command, info.isPath);
-    } else {
-      auth = {
-        ok: false,
-        state: "unknown",
-        detail: "Auth status not checked because no codex executable was detected.",
+    if (!available) {
+      return {
+        executable,
+        auth: {
+          ok: false,
+          state: "unknown",
+          detail: "Auth status not checked because no codex executable was detected.",
+        },
+        internalExecutable,
       };
     }
+
+    const auth = probeCodexAuth(info);
+    const clientMode = await detectClientMode(info.command, info.isPath);
+    return { executable, auth, clientMode, internalExecutable };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    executable = {
-      ok: false,
-      source: "error",
-      detail: message,
-    };
-    auth = {
-      ok: false,
-      state: "unknown",
-      detail: "Auth status not checked because executable resolution failed.",
+    return {
+      executable: {
+        ok: false,
+        source: "error",
+        detail: message,
+      },
+      auth: {
+        ok: false,
+        state: "unknown",
+        detail: "Auth status not checked because executable resolution failed.",
+      },
+      internalExecutable,
     };
   }
+}
 
-  const projectContext = {
-    hasUserConfig: existsSync(path.join(homedir(), ".codex", "config.toml")),
-    hasProjectConfig: existsSync(path.join(cwd, ".codex", "config.toml")),
-  };
+function collectSetupAdvice(
+  probe: CodexProbe,
+  projectContext: CodexSetupResult["projectContext"]
+): Pick<CodexSetupResult, "warnings" | "nextSteps"> {
+  const warnings: string[] = [];
+  const nextSteps: string[] = [];
 
-  if (!executable.ok) {
-    warnings.push(executable.detail);
+  if (!probe.executable.ok) {
+    warnings.push(probe.executable.detail);
     nextSteps.push(
       "Install Codex or fix CODEX_MCP_COMMAND / CODEX_MCP_PATH so the executable can be resolved."
     );
   }
-  if (auth.state === "unauthenticated") {
-    warnings.push(auth.detail);
+  if (probe.auth.state === "unauthenticated") {
+    warnings.push(probe.auth.detail);
     nextSteps.push("Run `codex login` and rerun `codex_setup`.");
-  } else if (auth.state === "unknown" && !internalExecutable) {
-    warnings.push(auth.detail);
+  } else if (probe.auth.state === "unknown" && !probe.internalExecutable) {
+    warnings.push(probe.auth.detail);
     nextSteps.push(
       "Verify Codex authentication explicitly (for example with `codex login status`) before relying on this environment."
     );
@@ -174,20 +182,37 @@ export async function executeCodexSetup(
   if (!projectContext.hasUserConfig && !projectContext.hasProjectConfig) {
     warnings.push("No Codex config.toml was found in ~/.codex or this project.");
   }
-  if (clientMode === "exec") {
+  if (probe.clientMode === "exec") {
     warnings.push(
       "Codex app-server support was not detected; codex-mcp would run in exec fallback mode with fewer capabilities."
     );
   }
 
+  return { warnings, nextSteps };
+}
+
+export async function executeCodexSetup(
+  input: CodexSetupInput | undefined,
+  serverCwd: string
+): Promise<CodexSetupResult> {
+  const cwd = input?.cwd && input.cwd.trim() !== "" ? input.cwd : serverCwd;
+  const probe = await probeCodexEnvironment();
+
+  const projectContext = {
+    hasUserConfig: existsSync(path.join(homedir(), ".codex", "config.toml")),
+    hasProjectConfig: existsSync(path.join(cwd, ".codex", "config.toml")),
+  };
+
+  const { warnings, nextSteps } = collectSetupAdvice(probe, projectContext);
+
   return {
-    ready: executable.ok && auth.ok,
+    ready: probe.executable.ok && probe.auth.ok,
     cwd,
-    executable,
-    auth,
+    executable: probe.executable,
+    auth: probe.auth,
     runtime: {
       sameMachineRequired: true,
-      clientMode,
+      clientMode: probe.clientMode,
       stateDir: resolveCodexStateDir(),
     },
     projectContext,

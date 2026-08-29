@@ -34,7 +34,7 @@ export function probePid(pid: number): Liveness {
 }
 
 /** What a source reported about a live pid. */
-export interface LiveProcess {
+interface LiveProcess {
   /** Epoch milliseconds at which the process started. */
   startMs: number;
   /** Process group id, or null when the source did not report one. */
@@ -62,7 +62,7 @@ export interface ProcessCheck {
 }
 
 export const UNKNOWN_PROCESS: ProcessCheck = { identity: "unknown", leadsGroup: false };
-export const MISMATCHED_PROCESS: ProcessCheck = { identity: "mismatch", leadsGroup: false };
+const MISMATCHED_PROCESS: ProcessCheck = { identity: "mismatch", leadsGroup: false };
 
 /**
  * The slop allowed between a recorded spawn instant and the start time the OS
@@ -267,7 +267,7 @@ export function parseLstartMs(lstart: string): number | null {
  * time alone, which leaves the group unknown; Linux then falls back to /proc,
  * which carries both. Returns null when no source answers.
  */
-export function readPosixProcess(pid: number): LiveProcess | null {
+function readPosixProcess(pid: number): LiveProcess | null {
   // pgid is printed first: lstart holds spaces, so a trailing column would not
   // separate cleanly from it.
   const combined = runPs(pid, "pgid=,lstart=");

@@ -34,7 +34,9 @@ jobs:
       # Before the tests: the end-to-end ones spawn the bundle, and a build
       # inside a test spends that test's own window on it.
       - run: bun run build
-      - run: bun test
+      # Runs the tests once, with coverage, and hands that coverage to fallow,
+      # which needs it for exact CRAP scores.
+      - run: bun run lint:fallow
       - run: bun run lint:md
 
   # What the published server does on the bun versions and the platforms it

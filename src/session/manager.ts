@@ -136,6 +136,20 @@ export interface SessionManagerOptions {
   persistence?: import("./persistence.js").SessionPersistence;
 }
 
+/** What `createSession` may be given beyond the session's own spawn options. */
+interface CreateSessionAdvanced {
+  baseInstructions?: string;
+  developerInstructions?: string;
+  personality?: Personality;
+  ephemeral?: boolean;
+  config?: Record<string, unknown>;
+  images?: string[];
+  outputSchema?: Record<string, unknown>;
+  summary?: SummaryMode;
+  approvalTimeoutMs?: number;
+}
+
+const TTL_WARNING_THRESHOLD_MS = 60_000;
 const MAX_WAITERS_PER_SESSION = 4;
 const EFFORT_FALLBACK_LEVEL: EffortLevel = "low";
 /**
@@ -156,6 +170,37 @@ const REASONING_PROGRESS_METHODS = new Set<string>([
 const PERSIST_OP_META = "session metadata";
 const PERSIST_OP_RESULT = "turn result";
 
+/**
+ * The notifications that go into the event log as progress and move nothing else.
+ *
+ * None of them is a failure, so they stay out of the "error" type and leave the
+ * session status alone.
+ */
+const PLAIN_PROGRESS_METHODS = new Set<string>([
+  Methods.THREAD_ARCHIVED,
+  Methods.THREAD_UNARCHIVED,
+  Methods.THREAD_NAME_UPDATED,
+  Methods.THREAD_TOKEN_USAGE_UPDATED,
+  Methods.FUZZY_FILE_SEARCH_SESSION_UPDATED,
+  Methods.FUZZY_FILE_SEARCH_SESSION_COMPLETED,
+  Methods.WINDOWS_WORLD_WRITABLE_WARNING,
+  Methods.ACCOUNT_LOGIN_COMPLETED,
+  Methods.COMMAND_TERMINAL_INTERACTION,
+  Methods.FILE_CHANGE_OUTPUT_DELTA,
+  Methods.REASONING_TEXT_DELTA,
+  Methods.REASONING_SUMMARY_DELTA,
+  Methods.REASONING_SUMMARY_PART_ADDED,
+  Methods.PLAN_DELTA,
+  Methods.MCP_TOOL_PROGRESS,
+  Methods.TURN_DIFF_UPDATED,
+  Methods.TURN_PLAN_UPDATED,
+  Methods.MODEL_REROUTED,
+  Methods.THREAD_CLOSED,
+  Methods.THREAD_COMPACTED,
+  Methods.DEPRECATION_NOTICE,
+  Methods.CONFIG_WARNING,
+]);
+
 const ACTING_PROGRESS_METHODS = new Set<string>([
   Methods.COMMAND_OUTPUT_DELTA,
   Methods.COMMAND_TERMINAL_INTERACTION,
@@ -164,6 +209,20 @@ const ACTING_PROGRESS_METHODS = new Set<string>([
   Methods.TURN_DIFF_UPDATED,
   Methods.TURN_PLAN_UPDATED,
 ]);
+
+/** How a pending request answers, and what it records, when its timeout fires. */
+interface PendingTimeout {
+  /** Names the action in the line a failed auto-answer logs. */
+  action: string;
+  /** Sends the answer to the app-server on the caller's behalf. */
+  respond: (result: unknown) => void;
+  /** The answer itself. */
+  response: unknown;
+  /** Recorded on the pending request; a user-input question decides nothing. */
+  decision?: string;
+  /** `approval_result` fields beyond `requestId` and `timeout`. */
+  event: Record<string, unknown>;
+}
 
 export class SessionManager {
   private sessions = new Map<string, SessionInfo>();
@@ -215,80 +274,42 @@ export class SessionManager {
   ingestRecovered(recovered: RecoveredSession[]): void {
     for (const rec of recovered) {
       if (this.sessions.has(rec.sessionId)) continue; // skip duplicates
-      if (rec.owner.kind === "held") {
-        console.error(
-          `[codex-mcp] Session ${rec.sessionId} is ${describeOwner(rec.owner)} — leaving it to that server`
-        );
-        continue;
-      }
-      const createdAt = normalizeOptionalString(rec.meta.createdAt);
-      const lastActiveAt = normalizeOptionalString(rec.meta.lastActiveAt);
-      if (!createdAt || !lastActiveAt) {
-        // Both timestamps decide when cleanup cancels the session and when retention drops
-        // its directory. Reading the clock for a missing one would date every restart as
-        // fresh activity and keep the directory for good, so the session stays out.
-        console.error(
-          `[codex-mcp] Skipping recovered session ${rec.sessionId}: meta.json records no ` +
-            `${!createdAt ? "createdAt" : "lastActiveAt"}`
-        );
-        continue;
-      }
-      const resolvedStatus = statusOfRecovered(rec);
-      const recoveredReason = normalizeOptionalString(rec.meta.cancelledReason);
-      const session: SessionInfo = {
-        sessionId: rec.meta.sessionId,
-        threadId: normalizeOptionalString(rec.meta.threadId),
-        status: resolvedStatus,
-        createdAt,
-        lastActiveAt,
-        cancelledAt: normalizeOptionalString(rec.meta.cancelledAt),
-        cancelledReason:
-          recoveredReason ??
-          (resolvedStatus === "error" && !SESSION_STATUSES.includes(rec.meta.status as never)
-            ? `Recovered with a status this server cannot read: ${JSON.stringify(rec.meta.status)}`
-            : undefined),
-        cwd: normalizeOptionalString(rec.meta.cwd),
-        model: normalizeOptionalString(rec.meta.model),
-        profile: normalizeOptionalString(rec.meta.profile),
-        approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
-        sandbox: rec.meta.sandbox as SandboxMode | undefined,
-        personality: rec.meta.personality as Personality | undefined,
-        effort: rec.meta.effort as EffortLevel | undefined,
-        summary: rec.meta.summary as SummaryMode | undefined,
-        config: isRecord(rec.meta.config) ? rec.meta.config : undefined,
-        baseInstructions: normalizeOptionalString(rec.meta.baseInstructions),
-        developerInstructions: normalizeOptionalString(rec.meta.developerInstructions),
-        approvalTimeoutMs:
-          typeof rec.meta.approvalTimeoutMs === "number" ? rec.meta.approvalTimeoutMs : undefined,
-        pendingRequests: new Map(),
-        lastResult: rec.result as TurnResult | undefined,
-        lastAgentMessageText:
-          typeof (rec.result as TurnResult | undefined)?.text === "string"
-            ? (rec.result as TurnResult).text
-            : typeof (rec.result as TurnResult | undefined)?.output === "string"
-              ? (rec.result as TurnResult).output
-              : undefined,
-        progressState: {
-          lastEventAt: lastActiveAt,
-          tokens: extractTokens((rec.result as TurnResult | undefined)?.turn),
-          activity: rec.lastActivity,
-          // The record holds the line, not the instant it arrived. The session
-          // was last active then, which is the closest the disk answers.
-          activityAt: rec.lastActivity === undefined ? undefined : lastActiveAt,
-        },
-      };
-      this.registerSession(session);
-      // The owner is gone, so its claim on the session goes with it.
-      if (rec.owner.kind === "gone") this.persistence?.release(rec.sessionId);
-      // Resume event log sequence numbering
-      if (rec.lastSeq >= 0) {
-        this.persistence?.setEventLogNextSeq(rec.sessionId, rec.lastSeq + 1);
-      }
-      this.attachEventSink(session);
-      // Record what the session now is, so the next reader sees `abandoned`
-      // rather than a `running` status no process backs.
-      if (resolvedStatus !== rec.meta.status) this.persistSessionIfChanged(session);
+      this.takeRecovered(rec);
     }
+  }
+
+  /** Take one recovered session into memory, or say on stderr why it stays on disk. */
+  private takeRecovered(rec: RecoveredSession): void {
+    if (rec.owner.kind === "held") {
+      console.error(
+        `[codex-mcp] Session ${rec.sessionId} is ${describeOwner(rec.owner)} — leaving it to that server`
+      );
+      return;
+    }
+    const createdAt = normalizeOptionalString(rec.meta.createdAt);
+    const lastActiveAt = normalizeOptionalString(rec.meta.lastActiveAt);
+    if (!createdAt || !lastActiveAt) {
+      // Both timestamps decide when cleanup cancels the session and when retention drops
+      // its directory. Reading the clock for a missing one would date every restart as
+      // fresh activity and keep the directory for good, so the session stays out.
+      console.error(
+        `[codex-mcp] Skipping recovered session ${rec.sessionId}: meta.json records no ` +
+          `${!createdAt ? "createdAt" : "lastActiveAt"}`
+      );
+      return;
+    }
+    const session = sessionOfRecovered(rec, createdAt, lastActiveAt);
+    this.registerSession(session);
+    // The owner is gone, so its claim on the session goes with it.
+    if (rec.owner.kind === "gone") this.persistence?.release(rec.sessionId);
+    // Resume event log sequence numbering
+    if (rec.lastSeq >= 0) {
+      this.persistence?.setEventLogNextSeq(rec.sessionId, rec.lastSeq + 1);
+    }
+    this.attachEventSink(session);
+    // Record what the session now is, so the next reader sees `abandoned`
+    // rather than a `running` status no process backs.
+    if (session.status !== rec.meta.status) this.persistSessionIfChanged(session);
   }
 
   /**
@@ -411,17 +432,7 @@ export class SessionManager {
     cwd: string,
     spawnOpts: AppServerSpawnOptions,
     effort: EffortLevel,
-    advanced?: {
-      baseInstructions?: string;
-      developerInstructions?: string;
-      personality?: Personality;
-      ephemeral?: boolean;
-      config?: Record<string, unknown>;
-      images?: string[];
-      outputSchema?: Record<string, unknown>;
-      summary?: SummaryMode;
-      approvalTimeoutMs?: number;
-    }
+    advanced?: CreateSessionAdvanced
   ): Promise<SessionStartResult> {
     const sessionId = `sess_${randomUUID().slice(0, 12)}`;
     const client = this.createClient();
@@ -435,28 +446,37 @@ export class SessionManager {
     const resolvedImages = advanced?.images
       ? advanced.images.map((p) => resolveAndValidateFilePath(p, cwd, "image"))
       : undefined;
-    const session: SessionInfo = {
+    const session = newSessionRecord({
       sessionId,
-      status: "running",
-      createdAt: now,
-      lastActiveAt: now,
-      approvalTimeoutMs,
+      now,
       cwd,
-      model: spawnOpts.model,
-      profile: spawnOpts.profile,
-      approvalPolicy: spawnOpts.approvalPolicy,
-      sandbox: spawnOpts.sandbox,
-      personality: advanced?.personality,
+      spawnOpts,
       effort,
-      summary: advanced?.summary,
-      config: spawnOpts.config,
-      pendingRequests: new Map(),
-      lastAgentMessageText: undefined,
-      progressState: { lastEventAt: now },
-      baseInstructions: advanced?.baseInstructions,
       developerInstructions,
-    };
+      approvalTimeoutMs,
+      advanced,
+    });
 
+    this.openNewSession(session, client);
+
+    try {
+      return await this.startFirstTurn(
+        session,
+        client,
+        spawnOpts,
+        prompt,
+        resolvedImages,
+        advanced
+      );
+    } catch (err) {
+      await this.discardFailedSession(session, client, err);
+      throw err;
+    }
+  }
+
+  /** Take a new session into memory, claim it for this server, and open its directory. */
+  private openNewSession(session: SessionInfo, client: ICodexClient): void {
+    const { sessionId } = session;
     this.registerSession(session);
     this.clients.set(sessionId, client);
     this.attachEventSink(session);
@@ -471,77 +491,93 @@ export class SessionManager {
       // `diskPersistence: true`.
       this.reportPersistFailure(PERSIST_OP_META, sessionId, err);
     }
+  }
 
-    try {
-      // Register event handlers before start to prevent unhandled "error" events
-      this.registerHandlers(sessionId, client, approvalTimeoutMs);
+  /** Start the app-server, open the thread and run the session's first turn on it. */
+  private async startFirstTurn(
+    session: SessionInfo,
+    client: ICodexClient,
+    spawnOpts: AppServerSpawnOptions,
+    prompt: string,
+    resolvedImages: string[] | undefined,
+    advanced: CreateSessionAdvanced | undefined
+  ): Promise<SessionStartResult> {
+    const { sessionId } = session;
+    // Register event handlers before start to prevent unhandled "error" events
+    this.registerHandlers(sessionId, client, session.approvalTimeoutMs);
 
-      // Start app-server subprocess
-      await client.start(spawnOpts);
+    // Start app-server subprocess
+    await client.start(spawnOpts);
 
-      // Start thread
-      const threadStartResult = await client.threadStart({
-        cwd,
-        model: spawnOpts.model,
-        approvalPolicy: spawnOpts.approvalPolicy,
-        sandbox: spawnOpts.sandbox,
-        personality: advanced?.personality,
-        ephemeral: advanced?.ephemeral,
-        baseInstructions: advanced?.baseInstructions,
-        developerInstructions,
-        config: advanced?.config,
-      });
-      const threadId = extractThreadId(threadStartResult);
-      session.threadId = threadId;
-      // The first turn can run for minutes and a client can die inside it. The
-      // thread id is what a resume needs, so it goes to disk on arrival rather
-      // than with the next status change.
-      this.persistSessionIfChanged(session);
+    // Start thread
+    const threadStartResult = await client.threadStart({
+      cwd: session.cwd,
+      model: spawnOpts.model,
+      approvalPolicy: spawnOpts.approvalPolicy,
+      sandbox: spawnOpts.sandbox,
+      personality: advanced?.personality,
+      ephemeral: advanced?.ephemeral,
+      baseInstructions: advanced?.baseInstructions,
+      developerInstructions: session.developerInstructions,
+      config: advanced?.config,
+    });
+    const threadId = extractThreadId(threadStartResult);
+    session.threadId = threadId;
+    // The first turn can run for minutes and a client can die inside it. The
+    // thread id is what a resume needs, so it goes to disk on arrival rather
+    // than with the next status change.
+    this.persistSessionIfChanged(session);
 
-      // Build input array
-      const input: UserInput[] = [{ type: "text", text: prompt }];
-      if (resolvedImages) {
-        for (const imagePath of resolvedImages) {
-          input.push({ type: "localImage", path: imagePath });
-        }
+    // Build input array
+    const input: UserInput[] = [{ type: "text", text: prompt }];
+    if (resolvedImages) {
+      for (const imagePath of resolvedImages) {
+        input.push({ type: "localImage", path: imagePath });
       }
-
-      // Start first turn
-      this.markTurnOutputSchema(sessionId, advanced?.outputSchema);
-      const turnStart = await this.startTurnWithCompatibilityFallback(client, {
-        threadId,
-        input,
-        effort,
-        summary: advanced?.summary,
-        outputSchema: advanced?.outputSchema,
-      });
-      const turnStartResult = turnStart.turnStartResult;
-
-      // Best-effort: seed activeTurnId from response if present (notifications are authoritative)
-      const startedTurnId = extractTurnId(turnStartResult);
-      if (startedTurnId) session.activeTurnId = startedTurnId;
-
-      return {
-        sessionId,
-        threadId,
-        status: "running",
-        pollInterval: DEFAULT_POLL_INTERVAL,
-        compatWarnings: turnStart.compatWarnings,
-        progress: this.getProgress(sessionId),
-      };
-    } catch (err) {
-      session.status = "error";
-      recordEvent(session, "error", {
-        message: redactPaths(err instanceof Error ? err.message : String(err)),
-      });
-      await client.destroy();
-      this.clients.delete(sessionId);
-      // Drop the half-created session from memory and from disk: the caller gets
-      // an error and no session id, and a leftover directory would come back as
-      // a recovered session on the next server start.
-      this.evictSession(sessionId, true);
-      throw err;
     }
+
+    // Start first turn
+    this.markTurnOutputSchema(sessionId, advanced?.outputSchema);
+    const turnStart = await this.startTurnWithCompatibilityFallback(client, {
+      threadId,
+      input,
+      effort: session.effort,
+      summary: advanced?.summary,
+      outputSchema: advanced?.outputSchema,
+    });
+    const turnStartResult = turnStart.turnStartResult;
+
+    // Best-effort: seed activeTurnId from response if present (notifications are authoritative)
+    const startedTurnId = extractTurnId(turnStartResult);
+    if (startedTurnId) session.activeTurnId = startedTurnId;
+
+    return {
+      sessionId,
+      threadId,
+      status: "running",
+      pollInterval: DEFAULT_POLL_INTERVAL,
+      compatWarnings: turnStart.compatWarnings,
+      progress: this.getProgress(sessionId),
+    };
+  }
+
+  /** Give up a session whose first turn never started, on disk as well as in memory. */
+  private async discardFailedSession(
+    session: SessionInfo,
+    client: ICodexClient,
+    err: unknown
+  ): Promise<void> {
+    const { sessionId } = session;
+    session.status = "error";
+    recordEvent(session, "error", {
+      message: redactPaths(err instanceof Error ? err.message : String(err)),
+    });
+    await client.destroy();
+    this.clients.delete(sessionId);
+    // Drop the half-created session from memory and from disk: the caller gets
+    // an error and no session id, and a leftover directory would come back as
+    // a recovered session on the next server start.
+    this.evictSession(sessionId, true);
   }
 
   // ── Session Reply ────────────────────────────────────────────────
@@ -549,37 +585,11 @@ export class SessionManager {
   async replyToSession(
     sessionId: string,
     prompt: string,
-    overrides?: {
-      model?: string;
-      approvalPolicy?: ApprovalPolicy;
-      effort?: EffortLevel;
-      summary?: SummaryMode;
-      personality?: Personality;
-      sandbox?: SandboxMode;
-      cwd?: string;
-      outputSchema?: Record<string, unknown>;
-    }
+    overrides?: TurnOverrides
   ): Promise<SessionStartResult> {
     const session = this.getSessionOrThrow(sessionId);
 
-    // Status first: cancelSession drops the client, so a client lookup ahead of this
-    // reports a cancelled session as SESSION_NOT_FOUND.
-    if (session.status === "cancelled") {
-      throw new Error(
-        `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be resumed`
-      );
-    }
-    if (session.status === "abandoned") {
-      throw new Error(
-        `Error [${ErrorCode.SESSION_NOT_RUNNING}]: Session '${sessionId}' was abandoned by the server that held it — ` +
-          `call codex_session(action="resume") to pick its thread back up`
-      );
-    }
-    if (session.status !== "idle" && session.status !== "error") {
-      throw new Error(
-        `Error [${ErrorCode.SESSION_BUSY}]: Session '${sessionId}' is ${session.status}, expected idle or error`
-      );
-    }
+    assertSessionAcceptsTurn(session, sessionId);
     if (!session.threadId) {
       throw new Error(
         `Error [${ErrorCode.INTERNAL}]: Session '${sessionId}' has no threadId, cannot reply`
@@ -588,47 +598,11 @@ export class SessionManager {
 
     const client = this.getClientOrThrow(sessionId);
 
-    // The finished turn's answer belongs to that turn: a check of the new one
-    // reports the new result or none.
-    session.lastResult = undefined;
-    session.lastAgentMessageText = undefined;
+    this.openReplyTurn(session);
 
-    session.status = "running";
-    session.lastActiveAt = new Date().toISOString();
-    this.persistSessionIfChanged(session);
+    const resolvedCwd = resolveTurnCwd(session, sessionId, overrides);
 
-    const input: UserInput[] = [{ type: "text", text: prompt }];
-
-    // A recovered session whose meta.json recorded no cwd has no base to resolve a
-    // relative override against, and the server's own cwd is not that base.
-    if (overrides?.cwd !== undefined && session.cwd === undefined && !isAbsolute(overrides.cwd)) {
-      throw new Error(
-        `Error [${ErrorCode.INVALID_ARGUMENT}]: Session '${sessionId}' records no cwd, so a relative cwd override cannot be resolved — pass an absolute path`
-      );
-    }
-    const resolvedCwd = overrides?.cwd
-      ? resolveAndValidateCwd(overrides.cwd, session.cwd ?? overrides.cwd)
-      : undefined;
-
-    const turnParams: TurnStartParams = {
-      threadId: session.threadId,
-      input,
-      model: overrides?.model,
-      approvalPolicy: overrides?.approvalPolicy,
-      // `turn/start` carries these on every turn; the thread holds none of them, so a
-      // turn that omits one takes the value from ~/.codex/config.toml rather than the
-      // one the session was started with.
-      effort: overrides?.effort ?? session.effort,
-      summary: overrides?.summary ?? session.summary,
-      personality: overrides?.personality ?? session.personality,
-      cwd: resolvedCwd,
-      outputSchema: overrides?.outputSchema,
-    };
-
-    // Map sandbox string to protocol object
-    if (overrides?.sandbox) {
-      turnParams.sandboxPolicy = toSandboxPolicy(overrides.sandbox);
-    }
+    const turnParams = buildTurnParams(session, session.threadId, prompt, overrides, resolvedCwd);
 
     let compatWarnings: string[] | undefined;
     this.markTurnOutputSchema(sessionId, overrides?.outputSchema);
@@ -639,66 +613,8 @@ export class SessionManager {
       const startedTurnId = extractTurnId(turnStartResult);
       if (startedTurnId) session.activeTurnId = startedTurnId;
 
-      // What the client did with the overrides this turn asked for, read after
-      // `turnStart` because that is the call the answer describes.
-      // `unappliedTurnOverrides` is the client naming what its command line could not
-      // carry; a client that reports none still says through `supportsTurnOverrides`
-      // that cwd and sandbox do not reach a turn past the first.
-      const canOverride = client.supportsTurnOverrides;
-      const requestedValue: Record<string, string | undefined> = {
-        sandbox: overrides?.sandbox,
-        cwd: resolvedCwd,
-      };
-      const requestedNames = Object.entries(requestedValue)
-        .filter(([, value]) => value !== undefined)
-        .map(([name]) => name);
-      const unapplied = client.unappliedTurnOverrides ?? (canOverride ? [] : requestedNames);
-      const applied = (name: string): boolean => !unapplied.includes(name);
-
-      if (resolvedCwd && canOverride && applied("cwd")) session.cwd = resolvedCwd;
-      if (overrides?.model) session.model = overrides.model;
-      if (overrides?.approvalPolicy) {
-        session.approvalPolicy = overrides.approvalPolicy as ApprovalPolicy;
-      }
-      // The turn parameters travel with the turn, so the newest one is what the next
-      // turn of this session — and a turn of the session after a resume — runs with.
-      if (overrides?.effort) session.effort = overrides.effort;
-      if (overrides?.summary) session.summary = overrides.summary;
-      if (overrides?.personality) session.personality = overrides.personality;
-      if (overrides?.sandbox && canOverride && applied("sandbox")) {
-        session.sandbox = overrides.sandbox as SandboxMode;
-      }
-      // The turn runs for minutes and the server can die inside it; what the session
-      // now runs with reaches meta.json here rather than at the next status change.
-      this.persistSessionIfChanged(session);
-
-      if (unapplied.length > 0) {
-        if (unapplied.includes("outputSchema")) {
-          // The turn output is not schema-constrained, so reading its text as structured
-          // output would hand the caller a shape the model was never asked for.
-          this.schemaConstrainedTurns.delete(sessionId);
-        }
-        // A caller narrowing the sandbox and reading `status: "running"` would otherwise
-        // take the narrower permissions for granted while codex keeps writing under the
-        // wider ones.
-        const effectiveValue: Record<string, string | undefined> = {
-          sandbox: session.sandbox,
-          cwd: session.cwd,
-        };
-        const named = unapplied.map((name) => {
-          const asked = requestedValue[name];
-          const kept = effectiveValue[name];
-          if (asked !== undefined && kept !== undefined) {
-            return `${name} '${asked}' (the turn keeps '${kept}')`;
-          }
-          return asked !== undefined ? `${name} '${asked}'` : name;
-        });
-        compatWarnings = [
-          ...(compatWarnings ?? []),
-          `This turn did not apply ${named.join(", ")}. Start a new session to change ` +
-            `${unapplied.length === 1 ? "it" : "them"}.`,
-        ];
-      }
+      const unappliedWarning = this.recordTurnOverrides(session, client, overrides, resolvedCwd);
+      if (unappliedWarning) compatWarnings = [...(compatWarnings ?? []), unappliedWarning];
     } catch (err) {
       session.status = "error";
       recordEvent(session, "error", {
@@ -717,6 +633,18 @@ export class SessionManager {
       compatWarnings,
       progress: this.getProgress(sessionId),
     };
+  }
+
+  /** Put the session on the turn it is about to start, and drop the finished turn's answer. */
+  private openReplyTurn(session: SessionInfo): void {
+    // The finished turn's answer belongs to that turn: a check of the new one
+    // reports the new result or none.
+    session.lastResult = undefined;
+    session.lastAgentMessageText = undefined;
+
+    session.status = "running";
+    session.lastActiveAt = new Date().toISOString();
+    this.persistSessionIfChanged(session);
   }
 
   // ── Session Management ───────────────────────────────────────────
@@ -895,23 +823,7 @@ export class SessionManager {
     // Persist cancelled status to disk
     this.persistSessionIfChanged(session);
 
-    // Resolve and clear all pending requests (avoid leaving hanging server-initiated requests)
-    for (const [reqId, req] of session.pendingRequests) {
-      if (req.timeoutHandle) clearTimeout(req.timeoutHandle);
-      if (!req.resolved && req.respond) {
-        req.resolved = true;
-        try {
-          if (req.kind === "command") req.respond({ decision: "cancel" });
-          else if (req.kind === "fileChange") req.respond({ decision: "cancel" });
-          else if (req.kind === "user_input") req.respond({ answers: {} });
-        } catch (err) {
-          console.error(
-            `[codex-mcp] Failed to respond pending request during cancel: session=${sessionId} request=${reqId} kind=${req.kind} error=${err instanceof Error ? err.message : String(err)}`
-          );
-        }
-      }
-      session.pendingRequests.delete(reqId);
-    }
+    this.cancelPendingRequests(session);
 
     recordEvent(session, "progress", {
       message: "Session cancelled",
@@ -946,6 +858,26 @@ export class SessionManager {
     if (client) {
       await client.destroy();
       this.clients.delete(sessionId);
+    }
+  }
+
+  /** Answer every request the cancelled session still holds open, so nothing waits on it. */
+  private cancelPendingRequests(session: SessionInfo): void {
+    const { sessionId } = session;
+    // Resolve and clear all pending requests (avoid leaving hanging server-initiated requests)
+    for (const [reqId, req] of session.pendingRequests) {
+      if (req.timeoutHandle) clearTimeout(req.timeoutHandle);
+      if (!req.resolved && req.respond) {
+        req.resolved = true;
+        try {
+          respondCancelled(req);
+        } catch (err) {
+          console.error(
+            `[codex-mcp] Failed to respond pending request during cancel: session=${sessionId} request=${reqId} kind=${req.kind} error=${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+      session.pendingRequests.delete(reqId);
     }
   }
 
@@ -1025,17 +957,7 @@ export class SessionManager {
     const dryRun = options?.dryRun ?? false;
     const includeDisk = options?.includeDisk ?? true;
     const now = Date.now();
-    const matchedSessionIds: string[] = [];
-
-    for (const [sessionId, session] of Array.from(this.sessions.entries())) {
-      if (!statuses.has(session.status)) continue;
-      if (typeof olderThanMs === "number" && olderThanMs > 0) {
-        const lastActive = new Date(session.lastActiveAt).getTime();
-        if (!Number.isFinite(lastActive)) continue;
-        if (now - lastActive < olderThanMs) continue;
-      }
-      matchedSessionIds.push(sessionId);
-    }
+    const matchedSessionIds = this.matchCleanableSessions(statuses, olderThanMs, now);
 
     if (dryRun) {
       return {
@@ -1047,6 +969,43 @@ export class SessionManager {
       };
     }
 
+    const { removedSessionIds, diskSessionsRemoved, diskFailures } = this.evictMatchedSessions(
+      matchedSessionIds,
+      includeDisk
+    );
+
+    return {
+      matchedSessionIds,
+      removedSessionIds,
+      removedCount: removedSessionIds.length,
+      diskSessionsRemoved,
+      dryRun: false,
+      // Without this, a failed removal reports the same numbers as `includeDisk: false`
+      // and the caller reads a directory that is still there as cleaned.
+      ...(diskFailures.length > 0 ? { message: stillOnDiskMessage(diskFailures) } : {}),
+    };
+  }
+
+  /** The sessions `clean` removes: those in one of `statuses` and idle for long enough. */
+  private matchCleanableSessions(
+    statuses: Set<string>,
+    olderThanMs: number | undefined,
+    now: number
+  ): string[] {
+    const matchedSessionIds: string[] = [];
+    for (const [sessionId, session] of Array.from(this.sessions.entries())) {
+      if (!statuses.has(session.status)) continue;
+      if (!isOlderThan(session.lastActiveAt, olderThanMs, now)) continue;
+      matchedSessionIds.push(sessionId);
+    }
+    return matchedSessionIds;
+  }
+
+  /** Drop each matched session, counting what went and naming what stayed on disk. */
+  private evictMatchedSessions(
+    matchedSessionIds: string[],
+    includeDisk: boolean
+  ): { removedSessionIds: string[]; diskSessionsRemoved: number; diskFailures: string[] } {
     let diskSessionsRemoved = 0;
     const removedSessionIds: string[] = [];
     const diskFailures: string[] = [];
@@ -1062,23 +1021,7 @@ export class SessionManager {
         diskFailures.push(`${sessionId} (${evicted.diskError})`);
       }
     }
-
-    return {
-      matchedSessionIds,
-      removedSessionIds,
-      removedCount: removedSessionIds.length,
-      diskSessionsRemoved,
-      dryRun: false,
-      // Without this, a failed removal reports the same numbers as `includeDisk: false`
-      // and the caller reads a directory that is still there as cleaned.
-      ...(diskFailures.length > 0
-        ? {
-            message:
-              `${diskFailures.length} session director${diskFailures.length === 1 ? "y is" : "ies are"} ` +
-              `still on disk: ${diskFailures.join(", ")}`,
-          }
-        : {}),
-    };
+    return { removedSessionIds, diskSessionsRemoved, diskFailures };
   }
 
   /**
@@ -1480,11 +1423,7 @@ export class SessionManager {
     sessionId: string,
     requestId: string,
     decision: string,
-    extra?: {
-      execpolicy_amendment?: string[];
-      network_policy_amendment?: NetworkPolicyAmendment;
-      denyMessage?: string;
-    }
+    extra?: ApprovalExtra
   ): void {
     const session = this.getSessionOrThrow(sessionId);
     const req = session.pendingRequests.get(requestId);
@@ -1496,87 +1435,10 @@ export class SessionManager {
     }
 
     // Validate decision by kind (avoid sending invalid protocol payloads)
-    if (req.kind === "command") {
-      const available = parseAvailableDecisionSet(req.availableDecisions);
-      if (available && !available.has(decision)) {
-        throw new Error(
-          `Error [${ErrorCode.INVALID_ARGUMENT}]: Decision '${decision}' is not available for this approval prompt`
-        );
-      }
-
-      // Backward-compat: object-form decisions must be explicitly advertised by newer CLIs.
-      if (!available && decision === "applyNetworkPolicyAmendment") {
-        throw new Error(
-          `Error [${ErrorCode.INVALID_ARGUMENT}]: Decision '${decision}' is not supported by this Codex CLI version (missing availableDecisions)`
-        );
-      }
-      if (!COMMAND_DECISIONS.includes(decision as (typeof COMMAND_DECISIONS)[number])) {
-        throw new Error(
-          `Error [${ErrorCode.INVALID_ARGUMENT}]: Invalid command decision '${decision}'`
-        );
-      }
-      if (
-        decision === "acceptWithExecpolicyAmendment" &&
-        (!extra?.execpolicy_amendment || extra.execpolicy_amendment.length === 0)
-      ) {
-        throw new Error(
-          `Error [${ErrorCode.INVALID_ARGUMENT}]: execpolicy_amendment required for acceptWithExecpolicyAmendment`
-        );
-      }
-
-      if (
-        decision !== "acceptWithExecpolicyAmendment" &&
-        extra?.execpolicy_amendment !== undefined
-      ) {
-        throw new Error(
-          `Error [${ErrorCode.INVALID_ARGUMENT}]: execpolicy_amendment is only valid for acceptWithExecpolicyAmendment`
-        );
-      }
-
-      if (decision === "applyNetworkPolicyAmendment") {
-        const amendment = extra?.network_policy_amendment;
-        if (!amendment) {
-          throw new Error(
-            `Error [${ErrorCode.INVALID_ARGUMENT}]: network_policy_amendment required for applyNetworkPolicyAmendment`
-          );
-        }
-        if (amendment.action !== "allow" && amendment.action !== "deny") {
-          throw new Error(
-            `Error [${ErrorCode.INVALID_ARGUMENT}]: network_policy_amendment.action must be 'allow' or 'deny'`
-          );
-        }
-        if (!amendment.host) {
-          throw new Error(
-            `Error [${ErrorCode.INVALID_ARGUMENT}]: network_policy_amendment.host required for applyNetworkPolicyAmendment`
-          );
-        }
-      } else if (extra?.network_policy_amendment !== undefined) {
-        throw new Error(
-          `Error [${ErrorCode.INVALID_ARGUMENT}]: network_policy_amendment is only valid for applyNetworkPolicyAmendment`
-        );
-      }
-    } else if (req.kind === "fileChange") {
-      if (!FILE_CHANGE_DECISIONS.includes(decision as (typeof FILE_CHANGE_DECISIONS)[number])) {
-        throw new Error(
-          `Error [${ErrorCode.INVALID_ARGUMENT}]: Invalid fileChange decision '${decision}'`
-        );
-      }
-    } else {
-      throw new Error(
-        `Error [${ErrorCode.INVALID_ARGUMENT}]: Request '${requestId}' is not an approval request`
-      );
-    }
+    assertApprovalDecision(req, requestId, decision, extra);
 
     // Build protocol response
-    let response: unknown;
-    if (req.kind === "command") {
-      response = buildCommandApprovalResponse(decision, {
-        execpolicy_amendment: extra?.execpolicy_amendment,
-        network_policy_amendment: extra?.network_policy_amendment,
-      });
-    } else if (req.kind === "fileChange") {
-      response = { decision } as FileChangeApprovalResponse;
-    }
+    const response = buildApprovalResponse(req, decision, extra);
 
     if (!response) {
       throw new Error(
@@ -1610,6 +1472,16 @@ export class SessionManager {
       denyMessage: extra?.denyMessage,
     });
 
+    this.settlePendingRequest(session, requestId);
+  }
+
+  /**
+   * Drop an answered request and give the session back the status it runs on.
+   *
+   * The waiters are woken last, so the poll they return to reads the session as
+   * it now stands rather than as it was while the request was open.
+   */
+  private settlePendingRequest(session: SessionInfo, requestId: string): void {
     // Remove resolved request to prevent unbounded growth
     session.pendingRequests.delete(requestId);
 
@@ -1619,7 +1491,7 @@ export class SessionManager {
     }
 
     // Wake any long-poll waiters so they see the status transition
-    this.notifyWaiters(sessionId);
+    this.notifyWaiters(session.sessionId);
   }
 
   // ── User Input Response ──────────────────────────────────────────
@@ -1664,14 +1536,7 @@ export class SessionManager {
       answers: loggableAnswers(req.params, answers),
     });
 
-    session.pendingRequests.delete(requestId);
-
-    if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
-      session.status = "running";
-    }
-
-    // Wake any long-poll waiters so they see the status transition
-    this.notifyWaiters(sessionId);
+    this.settlePendingRequest(session, requestId);
   }
 
   // ── Cleanup ──────────────────────────────────────────────────────
@@ -1726,6 +1591,487 @@ export class SessionManager {
     return client;
   }
 
+  /**
+   * Record what the turn actually ran with, and name what it could not apply.
+   *
+   * Read after `turnStart` because that is the call the answer describes.
+   * `unappliedTurnOverrides` is the client naming what its command line could
+   * not carry; a client that reports none still says through
+   * `supportsTurnOverrides` that cwd and sandbox do not reach a turn past the
+   * first. The return is the sentence for `compatWarnings`, or nothing when the
+   * turn applied everything it was asked for.
+   */
+  private recordTurnOverrides(
+    session: SessionInfo,
+    client: ICodexClient,
+    overrides: TurnOverrides | undefined,
+    resolvedCwd: string | undefined
+  ): string | undefined {
+    const canOverride = client.supportsTurnOverrides;
+    const requestedValue: Record<string, string | undefined> = {
+      sandbox: overrides?.sandbox,
+      cwd: resolvedCwd,
+    };
+    const requestedNames = Object.entries(requestedValue)
+      .filter(([, value]) => value !== undefined)
+      .map(([name]) => name);
+    const unapplied = client.unappliedTurnOverrides ?? (canOverride ? [] : requestedNames);
+
+    applyTurnOverrides(
+      session,
+      overrides,
+      resolvedCwd,
+      (name) => canOverride && !unapplied.includes(name)
+    );
+    // The turn runs for minutes and the server can die inside it; what the session
+    // now runs with reaches meta.json here rather than at the next status change.
+    this.persistSessionIfChanged(session);
+
+    if (unapplied.length === 0) return undefined;
+
+    if (unapplied.includes("outputSchema")) {
+      // The turn output is not schema-constrained, so reading its text as structured
+      // output would hand the caller a shape the model was never asked for.
+      this.schemaConstrainedTurns.delete(session.sessionId);
+    }
+    // A caller narrowing the sandbox and reading `status: "running"` would otherwise
+    // take the narrower permissions for granted while codex keeps writing under the
+    // wider ones.
+    return unappliedTurnWarning(unapplied, requestedValue, {
+      sandbox: session.sandbox,
+      cwd: session.cwd,
+    });
+  }
+
+  /** `thread/started` — the notification that carries the real thread id. */
+  private onThreadStarted(session: SessionInfo, method: string, p: Record<string, unknown>): void {
+    const thread = isRecord(p.thread) ? p.thread : undefined;
+    // Update session.threadId if the notification provides a real thread ID
+    // (e.g. ExecClient returns a synthetic ID from threadStart(), then the
+    // real ID arrives via the thread.started JSONL event).
+    const notifiedThreadId =
+      normalizeOptionalString(p.threadId) ?? normalizeOptionalString(thread?.id);
+    if (notifiedThreadId && notifiedThreadId !== session.threadId) {
+      session.threadId = notifiedThreadId;
+      this.persistSessionIfChanged(session);
+    }
+    // Thread.status is a ThreadStatus union object whose variant is named
+    // by `type` — "notLoaded" | "idle" | "systemError" | "active"
+    // (codex-schema/v2/ThreadStartedNotification.json → Thread.status →
+    // ThreadStatus), the same shape `thread/status/changed` carries.
+    const threadStatus = isRecord(thread?.status) ? thread.status : undefined;
+    recordEvent(session, "progress", {
+      method,
+      ...p,
+      threadId: notifiedThreadId,
+      status: normalizeOptionalString(threadStatus?.type),
+    });
+  }
+
+  /** `turn/completed` — the notification that writes `lastResult`. */
+  private onTurnCompleted(session: SessionInfo, method: string, p: Record<string, unknown>): void {
+    const turnObj = p.turn as Record<string, unknown> | undefined;
+    const completedTurnId = turnIdOfCompleted(session, turnObj);
+    const rawTurnOutput = outputOfCompleted(turnObj);
+    const finalText = rawTurnOutput ?? session.lastAgentMessageText;
+    const askedForSchema = this.schemaConstrainedTurns.delete(session.sessionId);
+    session.status = "idle";
+    session.activeTurnId = undefined;
+    session.lastResult = {
+      turnId: completedTurnId,
+      outcome: "completed",
+      text: finalText,
+      output: rawTurnOutput,
+      structuredOutput: askedForSchema ? parseStructuredOutput(finalText) : undefined,
+      // The turn record carries the assistant text a second time, in
+      // `output` or `items[].text`, and that copy has seen no stripping.
+      turn: stripActivityMarkersFromTurn(p.turn),
+      status: turnObj?.status as string | undefined,
+      turnError: turnObj?.error,
+      completedAt: new Date().toISOString(),
+    };
+    // Like `output`, `usage` is ExecClient's addition — it forwards the
+    // `usage` of the exec `turn.completed` record. App-server mode counts
+    // tokens through `thread/tokenUsage/updated` only, so this merge adds
+    // nothing there.
+    mergeProgressTokens(session, extractTokens(turnObj?.usage));
+    recordEvent(session, "result", {
+      method,
+      ...p,
+      turnId: completedTurnId,
+      status: normalizeOptionalString(turnObj?.status),
+    });
+    // Persist idle status + result to disk
+    this.persistSessionIfChanged(session);
+    this.persistResult(session);
+  }
+
+  /** `error` — a failure, or a reconnect when the server says it will retry. */
+  private onErrorNotification(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    const willRetry = p.willRetry as boolean;
+    if (!willRetry) {
+      session.status = "error";
+    }
+    const data: Record<string, unknown> = { method, ...p };
+    // The notification carries `[error, threadId, turnId, willRetry]` and
+    // no text of its own (codex-schema/v2/ErrorNotification.json).
+    // ErrorNotification.error is a TurnError object whose `message` carries the
+    // text; a bare string arrives from builds predating that shape.
+    if (typeof data.error === "string") {
+      data.error = redactPaths(data.error);
+    } else if (isRecord(data.error) && typeof data.error.message === "string") {
+      data.error = { ...data.error, message: redactPaths(data.error.message) };
+    }
+    if (willRetry) {
+      recordEvent(session, "progress", {
+        ...data,
+        method: "codex-mcp/reconnect",
+        sourceMethod: method,
+        phase: "retrying",
+      });
+      return;
+    }
+    recordEvent(session, "error", data);
+    // Persist error status to disk
+    this.persistSessionIfChanged(session);
+  }
+
+  /** `item/agentMessage/delta` — the stream the activity marker is lifted out of. */
+  private onAgentMessageDelta(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    if (typeof p.delta === "string") {
+      let lines = 0;
+      for (const line of scannerOf(session).push(p.delta)) {
+        recordActivity(session, line, normalizeOptionalString(p.itemId));
+        lines += 1;
+      }
+      // A new line is what the person waiting reads, so the poll holding
+      // this session answers with it rather than sitting out its window.
+      if (lines > 0) this.notifyWaiters(session.sessionId);
+    }
+    recordEvent(session, "output", { method, delta: p.delta, itemId: p.itemId });
+  }
+
+  /** `thread/status/changed` — the notification that moves the session status. */
+  private onThreadStatusChanged(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    const threadStatus = isRecord(p.status) ? p.status : undefined;
+    const statusType = normalizeOptionalString(threadStatus?.type);
+    const activeFlags = Array.isArray(threadStatus?.activeFlags)
+      ? (threadStatus.activeFlags as unknown[])
+      : undefined;
+    const nextStatus = sessionStatusForThreadStatus(session, statusType);
+    const statusChanged = nextStatus !== undefined && nextStatus !== session.status;
+    if (statusChanged) session.status = nextStatus;
+    const failed = session.status === "error" && statusChanged;
+    recordEvent(session, failed ? "error" : "progress", {
+      method,
+      ...p,
+      statusType,
+      activeFlags,
+    });
+    if (statusChanged) this.persistSessionIfChanged(session);
+  }
+
+  /**
+   * Put a pending request in the session and arm its timeout.
+   *
+   * A caller that never answers gets `timeout.response` sent on its behalf, and
+   * the session drops back to `running` once nothing is pending. The send is
+   * wrapped because the client may already be destroyed by the time the timer
+   * fires.
+   */
+  private awaitPendingRequest(
+    session: SessionInfo,
+    pending: PendingRequest,
+    approvalTimeoutMs: number,
+    request: Record<string, unknown>,
+    timeout: PendingTimeout
+  ): void {
+    const { sessionId } = session;
+    const { requestId } = pending;
+
+    pending.timeoutHandle = createUnrefTimeout(() => {
+      if (pending.resolved) return;
+      pending.resolved = true;
+      if (timeout.decision !== undefined) pending.decision = timeout.decision;
+      try {
+        timeout.respond(timeout.response);
+      } catch (err) {
+        console.error(
+          `[codex-mcp] Failed to ${timeout.action} timeout: session=${sessionId} request=${requestId} error=${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+      recordEvent(session, "approval_result", { requestId, ...timeout.event, timeout: true });
+      this.settlePendingRequest(session, requestId);
+    }, approvalTimeoutMs);
+
+    session.pendingRequests.set(requestId, pending);
+    session.status = "waiting_approval";
+    recordEvent(session, "approval_request", { requestId, ...request });
+  }
+
+  /** Route one notification to the handler that acts on it. */
+  private handleNotification(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    if (PLAIN_PROGRESS_METHODS.has(method)) {
+      recordEvent(session, "progress", { method, ...p });
+      return;
+    }
+
+    switch (method) {
+      case Methods.THREAD_STARTED:
+        this.onThreadStarted(session, method, p);
+        break;
+
+      case Methods.TURN_STARTED:
+        if (session.status !== "cancelled") onTurnStarted(session, method, p);
+        break;
+
+      case Methods.TURN_COMPLETED:
+        if (session.status !== "cancelled") this.onTurnCompleted(session, method, p);
+        break;
+
+      case Methods.ERROR:
+        if (session.status !== "cancelled") this.onErrorNotification(session, method, p);
+        break;
+
+      case Methods.AGENT_MESSAGE_DELTA:
+        this.onAgentMessageDelta(session, method, p);
+        break;
+
+      case Methods.ITEM_STARTED:
+      case Methods.ITEM_COMPLETED:
+      case Methods.RAW_RESPONSE_ITEM_COMPLETED:
+        onItemNotification(session, method, p);
+        break;
+
+      case Methods.COMMAND_OUTPUT_DELTA:
+        this.onCommandOutputDelta(session, method, p);
+        break;
+
+      case Methods.THREAD_STATUS_CHANGED:
+        this.onThreadStatusChanged(session, method, p);
+        break;
+
+      default:
+        // Ignore other notifications (account, config, etc.)
+        break;
+    }
+  }
+
+  /** `item/commandExecution/outputDelta` — the stream shell profile noise is cut from. */
+  private onCommandOutputDelta(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    // Filter known shell profile noise (PowerShell oh-my-posh, PSReadLine, etc.)
+    if (typeof p.delta === "string") {
+      const cleaned = stripShellNoise(p.delta);
+      if (cleaned.length === 0) return; // entire delta was noise, skip event
+      recordEvent(session, "progress", { method, ...p, delta: cleaned });
+    } else {
+      recordEvent(session, "progress", { method, ...p });
+    }
+  }
+
+  /** Route one server-initiated request to the handler that answers it. */
+  private handleServerRequest(
+    session: SessionInfo,
+    client: ICodexClient,
+    id: RequestId,
+    method: string,
+    params: unknown,
+    approvalTimeoutMs: number
+  ): void {
+    const { sessionId } = session;
+    switch (method) {
+      case Methods.COMMAND_APPROVAL:
+        this.awaitCommandApproval(session, client, id, method, params, approvalTimeoutMs);
+        break;
+
+      case Methods.FILE_CHANGE_APPROVAL:
+        this.awaitFileChangeApproval(session, client, id, method, params, approvalTimeoutMs);
+        break;
+
+      case Methods.USER_INPUT_REQUEST:
+        this.awaitUserInput(session, client, id, method, params, approvalTimeoutMs);
+        break;
+
+      case Methods.DYNAMIC_TOOL_CALL:
+        // Auto-reject: codex-mcp doesn't support dynamic tool calls
+        respondOrReport(sessionId, method, () =>
+          client.respondToServer(id, {
+            success: false,
+            contentItems: [{ type: "inputText", text: "Not supported by codex-mcp" }],
+          } as DynamicToolCallResponse)
+        );
+        break;
+
+      case Methods.AUTH_TOKEN_REFRESH:
+        respondOrReport(sessionId, method, () =>
+          client.respondErrorToServer(
+            id,
+            AUTH_REFRESH_UNSUPPORTED_CODE,
+            AUTH_REFRESH_UNSUPPORTED_MESSAGE
+          )
+        );
+        break;
+
+      case Methods.LEGACY_PATCH_APPROVAL:
+      case Methods.LEGACY_EXEC_APPROVAL:
+        respondOrReport(sessionId, method, () =>
+          client.respondToServer(id, { decision: "denied" } as LegacyApprovalResponse)
+        );
+        console.error(`[codex-mcp] Legacy approval request received: ${method}`);
+        break;
+
+      default:
+        respondOrReport(sessionId, method, () =>
+          client.respondErrorToServer(id, -32601, `Unhandled server request: ${method}`)
+        );
+        break;
+    }
+  }
+
+  /** Hold a command approval open for the caller, declining it if nobody answers. */
+  private awaitCommandApproval(
+    session: SessionInfo,
+    client: ICodexClient,
+    id: RequestId,
+    method: string,
+    params: unknown,
+    approvalTimeoutMs: number
+  ): void {
+    const requestId = `req_${randomUUID().slice(0, 8)}`;
+    const approvalParams = params as CommandApprovalParams & Record<string, unknown>;
+    const fields = commandApprovalFields(approvalParams);
+    const pending: PendingRequest = {
+      requestId,
+      kind: "command",
+      params,
+      ...correlationIds(approvalParams, method, session.sessionId),
+      ...fields,
+      createdAt: new Date().toISOString(),
+      resolved: false,
+      respond: (result) => client.respondToServer(id, result),
+    };
+
+    this.awaitPendingRequest(
+      session,
+      pending,
+      approvalTimeoutMs,
+      {
+        kind: "command",
+        itemId: approvalParams.itemId,
+        approvalId: fields.approvalId,
+        command: approvalParams.command,
+        cwd: approvalParams.cwd,
+        reason: fields.reason,
+        commandActions: fields.commandActions,
+        proposedExecpolicyAmendment: fields.proposedExecpolicyAmendment,
+        availableDecisions: fields.availableDecisions,
+        proposedNetworkPolicyAmendments: fields.proposedNetworkPolicyAmendments,
+        additionalPermissions: fields.additionalPermissions,
+        networkApprovalContext: fields.networkApprovalContext,
+      },
+      {
+        action: "auto-decline command approval",
+        respond: (result) => client.respondToServer(id, result),
+        response: { decision: "decline" } as CommandApprovalResponse,
+        decision: "decline",
+        event: { kind: "command", approvalId: fields.approvalId, decision: "decline" },
+      }
+    );
+  }
+
+  /** Hold a file-change approval open for the caller, declining it if nobody answers. */
+  private awaitFileChangeApproval(
+    session: SessionInfo,
+    client: ICodexClient,
+    id: RequestId,
+    method: string,
+    params: unknown,
+    approvalTimeoutMs: number
+  ): void {
+    const p = params as Record<string, unknown>;
+    const requestId = `req_${randomUUID().slice(0, 8)}`;
+    const reason = normalizeOptionalString(p.reason);
+    const pending: PendingRequest = {
+      requestId,
+      kind: "fileChange",
+      params,
+      ...correlationIds(p, method, session.sessionId),
+      reason,
+      createdAt: new Date().toISOString(),
+      resolved: false,
+      respond: (result) => client.respondToServer(id, result),
+    };
+
+    this.awaitPendingRequest(
+      session,
+      pending,
+      approvalTimeoutMs,
+      { kind: "fileChange", itemId: p.itemId, reason },
+      {
+        action: "auto-decline file-change approval",
+        respond: (result) => client.respondToServer(id, result),
+        response: { decision: "decline" } as FileChangeApprovalResponse,
+        decision: "decline",
+        event: { kind: "fileChange", decision: "decline" },
+      }
+    );
+  }
+
+  /** Hold a user-input question open for the caller, answering it empty if nobody does. */
+  private awaitUserInput(
+    session: SessionInfo,
+    client: ICodexClient,
+    id: RequestId,
+    method: string,
+    params: unknown,
+    approvalTimeoutMs: number
+  ): void {
+    const p = params as Record<string, unknown>;
+    const requestId = `req_${randomUUID().slice(0, 8)}`;
+    const pending: PendingRequest = {
+      requestId,
+      kind: "user_input",
+      params,
+      ...correlationIds(p, method, session.sessionId),
+      createdAt: new Date().toISOString(),
+      resolved: false,
+      respond: (result) => client.respondToServer(id, result),
+    };
+
+    this.awaitPendingRequest(
+      session,
+      pending,
+      approvalTimeoutMs,
+      { kind: "user_input", questions: p.questions },
+      {
+        action: "auto-answer user-input",
+        respond: (result) => client.respondToServer(id, result),
+        response: { answers: {} } as UserInputRequestResponse,
+        event: { kind: "user_input" },
+      }
+    );
+  }
+
   private registerHandlers(
     sessionId: string,
     client: ICodexClient,
@@ -1737,19 +2083,7 @@ export class SessionManager {
     // reports every process it spawns: app-server spawns one in `start()`,
     // exec spawns one per turn, so the file follows the live child.
     client.on("spawn", (pid: number, spawnedAt: string) => {
-      // spawnedAt is the instant the client spawned the process; the reaper
-      // matches it against the start time the OS reports for that pid.
-      const details: PidDetails & { spawnedAt?: string } = { model: session.model, spawnedAt };
-      try {
-        this.persistence?.writePidInfo(sessionId, pid, details);
-      } catch (err) {
-        // Every spawn that never reaches pid.json is a codex process the orphan reaper
-        // cannot find on the next start, so each one is reported rather than the first.
-        console.error(
-          `[codex-mcp] Failed to persist pid.json — pid ${pid} will not be reaped after a ` +
-            `restart: session=${sessionId} error=${describeError(err)}`
-        );
-      }
+      this.persistSpawnedPid(session, pid, spawnedAt);
     });
 
     // Handle notifications
@@ -1758,267 +2092,8 @@ export class SessionManager {
       const p = params as Record<string, unknown>;
       recordProgressObservation(session, method, p);
 
-      switch (method) {
-        case Methods.THREAD_STARTED: {
-          const thread = isRecord(p.thread) ? p.thread : undefined;
-          // Update session.threadId if the notification provides a real thread ID
-          // (e.g. ExecClient returns a synthetic ID from threadStart(), then the
-          // real ID arrives via the thread.started JSONL event).
-          const notifiedThreadId =
-            normalizeOptionalString(p.threadId) ?? normalizeOptionalString(thread?.id);
-          if (notifiedThreadId && notifiedThreadId !== session.threadId) {
-            session.threadId = notifiedThreadId;
-            this.persistSessionIfChanged(session);
-          }
-          // Thread.status is a ThreadStatus union object whose variant is named
-          // by `type` — "notLoaded" | "idle" | "systemError" | "active"
-          // (codex-schema/v2/ThreadStartedNotification.json → Thread.status →
-          // ThreadStatus), the same shape `thread/status/changed` carries.
-          const threadStatus = isRecord(thread?.status) ? thread.status : undefined;
-          recordEvent(session, "progress", {
-            method,
-            ...p,
-            threadId: notifiedThreadId,
-            status: normalizeOptionalString(threadStatus?.type),
-          });
-          break;
-        }
+      this.handleNotification(session, method, p);
 
-        case Methods.THREAD_ARCHIVED:
-        case Methods.THREAD_UNARCHIVED:
-        case Methods.THREAD_NAME_UPDATED:
-        case Methods.THREAD_TOKEN_USAGE_UPDATED:
-        case Methods.FUZZY_FILE_SEARCH_SESSION_UPDATED:
-        case Methods.FUZZY_FILE_SEARCH_SESSION_COMPLETED:
-        case Methods.WINDOWS_WORLD_WRITABLE_WARNING:
-        case Methods.ACCOUNT_LOGIN_COMPLETED:
-          recordEvent(session, "progress", { method, ...p });
-          break;
-
-        case Methods.TURN_STARTED:
-          if (session.status === "cancelled") break;
-          {
-            const turnObj = p.turn as Record<string, unknown> | undefined;
-            const status = normalizeOptionalString(turnObj?.status);
-            session.activeTurnId = normalizeOptionalString(turnObj?.id);
-            // The new turn has not said what it is doing yet, and the line the
-            // previous one left would read as if it had.
-            scannerOf(session).reset();
-            if (session.progressState) {
-              session.progressState.activity = undefined;
-              session.progressState.activityAt = undefined;
-            }
-            recordEvent(session, "progress", {
-              method,
-              ...p,
-              turnId: session.activeTurnId,
-              status,
-            });
-          }
-          break;
-
-        case Methods.TURN_COMPLETED: {
-          if (session.status === "cancelled") break;
-          const turnObj = p.turn as Record<string, unknown> | undefined;
-          const knownTurnId = normalizeOptionalString(turnObj?.id) ?? session.activeTurnId;
-          if (knownTurnId === undefined) {
-            // `turn/completed` carries `turn.id`; an empty one here says the notification
-            // did not, and it is never used to route anything — a response goes back by
-            // its JSON-RPC id and a poll by `requestId`.
-            console.error(
-              `[codex-mcp] turn/completed carries no turn id: session=${sessionId} — reporting lastResult.turnId as ""`
-            );
-          }
-          const completedTurnId = knownTurnId ?? "";
-          // The protocol Turn carries `{error, id, items, status}` and no final
-          // text (codex-schema/ServerNotification.json → definitions.Turn), so
-          // app-server mode always answers from `lastAgentMessageText`. `output`
-          // is ExecClient's own addition, set from the last `item.completed`
-          // agentMessage of the turn (src/app-server/exec-client.ts).
-          // `output` comes straight off the exec turn and has seen no stripping yet;
-          // `lastAgentMessageText` was stripped when its item completed.
-          const sentTurnOutput = normalizeOptionalString(turnObj?.output);
-          const rawTurnOutput =
-            sentTurnOutput === undefined ? undefined : stripActivityMarkers(sentTurnOutput);
-          const finalText = rawTurnOutput ?? session.lastAgentMessageText;
-          const askedForSchema = this.schemaConstrainedTurns.delete(sessionId);
-          session.status = "idle";
-          session.activeTurnId = undefined;
-          session.lastResult = {
-            turnId: completedTurnId,
-            outcome: "completed",
-            text: finalText,
-            output: rawTurnOutput,
-            structuredOutput: askedForSchema ? parseStructuredOutput(finalText) : undefined,
-            // The turn record carries the assistant text a second time, in
-            // `output` or `items[].text`, and that copy has seen no stripping.
-            turn: stripActivityMarkersFromTurn(p.turn),
-            status: turnObj?.status as string | undefined,
-            turnError: turnObj?.error,
-            completedAt: new Date().toISOString(),
-          };
-          // Like `output`, `usage` is ExecClient's addition — it forwards the
-          // `usage` of the exec `turn.completed` record. App-server mode counts
-          // tokens through `thread/tokenUsage/updated` only, so this merge adds
-          // nothing there.
-          mergeProgressTokens(session, extractTokens(turnObj?.usage));
-          recordEvent(session, "result", {
-            method,
-            ...p,
-            turnId: completedTurnId,
-            status: normalizeOptionalString(turnObj?.status),
-          });
-          // Persist idle status + result to disk
-          this.persistSessionIfChanged(session);
-          this.persistResult(session);
-          break;
-        }
-
-        case Methods.ERROR: {
-          if (session.status === "cancelled") break;
-          const willRetry = p.willRetry as boolean;
-          if (!willRetry) {
-            session.status = "error";
-          }
-          {
-            const data: Record<string, unknown> = { method, ...p };
-            // The notification carries `[error, threadId, turnId, willRetry]` and
-            // no text of its own (codex-schema/v2/ErrorNotification.json).
-            // ErrorNotification.error is a TurnError object whose `message` carries the
-            // text; a bare string arrives from builds predating that shape.
-            if (typeof data.error === "string") {
-              data.error = redactPaths(data.error);
-            } else if (isRecord(data.error) && typeof data.error.message === "string") {
-              data.error = { ...data.error, message: redactPaths(data.error.message) };
-            }
-            if (willRetry) {
-              recordEvent(session, "progress", {
-                ...data,
-                method: "codex-mcp/reconnect",
-                sourceMethod: method,
-                phase: "retrying",
-              });
-            } else {
-              recordEvent(session, "error", data);
-              // Persist error status to disk
-              this.persistSessionIfChanged(session);
-            }
-          }
-          break;
-        }
-
-        case Methods.AGENT_MESSAGE_DELTA:
-          if (typeof p.delta === "string") {
-            let lines = 0;
-            for (const line of scannerOf(session).push(p.delta)) {
-              recordActivity(session, line, normalizeOptionalString(p.itemId));
-              lines += 1;
-            }
-            // A new line is what the person waiting reads, so the poll holding
-            // this session answers with it rather than sitting out its window.
-            if (lines > 0) this.notifyWaiters(session.sessionId);
-          }
-          recordEvent(session, "output", { method, delta: p.delta, itemId: p.itemId });
-          break;
-
-        case Methods.ITEM_STARTED:
-        case Methods.ITEM_COMPLETED:
-        case Methods.RAW_RESPONSE_ITEM_COMPLETED:
-          {
-            const item = p.item as Record<string, unknown> | undefined;
-            const itemType = item && typeof item.type === "string" ? item.type : undefined;
-            const status = normalizeOptionalString(item?.status);
-            // Only `item/completed` carries a ThreadItem. `rawResponseItem/completed`
-            // carries a ResponseItem — `message` (text in `content[].text`),
-            // `reasoning`, `function_call` and so on
-            // (codex-schema/v2/RawResponseItemCompletedNotification.json → ResponseItem)
-            // — a second, lower-level view of the same turn, so the final answer is
-            // read from the ThreadItem stream alone.
-            const completedItem = method === Methods.ITEM_COMPLETED;
-            // AgentMessageThreadItem carries `id`, `text` and an optional `phase`
-            // and no status (codex-schema/v2/ItemCompletedNotification.json), so
-            // the notification method is what marks the message finished. `phase`
-            // is not required either: providers emit it inconsistently, and the
-            // last completed message of a turn is its answer.
-            if (itemType === "agentMessage" && completedItem && typeof item?.text === "string") {
-              // The markers were lifted out of the deltas that built this text; what
-              // stays is the answer the caller reads.
-              session.lastAgentMessageText = stripActivityMarkers(item.text);
-              scannerOf(session).reset();
-            }
-            // Keep user/agent message-like items as output; everything else is
-            // progress. A PlanThreadItem (`type: "plan"`, EXPERIMENTAL, reaching
-            // this server now that the client asks for `experimentalApi`) states
-            // what the agent means to do rather than what it answers, and it
-            // stays progress like the `item/plan/delta` that builds it.
-            const eventType: SessionEventType =
-              itemType === "agentMessage" || itemType === "userMessage" ? "output" : "progress";
-            recordEvent(session, eventType, {
-              method,
-              ...p,
-              item: p.item,
-              status,
-            });
-          }
-          break;
-
-        case Methods.COMMAND_OUTPUT_DELTA: {
-          // Filter known shell profile noise (PowerShell oh-my-posh, PSReadLine, etc.)
-          if (typeof p.delta === "string") {
-            const cleaned = stripShellNoise(p.delta);
-            if (cleaned.length === 0) break; // entire delta was noise, skip event
-            recordEvent(session, "progress", { method, ...p, delta: cleaned });
-          } else {
-            recordEvent(session, "progress", { method, ...p });
-          }
-          break;
-        }
-        case Methods.COMMAND_TERMINAL_INTERACTION:
-        case Methods.FILE_CHANGE_OUTPUT_DELTA:
-        case Methods.REASONING_TEXT_DELTA:
-        case Methods.REASONING_SUMMARY_DELTA:
-        case Methods.REASONING_SUMMARY_PART_ADDED:
-        case Methods.PLAN_DELTA:
-        case Methods.MCP_TOOL_PROGRESS:
-        case Methods.TURN_DIFF_UPDATED:
-        case Methods.TURN_PLAN_UPDATED:
-        case Methods.MODEL_REROUTED:
-          recordEvent(session, "progress", { method, ...p });
-          break;
-
-        case Methods.THREAD_STATUS_CHANGED: {
-          const threadStatus = isRecord(p.status) ? p.status : undefined;
-          const statusType = normalizeOptionalString(threadStatus?.type);
-          const activeFlags = Array.isArray(threadStatus?.activeFlags)
-            ? (threadStatus.activeFlags as unknown[])
-            : undefined;
-          const nextStatus = sessionStatusForThreadStatus(session, statusType);
-          const statusChanged = nextStatus !== undefined && nextStatus !== session.status;
-          if (statusChanged) session.status = nextStatus;
-          const failed = session.status === "error" && statusChanged;
-          recordEvent(session, failed ? "error" : "progress", {
-            method,
-            ...p,
-            statusType,
-            activeFlags,
-          });
-          if (statusChanged) this.persistSessionIfChanged(session);
-          break;
-        }
-
-        case Methods.THREAD_CLOSED:
-        case Methods.THREAD_COMPACTED:
-        case Methods.DEPRECATION_NOTICE:
-        case Methods.CONFIG_WARNING:
-          // None of them is a failure, so they stay out of the "error" type and
-          // leave the session status alone.
-          recordEvent(session, "progress", { method, ...p });
-          break;
-
-        default:
-          // Ignore other notifications (account, config, etc.)
-          break;
-      }
       // Wake any long-poll waiters after every notification
       this.notifyWaiters(sessionId);
     });
@@ -2035,268 +2110,58 @@ export class SessionManager {
       const p = params as Record<string, unknown>;
       recordProgressObservation(session, method, p);
 
-      switch (method) {
-        case Methods.COMMAND_APPROVAL: {
-          const requestId = `req_${randomUUID().slice(0, 8)}`;
-          const approvalParams = params as CommandApprovalParams & Record<string, unknown>;
-          const reason = normalizeOptionalString(approvalParams.reason);
-          const approvalId = normalizeOptionalString(approvalParams.approvalId);
-          const commandActions = Array.isArray(approvalParams.commandActions)
-            ? approvalParams.commandActions
-            : null;
-          const proposedExecpolicyAmendment = normalizeStringArrayOrNull(
-            approvalParams.proposedExecpolicyAmendment
-          );
-          const availableDecisions = Array.isArray(approvalParams.availableDecisions)
-            ? (approvalParams.availableDecisions as unknown[])
-            : null;
-          const proposedNetworkPolicyAmendments = Array.isArray(
-            approvalParams.proposedNetworkPolicyAmendments
-          )
-            ? (approvalParams.proposedNetworkPolicyAmendments as unknown[])
-            : null;
-          const additionalPermissions =
-            "additionalPermissions" in approvalParams
-              ? (approvalParams.additionalPermissions as unknown)
-              : undefined;
-          const networkApprovalContext =
-            "networkApprovalContext" in approvalParams
-              ? (approvalParams.networkApprovalContext as unknown)
-              : undefined;
-          const pending: PendingRequest = {
-            requestId,
-            kind: "command",
-            params,
-            ...correlationIds(approvalParams, method, sessionId),
-            reason,
-            approvalId,
-            commandActions,
-            proposedExecpolicyAmendment,
-            availableDecisions,
-            proposedNetworkPolicyAmendments,
-            additionalPermissions,
-            networkApprovalContext,
-            createdAt: new Date().toISOString(),
-            resolved: false,
-            respond: (result) => client.respondToServer(id, result),
-          };
+      this.handleServerRequest(session, client, id, method, params, approvalTimeoutMs);
 
-          // Timeout
-          pending.timeoutHandle = createUnrefTimeout(() => {
-            if (!pending.resolved) {
-              pending.resolved = true;
-              pending.decision = "decline";
-              try {
-                client.respondToServer(id, { decision: "decline" } as CommandApprovalResponse);
-              } catch (err) {
-                console.error(
-                  `[codex-mcp] Failed to auto-decline command approval timeout: session=${sessionId} request=${requestId} error=${err instanceof Error ? err.message : String(err)}`
-                );
-              }
-              recordEvent(session, "approval_result", {
-                requestId,
-                kind: "command",
-                approvalId,
-                decision: "decline",
-                timeout: true,
-              });
-              session.pendingRequests.delete(requestId);
-              if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
-                session.status = "running";
-              }
-              this.notifyWaiters(sessionId);
-            }
-          }, approvalTimeoutMs);
-
-          session.pendingRequests.set(requestId, pending);
-          session.status = "waiting_approval";
-          recordEvent(session, "approval_request", {
-            requestId,
-            kind: "command",
-            itemId: approvalParams.itemId,
-            approvalId,
-            command: approvalParams.command,
-            cwd: approvalParams.cwd,
-            reason,
-            commandActions,
-            proposedExecpolicyAmendment,
-            availableDecisions,
-            proposedNetworkPolicyAmendments,
-            additionalPermissions,
-            networkApprovalContext,
-          });
-          break;
-        }
-
-        case Methods.FILE_CHANGE_APPROVAL: {
-          const requestId = `req_${randomUUID().slice(0, 8)}`;
-          const reason = normalizeOptionalString(p.reason);
-          const pending: PendingRequest = {
-            requestId,
-            kind: "fileChange",
-            params,
-            ...correlationIds(p, method, sessionId),
-            reason,
-            createdAt: new Date().toISOString(),
-            resolved: false,
-            respond: (result) => client.respondToServer(id, result),
-          };
-
-          pending.timeoutHandle = createUnrefTimeout(() => {
-            if (!pending.resolved) {
-              pending.resolved = true;
-              pending.decision = "decline";
-              try {
-                client.respondToServer(id, { decision: "decline" } as FileChangeApprovalResponse);
-              } catch (err) {
-                console.error(
-                  `[codex-mcp] Failed to auto-decline file-change approval timeout: session=${sessionId} request=${requestId} error=${err instanceof Error ? err.message : String(err)}`
-                );
-              }
-              recordEvent(session, "approval_result", {
-                requestId,
-                kind: "fileChange",
-                decision: "decline",
-                timeout: true,
-              });
-              session.pendingRequests.delete(requestId);
-              if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
-                session.status = "running";
-              }
-              this.notifyWaiters(sessionId);
-            }
-          }, approvalTimeoutMs);
-
-          session.pendingRequests.set(requestId, pending);
-          session.status = "waiting_approval";
-          recordEvent(session, "approval_request", {
-            requestId,
-            kind: "fileChange",
-            itemId: p.itemId,
-            reason,
-          });
-          break;
-        }
-
-        case Methods.USER_INPUT_REQUEST: {
-          const requestId = `req_${randomUUID().slice(0, 8)}`;
-          const pending: PendingRequest = {
-            requestId,
-            kind: "user_input",
-            params,
-            ...correlationIds(p, method, sessionId),
-            createdAt: new Date().toISOString(),
-            resolved: false,
-            respond: (result) => client.respondToServer(id, result),
-          };
-
-          pending.timeoutHandle = createUnrefTimeout(() => {
-            if (!pending.resolved) {
-              pending.resolved = true;
-              try {
-                client.respondToServer(id, { answers: {} } as UserInputRequestResponse);
-              } catch (err) {
-                console.error(
-                  `[codex-mcp] Failed to auto-answer user-input timeout: session=${sessionId} request=${requestId} error=${err instanceof Error ? err.message : String(err)}`
-                );
-              }
-              recordEvent(session, "approval_result", {
-                requestId,
-                kind: "user_input",
-                timeout: true,
-              });
-              session.pendingRequests.delete(requestId);
-              if (session.pendingRequests.size === 0 && session.status === "waiting_approval") {
-                session.status = "running";
-              }
-              this.notifyWaiters(sessionId);
-            }
-          }, approvalTimeoutMs);
-
-          session.pendingRequests.set(requestId, pending);
-          session.status = "waiting_approval";
-          recordEvent(session, "approval_request", {
-            requestId,
-            kind: "user_input",
-            questions: p.questions,
-          });
-          break;
-        }
-
-        case Methods.DYNAMIC_TOOL_CALL:
-          // Auto-reject: codex-mcp doesn't support dynamic tool calls
-          respondOrReport(sessionId, method, () =>
-            client.respondToServer(id, {
-              success: false,
-              contentItems: [{ type: "inputText", text: "Not supported by codex-mcp" }],
-            } as DynamicToolCallResponse)
-          );
-          break;
-
-        case Methods.AUTH_TOKEN_REFRESH:
-          respondOrReport(sessionId, method, () =>
-            client.respondErrorToServer(
-              id,
-              AUTH_REFRESH_UNSUPPORTED_CODE,
-              AUTH_REFRESH_UNSUPPORTED_MESSAGE
-            )
-          );
-          break;
-
-        case Methods.LEGACY_PATCH_APPROVAL:
-        case Methods.LEGACY_EXEC_APPROVAL:
-          respondOrReport(sessionId, method, () =>
-            client.respondToServer(id, { decision: "denied" } as LegacyApprovalResponse)
-          );
-          console.error(`[codex-mcp] Legacy approval request received: ${method}`);
-          break;
-
-        default:
-          respondOrReport(sessionId, method, () =>
-            client.respondErrorToServer(id, -32601, `Unhandled server request: ${method}`)
-          );
-          break;
-      }
       // Wake any long-poll waiters after every server-initiated request (new pending approval)
       this.notifyWaiters(sessionId);
     });
 
     // Handle subprocess exit
     client.on("exit", (code: number | null) => {
-      clearSessionPendingRequests(session);
-      if (session.status === "running" || session.status === "waiting_approval") {
-        session.status = "error";
-        const message = `app-server exited unexpectedly (code: ${code})`;
-        setTerminalErrorResult(session, message);
-        recordEvent(session, "error", {
-          message,
-        });
-        this.persistSessionIfChanged(session);
-        this.persistResult(session);
-        this.notifyWaiters(sessionId);
-      }
+      this.failOnSubprocessLoss(session, `app-server exited unexpectedly (code: ${code})`);
     });
 
     // Handle subprocess spawn errors (must listen to prevent uncaught exception)
     client.on("error", (err: Error) => {
-      clearSessionPendingRequests(session);
-      if (session.status === "running" || session.status === "waiting_approval") {
-        session.status = "error";
-        const message = redactPaths(`app-server error: ${err.message}`);
-        setTerminalErrorResult(session, message);
-        recordEvent(session, "error", {
-          message,
-        });
-        this.persistSessionIfChanged(session);
-        this.persistResult(session);
-        this.notifyWaiters(sessionId);
-      }
+      this.failOnSubprocessLoss(session, redactPaths(`app-server error: ${err.message}`));
     });
+  }
+
+  /** Write down the pid of every process the client spawns, for the orphan reaper. */
+  private persistSpawnedPid(session: SessionInfo, pid: number, spawnedAt: string): void {
+    const { sessionId } = session;
+    // spawnedAt is the instant the client spawned the process; the reaper
+    // matches it against the start time the OS reports for that pid.
+    const details: PidDetails & { spawnedAt?: string } = { model: session.model, spawnedAt };
+    try {
+      this.persistence?.writePidInfo(sessionId, pid, details);
+    } catch (err) {
+      // Every spawn that never reaches pid.json is a codex process the orphan reaper
+      // cannot find on the next start, so each one is reported rather than the first.
+      console.error(
+        `[codex-mcp] Failed to persist pid.json — pid ${pid} will not be reaped after a ` +
+          `restart: session=${sessionId} error=${describeError(err)}`
+      );
+    }
+  }
+
+  /** The app-server went away under a live turn: the turn failed, and the session says so. */
+  private failOnSubprocessLoss(session: SessionInfo, message: string): void {
+    clearSessionPendingRequests(session);
+    if (session.status === "running" || session.status === "waiting_approval") {
+      session.status = "error";
+      setTerminalErrorResult(session, message);
+      recordEvent(session, "error", {
+        message,
+      });
+      this.persistSessionIfChanged(session);
+      this.persistResult(session);
+      this.notifyWaiters(session.sessionId);
+    }
   }
 
   private cleanupSessions(): void {
     const now = Date.now();
-    const TTL_WARNING_THRESHOLD_MS = 60_000;
     for (const [id, session] of this.sessions) {
       const lastActive = new Date(session.lastActiveAt).getTime();
       if (Number.isNaN(lastActive)) {
@@ -2307,41 +2172,32 @@ export class SessionManager {
       }
       const age = now - lastActive;
 
-      if (session.status === "idle" && age > DEFAULT_IDLE_CLEANUP_MS) {
+      const expiredReason = expiryReasonForAge(session.status, age);
+      if (expiredReason !== undefined) {
         this.ttlWarningEmitted.delete(id);
-        this.requestCancellation(id, "Idle timeout");
-      } else if (session.status === "waiting_approval" && age > DEFAULT_RUNNING_CLEANUP_MS) {
-        this.ttlWarningEmitted.delete(id);
-        this.requestCancellation(id, "Approval timeout");
-      } else if (session.status === "running" && age > DEFAULT_RUNNING_CLEANUP_MS) {
-        this.ttlWarningEmitted.delete(id);
-        this.requestCancellation(id, "Running timeout");
-      } else if (
-        (session.status === "cancelled" || session.status === "error") &&
-        age > DEFAULT_TERMINAL_CLEANUP_MS
-      ) {
+        this.requestCancellation(id, expiredReason);
+      } else if (isRetentionExpired(session.status, age)) {
         this.evictSession(id, true);
       } else {
-        // Check if this session is within the TTL warning window.
-        let ttlMs: number | undefined;
-        if (session.status === "idle") {
-          ttlMs = DEFAULT_IDLE_CLEANUP_MS;
-        } else if (session.status === "running" || session.status === "waiting_approval") {
-          ttlMs = DEFAULT_RUNNING_CLEANUP_MS;
-        }
-        if (ttlMs !== undefined && !this.ttlWarningEmitted.has(id)) {
-          const timeUntilExpiry = ttlMs - age;
-          if (timeUntilExpiry <= TTL_WARNING_THRESHOLD_MS && timeUntilExpiry > 0) {
-            this.ttlWarningEmitted.add(id);
-            recordEvent(session, "progress", {
-              method: "codex-mcp/ttl_warning",
-              type: "ttl_warning",
-              ttlRemainingMs: timeUntilExpiry,
-              sessionId: id,
-            });
-          }
-        }
+        this.warnBeforeExpiry(id, session, age);
       }
+    }
+  }
+
+  /** Say once, on the session's own event log, that its TTL is about to run out. */
+  private warnBeforeExpiry(id: string, session: SessionInfo, age: number): void {
+    // Check if this session is within the TTL warning window.
+    const ttlMs = ttlForStatus(session.status);
+    if (ttlMs === undefined || this.ttlWarningEmitted.has(id)) return;
+    const timeUntilExpiry = ttlMs - age;
+    if (timeUntilExpiry <= TTL_WARNING_THRESHOLD_MS && timeUntilExpiry > 0) {
+      this.ttlWarningEmitted.add(id);
+      recordEvent(session, "progress", {
+        method: "codex-mcp/ttl_warning",
+        type: "ttl_warning",
+        ttlRemainingMs: timeUntilExpiry,
+        sessionId: id,
+      });
     }
   }
 
@@ -2466,6 +2322,98 @@ function statusOfRecovered(rec: RecoveredSession): SessionStatus {
   return wasActive && rec.owner.kind !== "held" ? "abandoned" : known;
 }
 
+/** The in-memory session a new `createSession` call describes. */
+function newSessionRecord(fields: {
+  sessionId: string;
+  now: string;
+  cwd: string;
+  spawnOpts: AppServerSpawnOptions;
+  effort: EffortLevel;
+  developerInstructions: string | undefined;
+  approvalTimeoutMs: number;
+  advanced: CreateSessionAdvanced | undefined;
+}): SessionInfo {
+  const { sessionId, now, cwd, spawnOpts, effort, developerInstructions, approvalTimeoutMs } =
+    fields;
+  const { advanced } = fields;
+  return {
+    sessionId,
+    status: "running",
+    createdAt: now,
+    lastActiveAt: now,
+    approvalTimeoutMs,
+    cwd,
+    model: spawnOpts.model,
+    profile: spawnOpts.profile,
+    approvalPolicy: spawnOpts.approvalPolicy,
+    sandbox: spawnOpts.sandbox,
+    personality: advanced?.personality,
+    effort,
+    summary: advanced?.summary,
+    config: spawnOpts.config,
+    pendingRequests: new Map(),
+    lastAgentMessageText: undefined,
+    progressState: { lastEventAt: now },
+    baseInstructions: advanced?.baseInstructions,
+    developerInstructions,
+  };
+}
+
+/** The in-memory session a recovered record describes, timestamps included. */
+function sessionOfRecovered(
+  rec: RecoveredSession,
+  createdAt: string,
+  lastActiveAt: string
+): SessionInfo {
+  const resolvedStatus = statusOfRecovered(rec);
+  const recoveredReason = normalizeOptionalString(rec.meta.cancelledReason);
+  const result = rec.result as TurnResult | undefined;
+  return {
+    sessionId: rec.meta.sessionId,
+    threadId: normalizeOptionalString(rec.meta.threadId),
+    status: resolvedStatus,
+    createdAt,
+    lastActiveAt,
+    cancelledAt: normalizeOptionalString(rec.meta.cancelledAt),
+    cancelledReason:
+      recoveredReason ??
+      (resolvedStatus === "error" && !SESSION_STATUSES.includes(rec.meta.status as never)
+        ? `Recovered with a status this server cannot read: ${JSON.stringify(rec.meta.status)}`
+        : undefined),
+    cwd: normalizeOptionalString(rec.meta.cwd),
+    model: normalizeOptionalString(rec.meta.model),
+    profile: normalizeOptionalString(rec.meta.profile),
+    approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
+    sandbox: rec.meta.sandbox as SandboxMode | undefined,
+    personality: rec.meta.personality as Personality | undefined,
+    effort: rec.meta.effort as EffortLevel | undefined,
+    summary: rec.meta.summary as SummaryMode | undefined,
+    config: isRecord(rec.meta.config) ? rec.meta.config : undefined,
+    baseInstructions: normalizeOptionalString(rec.meta.baseInstructions),
+    developerInstructions: normalizeOptionalString(rec.meta.developerInstructions),
+    approvalTimeoutMs:
+      typeof rec.meta.approvalTimeoutMs === "number" ? rec.meta.approvalTimeoutMs : undefined,
+    pendingRequests: new Map(),
+    lastResult: result,
+    lastAgentMessageText: recoveredAgentMessageText(result),
+    progressState: {
+      lastEventAt: lastActiveAt,
+      tokens: extractTokens(result?.turn),
+      activity: rec.lastActivity,
+      // The record holds the line, not the instant it arrived. The session
+      // was last active then, which is the closest the disk answers.
+      activityAt: rec.lastActivity === undefined ? undefined : lastActiveAt,
+    },
+  };
+}
+
+/** The answer a recovered turn left, read from whichever field its result carries it in. */
+function recoveredAgentMessageText(result: TurnResult | undefined): string | undefined {
+  if (typeof result?.text === "string") return result.text;
+  if (typeof result?.output === "string") return result.output;
+  return undefined;
+}
+
 /** How a listing names the server holding a session, or nothing when none does. */
 function ownershipOf(owner: OwnerState): SessionOwnership | undefined {
   if (owner.kind === "self") return { pid: owner.owner.pid, state: "self" };
@@ -2489,6 +2437,47 @@ function publicInfoOfRecovered(rec: RecoveredSession): PublicSessionInfo {
     activity: rec.lastActivity,
     owner: ownershipOf(rec.owner),
   };
+}
+
+/**
+ * Whether a session last active at `lastActiveAt` has been still for `olderThanMs`.
+ *
+ * A caller that names no age wants every session of the named statuses, and a
+ * `lastActiveAt` no clock can read dates the session nowhere, so it is left alone.
+ */
+function isOlderThan(lastActiveAt: string, olderThanMs: number | undefined, now: number): boolean {
+  if (typeof olderThanMs !== "number" || olderThanMs <= 0) return true;
+  const lastActive = new Date(lastActiveAt).getTime();
+  if (!Number.isFinite(lastActive)) return false;
+  return now - lastActive >= olderThanMs;
+}
+
+/** Names the sessions whose directory removal was asked for and failed. */
+function stillOnDiskMessage(diskFailures: string[]): string {
+  return (
+    `${diskFailures.length} session director${diskFailures.length === 1 ? "y is" : "ies are"} ` +
+    `still on disk: ${diskFailures.join(", ")}`
+  );
+}
+
+/** Why cleanup cancels a session of this status and age, or nothing while it has time left. */
+function expiryReasonForAge(status: SessionStatus, age: number): string | undefined {
+  if (status === "idle" && age > DEFAULT_IDLE_CLEANUP_MS) return "Idle timeout";
+  if (status === "waiting_approval" && age > DEFAULT_RUNNING_CLEANUP_MS) return "Approval timeout";
+  if (status === "running" && age > DEFAULT_RUNNING_CLEANUP_MS) return "Running timeout";
+  return undefined;
+}
+
+/** A finished session that has stood longer than a finished session is kept. */
+function isRetentionExpired(status: SessionStatus, age: number): boolean {
+  return (status === "cancelled" || status === "error") && age > DEFAULT_TERMINAL_CLEANUP_MS;
+}
+
+/** How long a session of this status lives without activity, or nothing when it does not expire. */
+function ttlForStatus(status: SessionStatus): number | undefined {
+  if (status === "idle") return DEFAULT_IDLE_CLEANUP_MS;
+  if (status === "running" || status === "waiting_approval") return DEFAULT_RUNNING_CLEANUP_MS;
+  return undefined;
 }
 
 function pollIntervalForStatus(status: SessionStatus): number | undefined {
@@ -2699,6 +2688,14 @@ function pickNumber(source: Record<string, unknown>, keys: string[]): number | u
   return undefined;
 }
 
+/** The answer that closes an unanswered request of a session that is going away. */
+function respondCancelled(req: PendingRequest): void {
+  if (!req.respond) return;
+  if (req.kind === "command") req.respond({ decision: "cancel" });
+  else if (req.kind === "fileChange") req.respond({ decision: "cancel" });
+  else if (req.kind === "user_input") req.respond({ answers: {} });
+}
+
 function clearSessionPendingRequests(session: SessionInfo): void {
   const entries = Array.from(session.pendingRequests.entries());
   session.pendingRequests.clear();
@@ -2707,9 +2704,7 @@ function clearSessionPendingRequests(session: SessionInfo): void {
     // Best-effort: send cancel response so the backend isn't left waiting.
     if (!req.resolved && req.respond) {
       try {
-        if (req.kind === "command") req.respond({ decision: "cancel" });
-        else if (req.kind === "fileChange") req.respond({ decision: "cancel" });
-        else if (req.kind === "user_input") req.respond({ answers: {} });
+        respondCancelled(req);
       } catch {
         // Client already exited — response delivery is best-effort
       }
@@ -2870,6 +2865,43 @@ function correlationIds(
   return { itemId: itemId ?? "", threadId: threadId ?? "", turnId: turnId ?? "" };
 }
 
+/** The fields a `commandApproval` request carries, as the pending request records them. */
+function commandApprovalFields(approvalParams: CommandApprovalParams & Record<string, unknown>): {
+  reason: string | undefined;
+  approvalId: string | undefined;
+  commandActions: unknown[] | null;
+  proposedExecpolicyAmendment: string[] | null;
+  availableDecisions: unknown[] | null;
+  proposedNetworkPolicyAmendments: unknown[] | null;
+  additionalPermissions: unknown;
+  networkApprovalContext: unknown;
+} {
+  return {
+    reason: normalizeOptionalString(approvalParams.reason),
+    approvalId: normalizeOptionalString(approvalParams.approvalId),
+    commandActions: Array.isArray(approvalParams.commandActions)
+      ? approvalParams.commandActions
+      : null,
+    proposedExecpolicyAmendment: normalizeStringArrayOrNull(
+      approvalParams.proposedExecpolicyAmendment
+    ),
+    availableDecisions: Array.isArray(approvalParams.availableDecisions)
+      ? (approvalParams.availableDecisions as unknown[])
+      : null,
+    proposedNetworkPolicyAmendments: Array.isArray(approvalParams.proposedNetworkPolicyAmendments)
+      ? (approvalParams.proposedNetworkPolicyAmendments as unknown[])
+      : null,
+    additionalPermissions:
+      "additionalPermissions" in approvalParams
+        ? (approvalParams.additionalPermissions as unknown)
+        : undefined,
+    networkApprovalContext:
+      "networkApprovalContext" in approvalParams
+        ? (approvalParams.networkApprovalContext as unknown)
+        : undefined,
+  };
+}
+
 function normalizeStringArrayOrNull(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null;
   const normalized = value.filter((entry): entry is string => typeof entry === "string");
@@ -2931,6 +2963,227 @@ function scannerOf(session: SessionInfo): ActivityMarkerScanner {
  * so a poll answers with each new heading and the person waiting reads the work
  * as it happens. One line per heading is what travels, not the turn's stream.
  */
+/** What a turn may override for the session it continues. */
+interface TurnOverrides {
+  model?: string;
+  approvalPolicy?: ApprovalPolicy;
+  effort?: EffortLevel;
+  summary?: SummaryMode;
+  personality?: Personality;
+  sandbox?: SandboxMode;
+  cwd?: string;
+  outputSchema?: Record<string, unknown>;
+}
+
+/** Throw unless the session is in a state a new turn can start from. */
+function assertSessionAcceptsTurn(session: SessionInfo, sessionId: string): void {
+  // Status first: cancelSession drops the client, so a client lookup ahead of this
+  // reports a cancelled session as SESSION_NOT_FOUND.
+  if (session.status === "cancelled") {
+    throw new Error(
+      `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be resumed`
+    );
+  }
+  if (session.status === "abandoned") {
+    throw new Error(
+      `Error [${ErrorCode.SESSION_NOT_RUNNING}]: Session '${sessionId}' was abandoned by the server that held it — ` +
+        `call codex_session(action="resume") to pick its thread back up`
+    );
+  }
+  if (session.status !== "idle" && session.status !== "error") {
+    throw new Error(
+      `Error [${ErrorCode.SESSION_BUSY}]: Session '${sessionId}' is ${session.status}, expected idle or error`
+    );
+  }
+}
+
+/**
+ * Put on the session what the turn runs with, so the next turn — and a turn
+ * after a resume — starts from it. `reaches` answers whether the client carried
+ * that override to this turn at all.
+ */
+function applyTurnOverrides(
+  session: SessionInfo,
+  overrides: TurnOverrides | undefined,
+  resolvedCwd: string | undefined,
+  reaches: (name: string) => boolean
+): void {
+  if (resolvedCwd && reaches("cwd")) session.cwd = resolvedCwd;
+  if (overrides?.model) session.model = overrides.model;
+  if (overrides?.approvalPolicy) {
+    session.approvalPolicy = overrides.approvalPolicy as ApprovalPolicy;
+  }
+  if (overrides?.effort) session.effort = overrides.effort;
+  if (overrides?.summary) session.summary = overrides.summary;
+  if (overrides?.personality) session.personality = overrides.personality;
+  if (overrides?.sandbox && reaches("sandbox")) {
+    session.sandbox = overrides.sandbox as SandboxMode;
+  }
+}
+
+/** The `compatWarnings` sentence naming what the turn was asked for and did not apply. */
+function unappliedTurnWarning(
+  unapplied: readonly string[],
+  requested: Record<string, string | undefined>,
+  effective: Record<string, string | undefined>
+): string {
+  const named = unapplied.map((name) => {
+    const asked = requested[name];
+    const kept = effective[name];
+    if (asked !== undefined && kept !== undefined) {
+      return `${name} '${asked}' (the turn keeps '${kept}')`;
+    }
+    return asked !== undefined ? `${name} '${asked}'` : name;
+  });
+  return (
+    `This turn did not apply ${named.join(", ")}. Start a new session to change ` +
+    `${unapplied.length === 1 ? "it" : "them"}.`
+  );
+}
+
+/** The cwd a reply's override asks the turn to run in, or nothing when it names none. */
+function resolveTurnCwd(
+  session: SessionInfo,
+  sessionId: string,
+  overrides: TurnOverrides | undefined
+): string | undefined {
+  // A recovered session whose meta.json recorded no cwd has no base to resolve a
+  // relative override against, and the server's own cwd is not that base.
+  if (overrides?.cwd !== undefined && session.cwd === undefined && !isAbsolute(overrides.cwd)) {
+    throw new Error(
+      `Error [${ErrorCode.INVALID_ARGUMENT}]: Session '${sessionId}' records no cwd, so a relative cwd override cannot be resolved — pass an absolute path`
+    );
+  }
+  return overrides?.cwd
+    ? resolveAndValidateCwd(overrides.cwd, session.cwd ?? overrides.cwd)
+    : undefined;
+}
+
+/** The `turn/start` parameters of a reply: the overrides it names, over what the session runs with. */
+function buildTurnParams(
+  session: SessionInfo,
+  threadId: string,
+  prompt: string,
+  overrides: TurnOverrides | undefined,
+  resolvedCwd: string | undefined
+): TurnStartParams {
+  const input: UserInput[] = [{ type: "text", text: prompt }];
+  const turnParams: TurnStartParams = {
+    threadId,
+    input,
+    model: overrides?.model,
+    approvalPolicy: overrides?.approvalPolicy,
+    // `turn/start` carries these on every turn; the thread holds none of them, so a
+    // turn that omits one takes the value from ~/.codex/config.toml rather than the
+    // one the session was started with.
+    effort: overrides?.effort ?? session.effort,
+    summary: overrides?.summary ?? session.summary,
+    personality: overrides?.personality ?? session.personality,
+    cwd: resolvedCwd,
+    outputSchema: overrides?.outputSchema,
+  };
+  // Map sandbox string to protocol object
+  if (overrides?.sandbox) {
+    turnParams.sandboxPolicy = toSandboxPolicy(overrides.sandbox);
+  }
+  return turnParams;
+}
+
+/** The id of a finished turn, reporting a `turn/completed` that named none. */
+function turnIdOfCompleted(
+  session: SessionInfo,
+  turnObj: Record<string, unknown> | undefined
+): string {
+  const knownTurnId = normalizeOptionalString(turnObj?.id) ?? session.activeTurnId;
+  if (knownTurnId === undefined) {
+    // `turn/completed` carries `turn.id`; an empty one here says the notification
+    // did not, and it is never used to route anything — a response goes back by
+    // its JSON-RPC id and a poll by `requestId`.
+    console.error(
+      `[codex-mcp] turn/completed carries no turn id: session=${session.sessionId} — reporting lastResult.turnId as ""`
+    );
+  }
+  return knownTurnId ?? "";
+}
+
+/**
+ * The text a finished turn carries of its own, with the activity markers gone.
+ *
+ * The protocol Turn carries `{error, id, items, status}` and no final
+ * text (codex-schema/ServerNotification.json → definitions.Turn), so
+ * app-server mode always answers from `lastAgentMessageText`. `output`
+ * is ExecClient's own addition, set from the last `item.completed`
+ * agentMessage of the turn (src/app-server/exec-client.ts).
+ * `output` comes straight off the exec turn and has seen no stripping yet;
+ * `lastAgentMessageText` was stripped when its item completed.
+ */
+function outputOfCompleted(turnObj: Record<string, unknown> | undefined): string | undefined {
+  const sentTurnOutput = normalizeOptionalString(turnObj?.output);
+  return sentTurnOutput === undefined ? undefined : stripActivityMarkers(sentTurnOutput);
+}
+
+/** `turn/started` — the notification that opens a turn and clears the last activity. */
+function onTurnStarted(session: SessionInfo, method: string, p: Record<string, unknown>): void {
+  const turnObj = p.turn as Record<string, unknown> | undefined;
+  const status = normalizeOptionalString(turnObj?.status);
+  session.activeTurnId = normalizeOptionalString(turnObj?.id);
+  // The new turn has not said what it is doing yet, and the line the
+  // previous one left would read as if it had.
+  scannerOf(session).reset();
+  if (session.progressState) {
+    session.progressState.activity = undefined;
+    session.progressState.activityAt = undefined;
+  }
+  recordEvent(session, "progress", {
+    method,
+    ...p,
+    turnId: session.activeTurnId,
+    status,
+  });
+}
+
+/** `item/started`, `item/completed` and `rawResponseItem/completed`. */
+function onItemNotification(
+  session: SessionInfo,
+  method: string,
+  p: Record<string, unknown>
+): void {
+  const item = p.item as Record<string, unknown> | undefined;
+  const itemType = item && typeof item.type === "string" ? item.type : undefined;
+  const status = normalizeOptionalString(item?.status);
+  // Only `item/completed` carries a ThreadItem. `rawResponseItem/completed`
+  // carries a ResponseItem — `message` (text in `content[].text`),
+  // `reasoning`, `function_call` and so on
+  // (codex-schema/v2/RawResponseItemCompletedNotification.json → ResponseItem)
+  // — a second, lower-level view of the same turn, so the final answer is
+  // read from the ThreadItem stream alone.
+  const completedItem = method === Methods.ITEM_COMPLETED;
+  // AgentMessageThreadItem carries `id`, `text` and an optional `phase`
+  // and no status (codex-schema/v2/ItemCompletedNotification.json), so
+  // the notification method is what marks the message finished. `phase`
+  // is not required either: providers emit it inconsistently, and the
+  // last completed message of a turn is its answer.
+  if (itemType === "agentMessage" && completedItem && typeof item?.text === "string") {
+    // The markers were lifted out of the deltas that built this text; what
+    // stays is the answer the caller reads.
+    session.lastAgentMessageText = stripActivityMarkers(item.text);
+    scannerOf(session).reset();
+  }
+  // Keep user/agent message-like items as output; everything else is
+  // progress. A PlanThreadItem (`type: "plan"`, EXPERIMENTAL, reaching
+  // this server now that the client asks for `experimentalApi`) states
+  // what the agent means to do rather than what it answers, and it
+  // stays progress like the `item/plan/delta` that builds it.
+  const eventType: SessionEventType =
+    itemType === "agentMessage" || itemType === "userMessage" ? "output" : "progress";
+  recordEvent(session, eventType, {
+    method,
+    ...p,
+    item: p.item,
+    status,
+  });
+}
+
 function recordActivity(session: SessionInfo, activity: string, itemId?: string): void {
   const next = session.progressState ?? { lastEventAt: new Date().toISOString() };
   next.activity = activity;
@@ -3046,6 +3299,123 @@ function toSensitiveInfo(session: SessionInfo, owner?: SessionOwnership): Sensit
     profile: session.profile,
     config: session.config,
   };
+}
+
+/** What a caller may send alongside an approval decision. */
+interface ApprovalExtra {
+  execpolicy_amendment?: string[];
+  network_policy_amendment?: NetworkPolicyAmendment;
+  denyMessage?: string;
+}
+
+/** Throw unless `decision` and `extra` are an answer this pending request accepts. */
+function assertApprovalDecision(
+  req: PendingRequest,
+  requestId: string,
+  decision: string,
+  extra: ApprovalExtra | undefined
+): void {
+  if (req.kind === "command") {
+    assertCommandDecision(req, decision);
+    assertExecpolicyAmendment(decision, extra);
+    assertNetworkPolicyAmendment(decision, extra);
+    return;
+  }
+  if (req.kind === "fileChange") {
+    if (!FILE_CHANGE_DECISIONS.includes(decision as (typeof FILE_CHANGE_DECISIONS)[number])) {
+      throw new Error(
+        `Error [${ErrorCode.INVALID_ARGUMENT}]: Invalid fileChange decision '${decision}'`
+      );
+    }
+    return;
+  }
+  throw new Error(
+    `Error [${ErrorCode.INVALID_ARGUMENT}]: Request '${requestId}' is not an approval request`
+  );
+}
+
+/** Throw unless the command approval offers this decision and this build understands it. */
+function assertCommandDecision(req: PendingRequest, decision: string): void {
+  const available = parseAvailableDecisionSet(req.availableDecisions);
+  if (available && !available.has(decision)) {
+    throw new Error(
+      `Error [${ErrorCode.INVALID_ARGUMENT}]: Decision '${decision}' is not available for this approval prompt`
+    );
+  }
+
+  // Backward-compat: object-form decisions must be explicitly advertised by newer CLIs.
+  if (!available && decision === "applyNetworkPolicyAmendment") {
+    throw new Error(
+      `Error [${ErrorCode.INVALID_ARGUMENT}]: Decision '${decision}' is not supported by this Codex CLI version (missing availableDecisions)`
+    );
+  }
+  if (!COMMAND_DECISIONS.includes(decision as (typeof COMMAND_DECISIONS)[number])) {
+    throw new Error(
+      `Error [${ErrorCode.INVALID_ARGUMENT}]: Invalid command decision '${decision}'`
+    );
+  }
+}
+
+/** Throw unless the execpolicy amendment is there for the one decision that carries it. */
+function assertExecpolicyAmendment(decision: string, extra: ApprovalExtra | undefined): void {
+  if (
+    decision === "acceptWithExecpolicyAmendment" &&
+    (!extra?.execpolicy_amendment || extra.execpolicy_amendment.length === 0)
+  ) {
+    throw new Error(
+      `Error [${ErrorCode.INVALID_ARGUMENT}]: execpolicy_amendment required for acceptWithExecpolicyAmendment`
+    );
+  }
+
+  if (decision !== "acceptWithExecpolicyAmendment" && extra?.execpolicy_amendment !== undefined) {
+    throw new Error(
+      `Error [${ErrorCode.INVALID_ARGUMENT}]: execpolicy_amendment is only valid for acceptWithExecpolicyAmendment`
+    );
+  }
+}
+
+/** Throw unless the network policy amendment is there, whole, for the decision that carries it. */
+function assertNetworkPolicyAmendment(decision: string, extra: ApprovalExtra | undefined): void {
+  if (decision === "applyNetworkPolicyAmendment") {
+    const amendment = extra?.network_policy_amendment;
+    if (!amendment) {
+      throw new Error(
+        `Error [${ErrorCode.INVALID_ARGUMENT}]: network_policy_amendment required for applyNetworkPolicyAmendment`
+      );
+    }
+    if (amendment.action !== "allow" && amendment.action !== "deny") {
+      throw new Error(
+        `Error [${ErrorCode.INVALID_ARGUMENT}]: network_policy_amendment.action must be 'allow' or 'deny'`
+      );
+    }
+    if (!amendment.host) {
+      throw new Error(
+        `Error [${ErrorCode.INVALID_ARGUMENT}]: network_policy_amendment.host required for applyNetworkPolicyAmendment`
+      );
+    }
+  } else if (extra?.network_policy_amendment !== undefined) {
+    throw new Error(
+      `Error [${ErrorCode.INVALID_ARGUMENT}]: network_policy_amendment is only valid for applyNetworkPolicyAmendment`
+    );
+  }
+}
+
+/** The protocol answer for a decision, or nothing when the request answers to neither shape. */
+function buildApprovalResponse(
+  req: PendingRequest,
+  decision: string,
+  extra: ApprovalExtra | undefined
+): unknown {
+  if (req.kind === "command") {
+    return buildCommandApprovalResponse(decision, {
+      execpolicy_amendment: extra?.execpolicy_amendment,
+      network_policy_amendment: extra?.network_policy_amendment,
+    });
+  }
+  if (req.kind === "fileChange") {
+    return { decision } as FileChangeApprovalResponse;
+  }
+  return undefined;
 }
 
 function buildCommandApprovalResponse(

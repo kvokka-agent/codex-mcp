@@ -11,9 +11,9 @@
  */
 
 /** Opens a marker. The `ACTIVITY:` tag is what keeps a `%%%` run in quoted output from matching. */
-export const ACTIVITY_OPEN = "%%%ACTIVITY:";
+const ACTIVITY_OPEN = "%%%ACTIVITY:";
 /** Closes a marker. */
-export const ACTIVITY_CLOSE = "%%%";
+const ACTIVITY_CLOSE = "%%%";
 /** Hard cap on the stored line. A longer one is cut to this length. */
 export const MAX_ACTIVITY_LENGTH = 120;
 /**
@@ -21,7 +21,7 @@ export const MAX_ACTIVITY_LENGTH = 120;
  * ordinary text. It bounds both the memory one stream can hold and the damage a
  * `%%%ACTIVITY:` inside quoted output can do.
  */
-export const ACTIVITY_SCAN_LIMIT = 480;
+const ACTIVITY_SCAN_LIMIT = 480;
 
 const FULL_LINE_MARKER = new RegExp(
   `^[ \\t]*%%%ACTIVITY:[^\\n\\r]{0,${ACTIVITY_SCAN_LIMIT}}?%%%[ \\t]*(?:\\r?\\n)?`,
@@ -53,7 +53,7 @@ ${ACTIVITY_OPEN} <what you are doing right now>${ACTIVITY_CLOSE}
 - The marker is cut out of the answer the caller reads, so never use one to carry the answer itself.`;
 
 /** Environment switch that stops the server from sending the instruction. */
-export function activityMarkerInstructionEnabled(): boolean {
+function activityMarkerInstructionEnabled(): boolean {
   return process.env.CODEX_MCP_DISABLE_ACTIVITY_MARKER !== "1";
 }
 
@@ -92,41 +92,54 @@ export class ActivityMarkerScanner {
     this.pending += delta;
 
     for (;;) {
-      if (!this.inMarker) {
-        const open = this.pending.indexOf(ACTIVITY_OPEN);
-        if (open === -1) {
-          // An opener cut across two deltas lives in this tail.
-          const keep = ACTIVITY_OPEN.length - 1;
-          if (this.pending.length > keep) this.pending = this.pending.slice(-keep);
-          return found;
-        }
-        this.pending = this.pending.slice(open + ACTIVITY_OPEN.length);
-        this.inMarker = true;
-        continue;
-      }
-
-      const close = this.pending.indexOf(ACTIVITY_CLOSE);
-      const newline = this.pending.search(/[\r\n]/);
-      const closes = close !== -1 && (newline === -1 || close < newline);
-      // The limit is read before the close, so how the stream was cut cannot
-      // change the verdict on the same text.
-      if (closes && close <= ACTIVITY_SCAN_LIMIT) {
-        const line = this.pending.slice(0, close).trim();
-        this.pending = this.pending.slice(close + ACTIVITY_CLOSE.length);
-        this.inMarker = false;
-        if (line.length > 0) found.push(line.slice(0, MAX_ACTIVITY_LENGTH));
-        continue;
-      }
-
-      if (newline !== -1 || this.pending.length > ACTIVITY_SCAN_LIMIT) {
-        // No closing sentinel on this line: the opener was ordinary text. Give it
-        // up and look for a real marker in what followed it.
-        this.inMarker = false;
-        continue;
-      }
-
-      return found;
+      const scanned = this.inMarker ? this.readMarkerBody(found) : this.seekOpener();
+      if (!scanned) return found;
     }
+  }
+
+  /**
+   * Move the buffer past the next opener. False when none is in it, and what
+   * cannot yet be decided stays in the buffer for the next delta.
+   */
+  private seekOpener(): boolean {
+    const open = this.pending.indexOf(ACTIVITY_OPEN);
+    if (open === -1) {
+      // An opener cut across two deltas lives in this tail.
+      const keep = ACTIVITY_OPEN.length - 1;
+      if (this.pending.length > keep) this.pending = this.pending.slice(-keep);
+      return false;
+    }
+    this.pending = this.pending.slice(open + ACTIVITY_OPEN.length);
+    this.inMarker = true;
+    return true;
+  }
+
+  /**
+   * Read the text after an opener: a marker that closed goes to `found`, and an
+   * opener the text disowned is given up. False while neither is decided yet.
+   */
+  private readMarkerBody(found: string[]): boolean {
+    const close = this.pending.indexOf(ACTIVITY_CLOSE);
+    const newline = this.pending.search(/[\r\n]/);
+    const closes = close !== -1 && (newline === -1 || close < newline);
+    // The limit is read before the close, so how the stream was cut cannot
+    // change the verdict on the same text.
+    if (closes && close <= ACTIVITY_SCAN_LIMIT) {
+      const line = this.pending.slice(0, close).trim();
+      this.pending = this.pending.slice(close + ACTIVITY_CLOSE.length);
+      this.inMarker = false;
+      if (line.length > 0) found.push(line.slice(0, MAX_ACTIVITY_LENGTH));
+      return true;
+    }
+
+    if (newline !== -1 || this.pending.length > ACTIVITY_SCAN_LIMIT) {
+      // No closing sentinel on this line: the opener was ordinary text. Give it
+      // up and look for a real marker in what followed it.
+      this.inMarker = false;
+      return true;
+    }
+
+    return false;
   }
 
   /** Drop a half-read marker. Called when the message or the turn it belonged to ends. */

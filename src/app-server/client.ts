@@ -6,7 +6,6 @@
  */
 import { spawn, type ChildProcess } from "child_process";
 import { EventEmitter } from "events";
-import { StringDecoder } from "string_decoder";
 import {
   type RequestId,
   type JsonRpcRequest,
@@ -29,6 +28,7 @@ import {
 } from "./protocol.js";
 import { buildAppServerArgs, type AppServerSpawnOptions } from "./lifecycle.js";
 import { resolveCodexInvocation } from "./codex-bin.js";
+import { LineReader, readChildOutput } from "./child-stdio.js";
 import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
 import { ErrorCode } from "../types.js";
 import type { ICodexClient } from "./client-interface.js";
@@ -53,8 +53,7 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   private process: ChildProcess | null = null;
   private nextId = 1;
   private pending = new Map<RequestId, PendingRpcRequest>();
-  private buffer = "";
-  private decoder = new StringDecoder("utf8");
+  private lines = new LineReader();
   private _destroyed = false;
   private lastFailure: Error | null = null;
   private backpressure = false;
@@ -107,10 +106,7 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     });
     this.process = proc;
 
-    proc.stdout!.on("data", (chunk: Buffer) => this.onData(chunk));
-    proc.stderr!.on("data", (chunk: Buffer) => {
-      console.error(`[app-server stderr] ${chunk.toString().trimEnd()}`);
-    });
+    readChildOutput(proc, (chunk) => this.onData(chunk), "[app-server stderr]");
     proc.stdin?.on("drain", () => this.flushWriteQueue());
     proc.stdin?.on("error", (err) => {
       this.lastFailure = err instanceof Error ? err : new Error(String(err));
@@ -297,13 +293,7 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   }
 
   private onData(chunk: Buffer): void {
-    this.buffer += this.decoder.write(chunk);
-    const lines = this.buffer.split("\n");
-    this.buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
+    for (const trimmed of this.lines.take(chunk)) {
       // Fast path: app-server should emit JSON per line; ignore any non-JSON noise safely.
       if (trimmed[0] !== "{" && trimmed[0] !== "[") {
         continue;
@@ -312,33 +302,47 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
       try {
         parsed = JSON.parse(trimmed) as unknown;
       } catch {
-        const error = new Error(
-          `Error [${ErrorCode.PROTOCOL_PARSE_ERROR}]: app-server protocol error: failed to parse JSON line: ${trimmed.slice(0, 200)}`
-        );
-        console.error(`[app-server] ${error.message}`);
-        this.lastFailure ??= error;
-        this.failAllPending(error);
-        try {
-          this.terminate("SIGTERM");
-        } catch (terminateErr) {
-          console.error(
-            `[app-server] Failed to terminate app-server after protocol parse error: ${terminateErr instanceof Error ? terminateErr.message : String(terminateErr)}`
-          );
-        }
+        this.reportParseFailure(trimmed);
         continue;
       }
 
       // Dispatch outside the parse guard: a throwing handler is not a parse
       // error and must not be reported or acted on as one.
-      if (Array.isArray(parsed)) {
-        for (const item of parsed) {
-          if (item && typeof item === "object") {
-            this.handleMessage(item as JsonRpcMessage);
-          }
+      this.dispatchParsed(parsed);
+    }
+  }
+
+  /** Fail the pending requests of a stream this client can no longer follow, and stop it. */
+  private reportParseFailure(trimmed: string): void {
+    const error = new Error(
+      `Error [${ErrorCode.PROTOCOL_PARSE_ERROR}]: app-server protocol error: failed to parse JSON line: ${trimmed.slice(0, 200)}`
+    );
+    console.error(`[app-server] ${error.message}`);
+    this.lastFailure ??= error;
+    this.failAllPending(error);
+    this.terminateOrLog("protocol parse error");
+  }
+
+  private dispatchParsed(parsed: unknown): void {
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (item && typeof item === "object") {
+          this.handleMessage(item as JsonRpcMessage);
         }
-      } else if (parsed && typeof parsed === "object") {
-        this.handleMessage(parsed as JsonRpcMessage);
       }
+    } else if (parsed && typeof parsed === "object") {
+      this.handleMessage(parsed as JsonRpcMessage);
+    }
+  }
+
+  /** Terminate the subprocess, reporting a refused signal rather than raising it. */
+  private terminateOrLog(context: string): void {
+    try {
+      this.terminate("SIGTERM");
+    } catch (terminateErr) {
+      console.error(
+        `[app-server] Failed to terminate app-server after ${context}: ${terminateErr instanceof Error ? terminateErr.message : String(terminateErr)}`
+      );
     }
   }
 
@@ -346,50 +350,52 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     if (!this.process?.stdin?.writable) throw new Error("app-server stdin not writable");
 
     if (this.backpressure || this.writeQueue.length > 0) {
-      if (this.queuedBytes + payload.length > MAX_WRITE_QUEUE_BYTES) {
-        const error = new Error(
-          `Error [${ErrorCode.WRITE_QUEUE_DROPPED}]: app-server stdin backpressure: write queue exceeded limit`
-        );
-        this.lastFailure = error;
-        this.failAllPending(error);
-        this.writeQueue = [];
-        this.queuedBytes = 0;
-        try {
-          this.terminate("SIGTERM");
-        } catch (terminateErr) {
-          console.error(
-            `[app-server] Failed to terminate app-server after write queue overflow: ${terminateErr instanceof Error ? terminateErr.message : String(terminateErr)}`
-          );
-        }
-        throw error;
-      }
-      this.writeQueue.push(payload);
-      this.queuedBytes += payload.length;
+      this.queueWrite(payload);
       return;
     }
 
     try {
-      const ok = this.process.stdin.write(payload);
-      if (!ok) this.backpressure = true;
+      this.writeToStdin(payload);
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
+      throw this.recordWriteFailure(err);
+    }
+  }
+
+  /** Hold a payload until stdin drains, up to the queue limit. */
+  private queueWrite(payload: string): void {
+    if (this.queuedBytes + payload.length > MAX_WRITE_QUEUE_BYTES) {
+      const error = new Error(
+        `Error [${ErrorCode.WRITE_QUEUE_DROPPED}]: app-server stdin backpressure: write queue exceeded limit`
+      );
       this.lastFailure = error;
       this.failAllPending(error);
+      this.writeQueue = [];
+      this.queuedBytes = 0;
+      this.terminateOrLog("write queue overflow");
       throw error;
     }
+    this.writeQueue.push(payload);
+    this.queuedBytes += payload.length;
+  }
+
+  private writeToStdin(payload: string): void {
+    const ok = this.process!.stdin!.write(payload);
+    if (!ok) this.backpressure = true;
+  }
+
+  /** Carry a refused write to every pending request, and hand the error back to the caller. */
+  private recordWriteFailure(err: unknown): Error {
+    const error = err instanceof Error ? err : new Error(String(err));
+    this.lastFailure = error;
+    this.failAllPending(error);
+    return error;
   }
 
   private flushWriteQueue(): void {
     if (!this.process?.stdin?.writable) {
       const dropped = this.dropQueuedWrites("stdin is not writable while flushing");
       if (dropped) {
-        try {
-          this.terminate("SIGTERM");
-        } catch (terminateErr) {
-          console.error(
-            `[app-server] Failed to terminate app-server after dropping queued writes: ${terminateErr instanceof Error ? terminateErr.message : String(terminateErr)}`
-          );
-        }
+        this.terminateOrLog("dropping queued writes");
       }
       return;
     }
@@ -398,12 +404,9 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
       const next = this.writeQueue.shift()!;
       this.queuedBytes -= next.length;
       try {
-        const ok = this.process.stdin.write(next);
-        if (!ok) this.backpressure = true;
+        this.writeToStdin(next);
       } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        this.lastFailure = error;
-        this.failAllPending(error);
+        this.recordWriteFailure(err);
         this.writeQueue = [];
         this.queuedBytes = 0;
         return;
@@ -427,45 +430,51 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
   private handleMessage(msg: JsonRpcMessage): void {
     // Response to our request
     if ("id" in msg && ("result" in msg || "error" in msg)) {
-      const resp = msg as JsonRpcResponse;
-      const pending = this.pending.get(resp.id);
-      if (pending) {
-        this.pending.delete(resp.id);
-        clearTimeout(pending.timer);
-        if (resp.error) {
-          pending.reject(new Error(`RPC error ${resp.error.code}: ${resp.error.message}`));
-        } else {
-          pending.resolve(resp.result);
-        }
-      }
+      this.settlePending(msg as JsonRpcResponse);
       return;
     }
 
     // Server-initiated request (has id + method, no result/error)
     if ("id" in msg && "method" in msg) {
-      const req = msg as JsonRpcRequest;
-      if (this.serverRequestHandler) {
-        this.runHandler(
-          () => this.serverRequestHandler!(req.id, req.method, req.params),
-          req.method
-        );
-      } else {
-        // No handler — respond with error to avoid hanging
-        this.runHandler(
-          () => this.respondErrorToServer(req.id, -32601, `Method not handled: ${req.method}`),
-          req.method
-        );
-      }
+      this.dispatchServerRequest(msg as JsonRpcRequest);
       return;
     }
 
     // Notification (no id)
     if ("method" in msg && !("id" in msg)) {
-      const notif = msg as JsonRpcNotification;
-      if (this.notificationHandler) {
-        this.runHandler(() => this.notificationHandler!(notif.method, notif.params), notif.method);
-      }
+      this.dispatchNotification(msg as JsonRpcNotification);
       return;
+    }
+  }
+
+  private settlePending(resp: JsonRpcResponse): void {
+    const pending = this.pending.get(resp.id);
+    if (pending) {
+      this.pending.delete(resp.id);
+      clearTimeout(pending.timer);
+      if (resp.error) {
+        pending.reject(new Error(`RPC error ${resp.error.code}: ${resp.error.message}`));
+      } else {
+        pending.resolve(resp.result);
+      }
+    }
+  }
+
+  private dispatchServerRequest(req: JsonRpcRequest): void {
+    if (this.serverRequestHandler) {
+      this.runHandler(() => this.serverRequestHandler!(req.id, req.method, req.params), req.method);
+    } else {
+      // No handler — respond with error to avoid hanging
+      this.runHandler(
+        () => this.respondErrorToServer(req.id, -32601, `Method not handled: ${req.method}`),
+        req.method
+      );
+    }
+  }
+
+  private dispatchNotification(notif: JsonRpcNotification): void {
+    if (this.notificationHandler) {
+      this.runHandler(() => this.notificationHandler!(notif.method, notif.params), notif.method);
     }
   }
 

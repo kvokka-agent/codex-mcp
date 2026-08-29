@@ -10,6 +10,7 @@
  */
 import { existsSync, readFileSync } from "fs";
 import path from "path";
+import { stripSurroundingQuotes } from "../utils/strip-quotes.js";
 
 export interface CodexInvocation {
   cmd: string;
@@ -29,50 +30,81 @@ type ResolverDeps = {
   codexIsPath?: boolean;
 };
 
+/** The deps of one resolution, with every default already filled in. */
+type ResolverContext = {
+  platform: NodeJS.Platform;
+  env: NodeJS.ProcessEnv;
+  exists: (p: string) => boolean;
+  readFile: (p: string) => string;
+  pathApi: typeof path.posix | typeof path.win32;
+  delimiter: string;
+  codexCommand: string;
+};
+
+function resolverContext(deps: ResolverDeps): ResolverContext {
+  const platform = deps.platform ?? process.platform;
+  return {
+    platform,
+    env: deps.env ?? process.env,
+    exists: deps.exists ?? existsSync,
+    readFile: deps.readFile ?? ((p: string) => readFileSync(p, "utf8")),
+    pathApi: platform === "win32" ? path.win32 : path.posix,
+    delimiter: platform === "win32" ? ";" : ":",
+    codexCommand: deps.codexCommand ?? "codex",
+  };
+}
+
 export function resolveCodexInvocation(
   codexArgs: string[],
   deps: ResolverDeps = {}
 ): CodexInvocation {
-  const platform = deps.platform ?? process.platform;
-  const env = deps.env ?? process.env;
-  const exists = deps.exists ?? existsSync;
-  const readFile = deps.readFile ?? ((p: string) => readFileSync(p, "utf8"));
-  const pathApi = platform === "win32" ? path.win32 : path.posix;
-  const delimiter = platform === "win32" ? ";" : ":";
-  const codexCommand = deps.codexCommand ?? "codex";
+  const ctx = resolverContext(deps);
   const codexIsPath = deps.codexIsPath ?? false;
 
   // ── Direct path mode ────────────────────────────────────────────
-  // When an explicit filesystem path is provided, use it directly.
-  // On Windows, .cmd/.bat files cannot be spawned directly — wrap via cmd.exe.
   if (codexIsPath) {
-    if (
-      platform === "win32" &&
-      (codexCommand.toLowerCase().endsWith(".cmd") || codexCommand.toLowerCase().endsWith(".bat"))
-    ) {
-      const comspec = env.ComSpec || env.COMSPEC || "cmd.exe";
-      return {
-        cmd: comspec,
-        args: ["/d", "/s", "/c", codexCommand, ...codexArgs],
-        spawnedViaCmd: true,
-      };
-    }
-    return { cmd: codexCommand, args: codexArgs, spawnedViaCmd: false };
+    return resolveDirectPath(codexArgs, ctx);
   }
 
   // ── Non-Windows: bare command ───────────────────────────────────
-  if (platform !== "win32") {
-    return { cmd: codexCommand, args: codexArgs, spawnedViaCmd: false };
+  if (ctx.platform !== "win32") {
+    return { cmd: ctx.codexCommand, args: codexArgs, spawnedViaCmd: false };
   }
 
   // ── Windows: try to resolve from PATH ───────────────────────────
-  const shim = findOnPath(codexCommand, env, exists, pathApi, delimiter, [".exe", ".cmd", ".bat"]);
+  return resolveWindowsInvocation(codexArgs, ctx);
+}
+
+/**
+ * Spawn an explicit filesystem path directly. On Windows, .cmd/.bat files
+ * cannot be spawned directly — wrap via cmd.exe.
+ */
+function resolveDirectPath(codexArgs: string[], ctx: ResolverContext): CodexInvocation {
+  if (ctx.platform === "win32" && isShimExtension(ctx.codexCommand)) {
+    return spawnViaComSpec(codexArgs, ctx);
+  }
+  return { cmd: ctx.codexCommand, args: codexArgs, spawnedViaCmd: false };
+}
+
+/** Prefer a PATH `.exe`, then the node script an npm shim points at, then cmd.exe. */
+function resolveWindowsInvocation(codexArgs: string[], ctx: ResolverContext): CodexInvocation {
+  const shim = findOnPath(ctx.codexCommand, ctx.env, ctx.exists, ctx.pathApi, ctx.delimiter, [
+    ".exe",
+    ".cmd",
+    ".bat",
+  ]);
   if (shim && shim.toLowerCase().endsWith(".exe")) {
     return { cmd: shim, args: codexArgs, spawnedViaCmd: false };
   }
 
-  if (shim && (shim.toLowerCase().endsWith(".cmd") || shim.toLowerCase().endsWith(".bat"))) {
-    const script = tryResolveNodeScriptFromShim(shim, codexCommand, exists, readFile, pathApi);
+  if (shim && isShimExtension(shim)) {
+    const script = tryResolveNodeScriptFromShim(
+      shim,
+      ctx.codexCommand,
+      ctx.exists,
+      ctx.readFile,
+      ctx.pathApi
+    );
     if (script) {
       return { cmd: process.execPath, args: [script, ...codexArgs], spawnedViaCmd: false };
     }
@@ -80,10 +112,19 @@ export function resolveCodexInvocation(
 
   // Last resort: spawn via cmd.exe. Keep arguments as separate tokens to avoid nested-quote issues
   // when the runtime builds the final CreateProcess command line.
-  const comspec = env.ComSpec || env.COMSPEC || "cmd.exe";
+  return spawnViaComSpec(codexArgs, ctx);
+}
+
+function isShimExtension(command: string): boolean {
+  const lower = command.toLowerCase();
+  return lower.endsWith(".cmd") || lower.endsWith(".bat");
+}
+
+function spawnViaComSpec(codexArgs: string[], ctx: ResolverContext): CodexInvocation {
+  const comspec = ctx.env.ComSpec || ctx.env.COMSPEC || "cmd.exe";
   return {
     cmd: comspec,
-    args: ["/d", "/s", "/c", codexCommand, ...codexArgs],
+    args: ["/d", "/s", "/c", ctx.codexCommand, ...codexArgs],
     spawnedViaCmd: true,
   };
 }
@@ -111,13 +152,6 @@ export function findOnPath(
     if (exists(raw)) return raw;
   }
   return undefined;
-}
-
-function stripSurroundingQuotes(value: string): string {
-  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
-    return value.slice(1, -1);
-  }
-  return value;
 }
 
 function tryResolveNodeScriptFromShim(

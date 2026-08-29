@@ -1,8 +1,17 @@
 #!/usr/bin/env bun
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+import { parseLaunchArgs, resolveSpawnTarget } from "./lib/launch-args.mjs";
+import {
+  buildStdioReport,
+  captureChildOutput,
+  describeStdioReport,
+  readPositiveMs,
+  readStdioMode,
+  stdioCheckEnv,
+} from "./lib/stdio-check.mjs";
 
 function usage(exitCode = 0) {
   // eslint-disable-next-line no-console
@@ -25,215 +34,51 @@ function usage(exitCode = 0) {
 }
 
 function parseArgs(argv) {
-  const out = {
-    useBunx: false,
-    cwd: process.cwd(),
-    timeoutMs: 2000,
-    stdioMode: "auto",
-    reportJson: null,
-    overrideCommand: null,
-    overrideArgs: [],
-  };
-
-  const dd = argv.indexOf("--");
-  const main = dd === -1 ? argv : argv.slice(0, dd);
-  const tail = dd === -1 ? [] : argv.slice(dd + 1);
-
-  for (let i = 0; i < main.length; i++) {
-    const a = main[i];
-    if (a === "--help" || a === "-h") usage(0);
-    if (a === "--bunx") {
-      out.useBunx = true;
-      continue;
-    }
-    if (a === "--cwd") {
-      const v = main[i + 1];
-      if (!v) usage(2);
-      out.cwd = v;
-      i++;
-      continue;
-    }
-    if (a === "--timeout-ms") {
-      const v = main[i + 1];
-      if (!v) usage(2);
-      const n = Number(v);
-      if (!Number.isFinite(n) || n <= 0) usage(2);
-      out.timeoutMs = Math.floor(n);
-      i++;
-      continue;
-    }
-    if (a === "--mode") {
-      const v = main[i + 1];
-      if (!v) usage(2);
-      const normalized = v.trim().toLowerCase();
-      if (!["auto", "strict", "off"].includes(normalized)) usage(2);
-      out.stdioMode = normalized;
-      i++;
-      continue;
-    }
-    if (a === "--report-json") {
-      const v = main[i + 1];
-      if (!v) usage(2);
-      out.reportJson = v;
-      i++;
-      continue;
-    }
-    usage(2);
-  }
-
-  if (tail.length > 0) {
-    out.overrideCommand = tail[0] ?? null;
-    out.overrideArgs = tail.slice(1);
-  }
-
-  return out;
-}
-
-function wait(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function getFixHints(platform) {
-  const generic = [
-    "Prefer MCP config launch: command='bunx', args=['@kvokka/codex-mcp']",
-    "Ensure stdout remains JSON-RPC only; route diagnostics to stderr.",
-  ];
-  if (platform === "win32") {
-    return [
-      'If shell wrapping is required, use: pwsh -NoProfile -Command "bunx @kvokka/codex-mcp"',
-      ...generic,
-    ];
-  }
-  return generic;
+  return parseLaunchArgs(argv, {
+    usage,
+    defaults: { timeoutMs: 2000, stdioMode: "auto", reportJson: null },
+    values: {
+      "--timeout-ms": { key: "timeoutMs", read: readPositiveMs },
+      "--mode": { key: "stdioMode", read: readStdioMode },
+      "--report-json": { key: "reportJson", read: (raw) => raw },
+    },
+  });
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-
-  const command = args.overrideCommand ? args.overrideCommand : args.useBunx ? "bunx" : "bun";
-  const cmdArgs = args.overrideCommand
-    ? args.overrideArgs
-    : args.useBunx
-      ? ["@kvokka/codex-mcp"]
-      : ["dist/index.js"];
+  const { command, args: cmdArgs } = resolveSpawnTarget(args);
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mcp-stdio-"));
-  const stdoutPath = path.join(tmpDir, "stdout.log");
-  const stderrPath = path.join(tmpDir, "stderr.log");
-
-  const stdoutFd = fs.openSync(stdoutPath, "w");
-  const stderrFd = fs.openSync(stderrPath, "w");
-
-  const child = spawn(command, cmdArgs, {
+  const run = await captureChildOutput({
+    command,
+    args: cmdArgs,
     cwd: args.cwd,
-    stdio: ["ignore", stdoutFd, stderrFd],
-    windowsHide: true,
-    shell: false,
-    env: {
-      ...process.env,
-      CODEX_MCP_STDIO_MODE: args.stdioMode,
-      // The server takes a single-writer lock on its state directory and recovers
-      // whatever sessions it finds there. Left at the default the check would do
-      // that to the caller's real ~/.codex-mcp/state.
-      CODEX_MCP_STATE_DIR: process.env.CODEX_MCP_STATE_DIR ?? path.join(tmpDir, "state"),
-    },
-  });
-  let exitCode = null;
-  let exitSignal = null;
-  child.on("exit", (code, signal) => {
-    exitCode = code;
-    exitSignal = signal;
+    env: stdioCheckEnv(process.env, args.stdioMode, tmpDir),
+    timeoutMs: args.timeoutMs,
+    dir: tmpDir,
   });
 
-  await wait(args.timeoutMs);
-
-  // Best-effort terminate; if it already died, ignore.
-  try {
-    child.kill();
-  } catch {
-    // ignore
-  }
-
-  // Give the process a moment to flush output.
-  await wait(200);
-
-  fs.closeSync(stdoutFd);
-  fs.closeSync(stderrFd);
-
-  const stdout = fs.readFileSync(stdoutPath, "utf8");
-  const stderr = fs.readFileSync(stderrPath, "utf8");
-
-  const stdoutNonEmpty = stdout.trim().length > 0;
-  const runtimeFailure =
-    (typeof exitCode === "number" && exitCode !== 0) ||
-    (typeof exitSignal === "string" && exitSignal !== "SIGTERM" && exitSignal !== "SIGKILL");
-  const report = {
-    ok: !stdoutNonEmpty && !runtimeFailure,
-    mode: args.stdioMode,
+  const report = buildStdioReport({
+    ...run,
+    stdioMode: args.stdioMode,
     command,
     args: cmdArgs,
     cwd: args.cwd,
     timeoutMs: args.timeoutMs,
-    childExitCode: exitCode,
-    childExitSignal: exitSignal,
-    stdoutBytes: Buffer.byteLength(stdout, "utf8"),
-    stderrBytes: Buffer.byteLength(stderr, "utf8"),
-    stdoutPreview: stdout.slice(0, 400),
-    stderrPreview: stderr.slice(0, 400),
-    logs: {
-      stdoutPath,
-      stderrPath,
-    },
-    hints: getFixHints(process.platform),
-  };
+    platform: process.platform,
+  });
 
   if (args.reportJson) {
     fs.writeFileSync(args.reportJson, JSON.stringify(report, null, 2), "utf8");
   }
 
-  // eslint-disable-next-line no-console
-  console.error(`Mode: ${args.stdioMode}`);
-  // eslint-disable-next-line no-console
-  console.error(`Spawned: ${command} ${cmdArgs.join(" ")}`);
-
-  if (runtimeFailure) {
+  for (const line of describeStdioReport(report, run)) {
     // eslint-disable-next-line no-console
-    console.error(`FAIL: child exited before healthy startup (exitCode=${exitCode}, signal=${exitSignal}).`);
-    for (const hint of report.hints) {
-      // eslint-disable-next-line no-console
-      console.error(`Hint: ${hint}`);
-    }
-    // eslint-disable-next-line no-console
-    console.error(`Captured logs: ${stdoutPath} (stdout), ${stderrPath} (stderr)`);
-    process.exitCode = 1;
-    return;
+    console.error(line);
   }
 
-  if (stdoutNonEmpty) {
-    // eslint-disable-next-line no-console
-    console.error("FAIL: stdout is not clean. First 400 chars:\n");
-    // eslint-disable-next-line no-console
-    console.error(report.stdoutPreview);
-    // eslint-disable-next-line no-console
-    console.error("\n---\nHint: anything printed to stdout will break MCP stdio handshake.");
-    for (const hint of report.hints) {
-      // eslint-disable-next-line no-console
-      console.error(`Hint: ${hint}`);
-    }
-    // eslint-disable-next-line no-console
-    console.error(`Captured logs: ${stdoutPath} (stdout), ${stderrPath} (stderr)`);
-    process.exitCode = 1;
-    return;
-  }
-
-  // eslint-disable-next-line no-console
-  console.error("OK: stdout is clean.");
-  if (stderr.trim().length > 0) {
-    // eslint-disable-next-line no-console
-    console.error("(Note) server wrote to stderr (this is fine).");
-  }
-  // eslint-disable-next-line no-console
-  console.error(`Captured logs: ${stdoutPath} (stdout), ${stderrPath} (stderr)`);
+  if (!report.ok) process.exitCode = 1;
 }
 
 main().catch((err) => {

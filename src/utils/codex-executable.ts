@@ -11,6 +11,7 @@
  */
 import { accessSync, constants, existsSync, statSync } from "fs";
 import path from "path";
+import { stripSurroundingQuotes } from "./strip-quotes.js";
 
 // ── Env var names ─────────────────────────────────────────────────
 export const CODEX_MCP_COMMAND = "CODEX_MCP_COMMAND";
@@ -37,13 +38,6 @@ let _resolved: CodexExecutableInfo | undefined;
 // ── PATH helpers ──────────────────────────────────────────────────
 
 const WINDOWS_SUPPORTED_EXTENSIONS = [".com", ".exe", ".bat", ".cmd"] as const;
-
-function stripSurroundingQuotes(value: string): string {
-  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
-    return value.slice(1, -1);
-  }
-  return value;
-}
 
 function normalizeMaybeQuotedToken(raw: string): string {
   return stripSurroundingQuotes(raw.trim());
@@ -136,40 +130,56 @@ export function resolveDefaultCodexExecutable(
 
   // 1. Explicit filesystem path
   if (envPath) {
-    const resolvedPath = path.resolve(envPath);
-    if (!existsSync(resolvedPath)) {
-      throw new Error(`${CODEX_MCP_PATH}="${envPath}" — file does not exist.`);
-    }
-    if (!isExecutableFile(resolvedPath)) {
-      throw new Error(`${CODEX_MCP_PATH}="${envPath}" — not an executable file.`);
-    }
-    return { command: resolvedPath, isPath: true, source: "env_path" };
+    return resolveEnvPath(envPath);
   }
 
   // 2. Explicit bare command name
   if (envCommand) {
-    if (looksLikePath(envCommand)) {
-      throw new Error(
-        `${CODEX_MCP_COMMAND}="${envCommand}" looks like a path. Use ${CODEX_MCP_PATH} for filesystem paths.`
-      );
-    }
-    const resolved = resolveCommandFromPath(envCommand, env);
-    if (!resolved) {
-      throw new Error(`${CODEX_MCP_COMMAND}="${envCommand}" was not found in PATH.`);
-    }
-    return { command: resolved, isPath: true, source: "env_command" };
+    return resolveEnvCommand(envCommand, env);
   }
 
   // 3. Auto-detect from PATH
+  const detected = autoDetectFromPath(env);
+  if (detected) {
+    return detected;
+  }
+
+  // 4. Fall back to "codex" — let spawn surface a clear "not found" error later
+  return { command: "codex", isPath: false, source: "default" };
+}
+
+function resolveEnvPath(envPath: string): CodexExecutableInfo {
+  const resolvedPath = path.resolve(envPath);
+  if (!existsSync(resolvedPath)) {
+    throw new Error(`${CODEX_MCP_PATH}="${envPath}" — file does not exist.`);
+  }
+  if (!isExecutableFile(resolvedPath)) {
+    throw new Error(`${CODEX_MCP_PATH}="${envPath}" — not an executable file.`);
+  }
+  return { command: resolvedPath, isPath: true, source: "env_path" };
+}
+
+function resolveEnvCommand(envCommand: string, env: NodeJS.ProcessEnv): CodexExecutableInfo {
+  if (looksLikePath(envCommand)) {
+    throw new Error(
+      `${CODEX_MCP_COMMAND}="${envCommand}" looks like a path. Use ${CODEX_MCP_PATH} for filesystem paths.`
+    );
+  }
+  const resolved = resolveCommandFromPath(envCommand, env);
+  if (!resolved) {
+    throw new Error(`${CODEX_MCP_COMMAND}="${envCommand}" was not found in PATH.`);
+  }
+  return { command: resolved, isPath: true, source: "env_command" };
+}
+
+function autoDetectFromPath(env: NodeJS.ProcessEnv): CodexExecutableInfo | undefined {
   for (const candidate of AUTO_CODEX_COMMANDS) {
     const resolved = resolveCommandFromPath(candidate, env);
     if (resolved) {
       return { command: resolved, isPath: true, source: "auto_detect" };
     }
   }
-
-  // 4. Fall back to "codex" — let spawn surface a clear "not found" error later
-  return { command: "codex", isPath: false, source: "default" };
+  return undefined;
 }
 
 // ── Public API ────────────────────────────────────────────────────
