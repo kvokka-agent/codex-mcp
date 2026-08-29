@@ -18,10 +18,15 @@ wherever the TypeScript model no longer matches.
 ## How to update
 
 1. Ensure you have the desired `codex` CLI version installed.
-2. Regenerate the bundle:
+2. Delete the generated files, then regenerate. The generator writes what the current protocol
+   carries and removes nothing, so a bundle regenerated in place keeps every file of the previous
+   CLI version and a removed message reads as a message that still exists. `README.md` and
+   `metadata.json` are hand-written and are the two files to keep:
 
 ```bash
+find codex-schema -mindepth 1 -not -name README.md -not -name metadata.json -delete
 codex app-server generate-json-schema --experimental --out codex-schema
+git status --short -- codex-schema
 ```
 
 3. Update `codex-schema/metadata.json`.
