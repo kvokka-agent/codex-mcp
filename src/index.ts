@@ -6,6 +6,7 @@
  * or falls back to codex exec --json when app-server is unavailable.
  */
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createServer } from "./server.js";
 import type { ICodexClient } from "./app-server/client-interface.js";
 import { AppServerClient } from "./app-server/client.js";
@@ -16,7 +17,9 @@ import {
   checkDefaultCodexExecutableAvailability,
   getDefaultCodexExecutable,
 } from "./utils/codex-executable.js";
-import { startDiskPersistence } from "./session/persistence.js";
+import type { RecoveredSession } from "./persistence/index.js";
+import type { SessionManager } from "./session/manager.js";
+import { startDiskPersistence, type SessionPersistence } from "./session/persistence.js";
 import { reapOrphanProcesses } from "./session/orphan-reaper.js";
 import { decideStdinShutdown } from "./utils/stdin-shutdown.js";
 
@@ -61,7 +64,8 @@ async function withDeadline(
   }
 }
 
-async function main(): Promise<void> {
+/** Report what the stdio preflight found, and stop the server when strict mode blocks. */
+function reportStdioPreflight(): void {
   const preflight = runStdioPreflight();
   for (const note of preflight.notes) {
     console.error(`[stdio] ${note}`);
@@ -80,6 +84,272 @@ async function main(): Promise<void> {
       "STDIO preflight failed in strict mode due to blocking stdout contamination risk"
     );
   }
+}
+
+/** Say what came back from disk: the sessions this server may act on, and the ones it may not. */
+function reportRecoveredSessions(recovered: RecoveredSession[], pruned: number): void {
+  const held = recovered.filter((session) => session.owner.kind === "held");
+  if (recovered.length > held.length) {
+    console.error(`[codex-mcp] Read ${recovered.length - held.length} session(s) from disk`);
+  }
+  if (held.length > 0) {
+    console.error(`[codex-mcp] ${held.length} session(s) belong to another running codex-mcp`);
+  }
+  if (pruned > 0) {
+    console.error(`[codex-mcp] Pruned ${pruned} old session(s)`);
+  }
+}
+
+/**
+ * Reap the codex processes the adopted sessions left behind.
+ *
+ * It runs after the transport is connected, for two reasons. Nothing holds
+ * this process's event loop until then, so an await here that resolves on a
+ * timer alone lets the process exit before a client ever sees the server. And a
+ * confirmed orphan is given five seconds to exit gracefully, which is five
+ * seconds a client would spend waiting for a server that is already able to
+ * answer.
+ */
+async function reapAdoptedOrphans(recovered: RecoveredSession[]): Promise<void> {
+  const adopted = recovered.filter((session) => session.owner.kind !== "held");
+  if (adopted.length === 0) return;
+  const reaped = await reapOrphanProcesses(adopted);
+  if (reaped.reaped > 0) console.error(`[codex-mcp] Reaped ${reaped.reaped} orphan process(es)`);
+  if (reaped.unconfirmed > 0) {
+    console.error(
+      `[codex-mcp] ${reaped.unconfirmed} orphan process(es) were signalled but their exit was not` +
+        ` confirmed — they may still be running; check them and kill them by hand`
+    );
+  }
+  if (reaped.skipped > 0) {
+    console.error(
+      `[codex-mcp] Left ${reaped.skipped} recorded pid(s) alone: the process behind each could not` +
+        ` be confirmed as ours, so no signal was sent`
+    );
+  }
+}
+
+/** Wait for stderr to drain, so what a shutdown reported is out before the process goes. */
+function flushStderr(): Promise<void> {
+  return new Promise<void>((resolve) => process.stderr.write("", () => resolve()));
+}
+
+/**
+ * The graceful shutdown of one running server: what it waits for, and what
+ * makes it start.
+ *
+ * The process signals, the runtime errors and the state of stdin all lead here,
+ * and `shutdown` runs once whatever called it.
+ */
+class ServerLifecycle {
+  private closing = false;
+  private lastExitCode = 0;
+  private stdinClosedAt: number | undefined;
+  private stdinClosedReason: "end" | "close" | undefined;
+  private stdinShutdownTimer: ReturnType<typeof setTimeout> | undefined;
+
+  private readonly onStdinEnd = () => this.handleStdinTerminated("end");
+  private readonly onStdinClose = () => this.handleStdinTerminated("close");
+
+  private readonly handleStdinError = (error: Error) => {
+    console.error("[codex-mcp] stdin error:", error);
+    this.lastExitCode = 1;
+    void this.shutdown("stdin_error");
+  };
+
+  private readonly handleUnexpectedError = (error: unknown) => {
+    console.error("[codex-mcp] Unhandled runtime error:", error);
+    this.lastExitCode = 1;
+    void this.shutdown("runtime_error");
+  };
+
+  constructor(
+    private readonly server: McpServer,
+    private readonly sessionManager: SessionManager,
+    private readonly persistence: SessionPersistence | undefined
+  ) {}
+
+  /** Register every handler that can start a shutdown, and keep stdin flowing. */
+  installProcessHandlers(): void {
+    process.on("SIGINT", () => void this.shutdown("SIGINT"));
+    process.on("SIGTERM", () => void this.shutdown("SIGTERM"));
+    // Windows: Ctrl+Break / console close scenarios.
+    process.on("SIGBREAK", () => void this.shutdown("SIGBREAK"));
+    // `beforeExit` fires with an empty event loop: nothing is left to serve, so the
+    // sessions are written down before the process goes. `server.isConnected()`
+    // cannot gate this — the stdio transport reports itself connected for the life
+    // of the process — and `shutdown` runs once whatever calls it.
+    process.on("beforeExit", () => void this.shutdown("beforeExit"));
+    process.on("uncaughtException", this.handleUnexpectedError);
+    process.on("unhandledRejection", this.handleUnexpectedError);
+
+    // Keep stdin alive so the MCP stdio transport continues to receive frames.
+    if (typeof process.stdin.resume === "function") {
+      process.stdin.resume();
+    }
+    process.stdin.on("error", this.handleStdinError);
+    // Guarded shutdown: some clients can transiently trigger stdio close-like signals.
+    // We only exit after checking connection/session state.
+    process.stdin.on("end", this.onStdinEnd);
+    process.stdin.on("close", this.onStdinClose);
+  }
+
+  async shutdown(reason = "unknown"): Promise<void> {
+    if (this.closing) return;
+    this.closing = true;
+    this.clearStdinShutdownTimer();
+    this.detachStdinListeners();
+
+    // Set a hard force-exit timer in case cleanup hangs
+    const forceExitMs = process.platform === "win32" ? 10_000 : 5_000;
+    const forceExitTimer = setTimeout(() => process.exit(this.lastExitCode), forceExitMs);
+    if (forceExitTimer.unref) forceExitTimer.unref();
+
+    const activeSessions = this.sessionManager.listSessions();
+    const runningCount = activeSessions.filter(
+      (s) => s.status === "running" || s.status === "waiting_approval"
+    ).length;
+
+    console.error(
+      `[codex-mcp] shutdown triggered (reason=${reason}, activeSessions=${runningCount}, total=${activeSessions.length})`
+    );
+
+    this.writeSessionsDown();
+
+    if (this.server.isConnected()) {
+      await withDeadline(
+        this.sendStopping(reason, runningCount, activeSessions.length),
+        CLIENT_WRITE_DEADLINE_MS,
+        "the server_stopping notification"
+      );
+    }
+
+    await withDeadline(this.server.close(), CLIENT_WRITE_DEADLINE_MS, "the transport close");
+
+    this.persistence?.destroy();
+    process.exitCode = this.lastExitCode;
+
+    try {
+      await flushStderr();
+    } catch {
+      // ignore stderr flush errors
+    } finally {
+      clearTimeout(forceExitTimer);
+    }
+  }
+
+  /** Remove stdin listeners to avoid re-entrant calls */
+  private detachStdinListeners(): void {
+    if (typeof process.stdin.off === "function") {
+      process.stdin.off("error", this.handleStdinError);
+      process.stdin.off("end", this.onStdinEnd);
+      process.stdin.off("close", this.onStdinClose);
+    }
+  }
+
+  /**
+   * The disk comes first, and synchronously. A shutdown usually starts because
+   * the client went away, and every write to that client from here on can block
+   * for as long as the kernel buffer stays full: an MCP notification sent
+   * afterwards would take the record of these sessions down with it.
+   */
+  private writeSessionsDown(): void {
+    try {
+      this.sessionManager.finalizeForShutdown();
+    } catch (err) {
+      console.error("[codex-mcp] Failed to write the sessions down on shutdown:", err);
+    }
+  }
+
+  private sendStopping(
+    reason: string,
+    activeSessions: number,
+    totalSessions: number
+  ): Promise<unknown> {
+    return this.server.sendLoggingMessage({
+      level: "info",
+      data: {
+        event: "server_stopping",
+        reason,
+        activeSessions,
+        totalSessions,
+      },
+    });
+  }
+
+  private clearStdinShutdownTimer(): void {
+    if (this.stdinShutdownTimer) {
+      clearTimeout(this.stdinShutdownTimer);
+      this.stdinShutdownTimer = undefined;
+    }
+  }
+
+  private scheduleStdinTerminationCheck(): void {
+    this.stdinShutdownTimer = setTimeout(this.evaluateStdinTermination, STDIN_SHUTDOWN_CHECK_MS);
+    if (this.stdinShutdownTimer.unref) this.stdinShutdownTimer.unref();
+  }
+
+  private hasActiveSessions(): boolean {
+    return this.sessionManager
+      .listSessions()
+      .some((s) => s.status === "running" || s.status === "waiting_approval");
+  }
+
+  private readonly evaluateStdinTermination = () => {
+    if (this.closing || this.stdinClosedAt === undefined) return;
+
+    const stdinUnavailable =
+      process.stdin.destroyed || process.stdin.readableEnded || !process.stdin.readable;
+    const elapsedMs = Date.now() - this.stdinClosedAt;
+    const active = this.hasActiveSessions();
+    const decision = decideStdinShutdown({
+      stdinUnavailable,
+      elapsedMs,
+      maxWaitMs: STDIN_SHUTDOWN_MAX_WAIT_MS,
+      hasActiveSessions: active,
+    });
+
+    if (decision === "clear") {
+      // Stdin stream recovered — drop this shutdown attempt.
+      this.stdinClosedAt = undefined;
+      this.stdinClosedReason = undefined;
+      return;
+    }
+    if (decision === "shutdown_now") {
+      console.error("[codex-mcp] stdin closed with no active sessions — shutting down");
+      void this.shutdown(`stdin_${this.stdinClosedReason ?? "closed"}`);
+      return;
+    }
+    if (decision === "shutdown_timeout") {
+      console.error(
+        `[codex-mcp] stdin closed and drain period (${STDIN_SHUTDOWN_MAX_WAIT_MS}ms) elapsed — forcing shutdown`
+      );
+      void this.shutdown(`stdin_${this.stdinClosedReason ?? "closed"}_timeout`);
+      return;
+    }
+    // decision === "reschedule": keep waiting
+    if (active) {
+      console.error(
+        `[codex-mcp] stdin closed; ${this.sessionManager.getActiveSessionCount()} active session(s) — waiting up to ${STDIN_SHUTDOWN_MAX_WAIT_MS}ms (elapsed: ${elapsedMs}ms)`
+      );
+    }
+    this.scheduleStdinTerminationCheck();
+  };
+
+  private handleStdinTerminated(event: "end" | "close"): void {
+    if (this.closing) return;
+    if (this.stdinClosedAt === undefined) {
+      this.stdinClosedAt = Date.now();
+      this.stdinClosedReason = event;
+      console.error(`[codex-mcp] stdin ${event} observed — entering guarded shutdown checks`);
+    }
+    this.clearStdinShutdownTimer();
+    this.scheduleStdinTerminationCheck();
+  }
+}
+
+async function main(): Promise<void> {
+  reportStdioPreflight();
 
   // Resolve and validate the codex executable before starting the server.
   // Throws immediately if env vars are misconfigured (e.g. both set, or path missing).
@@ -93,16 +363,7 @@ async function main(): Promise<void> {
   // Open the state directory. A failure here leaves persistence undefined and is
   // reported on stderr by startDiskPersistence; the server serves requests without it.
   const { persistence, recovered, pruned } = startDiskPersistence();
-  const held = recovered.filter((session) => session.owner.kind === "held");
-  if (recovered.length > held.length) {
-    console.error(`[codex-mcp] Read ${recovered.length - held.length} session(s) from disk`);
-  }
-  if (held.length > 0) {
-    console.error(`[codex-mcp] ${held.length} session(s) belong to another running codex-mcp`);
-  }
-  if (pruned > 0) {
-    console.error(`[codex-mcp] Pruned ${pruned} old session(s)`);
-  }
+  reportRecoveredSessions(recovered, pruned);
 
   const serverCwd = process.cwd();
   const ctx = createServer(serverCwd, {
@@ -118,217 +379,15 @@ async function main(): Promise<void> {
     sessionManager.ingestRecovered(recovered);
   }
 
-  /**
-   * Reap the codex processes the adopted sessions left behind.
-   *
-   * It runs after the transport is connected, for two reasons. Nothing holds
-   * this process's event loop until then, so an await here that resolves on a
-   * timer alone lets the process exit before a client ever sees the server. And a
-   * confirmed orphan is given five seconds to exit gracefully, which is five
-   * seconds a client would spend waiting for a server that is already able to
-   * answer.
-   */
-  const reapAdoptedOrphans = async (): Promise<void> => {
-    const adopted = recovered.filter((session) => session.owner.kind !== "held");
-    if (adopted.length === 0) return;
-    const reaped = await reapOrphanProcesses(adopted);
-    if (reaped.reaped > 0) console.error(`[codex-mcp] Reaped ${reaped.reaped} orphan process(es)`);
-    if (reaped.unconfirmed > 0) {
-      console.error(
-        `[codex-mcp] ${reaped.unconfirmed} orphan process(es) were signalled but their exit was not` +
-          ` confirmed — they may still be running; check them and kill them by hand`
-      );
-    }
-    if (reaped.skipped > 0) {
-      console.error(
-        `[codex-mcp] Left ${reaped.skipped} recorded pid(s) alone: the process behind each could not` +
-          ` be confirmed as ours, so no signal was sent`
-      );
-    }
-  };
-
   const transport = new StdioServerTransport();
 
-  // ── Graceful shutdown state ────────────────────────────────────────
-  let closing = false;
-  let lastExitCode = 0;
-  let stdinClosedAt: number | undefined;
-  let stdinClosedReason: "end" | "close" | undefined;
-  let stdinShutdownTimer: ReturnType<typeof setTimeout> | undefined;
-
-  const onStdinEnd = () => handleStdinTerminated("end");
-  const onStdinClose = () => handleStdinTerminated("close");
-
-  const clearStdinShutdownTimer = () => {
-    if (stdinShutdownTimer) {
-      clearTimeout(stdinShutdownTimer);
-      stdinShutdownTimer = undefined;
-    }
-  };
-
-  function hasActiveSessions(): boolean {
-    return sessionManager
-      .listSessions()
-      .some((s) => s.status === "running" || s.status === "waiting_approval");
-  }
-
-  const shutdown = async (reason = "unknown") => {
-    if (closing) return;
-    closing = true;
-    clearStdinShutdownTimer();
-    // Remove stdin listeners to avoid re-entrant calls
-    if (typeof process.stdin.off === "function") {
-      process.stdin.off("error", handleStdinError);
-      process.stdin.off("end", onStdinEnd);
-      process.stdin.off("close", onStdinClose);
-    }
-
-    // Set a hard force-exit timer in case cleanup hangs
-    const forceExitMs = process.platform === "win32" ? 10_000 : 5_000;
-    const forceExitTimer = setTimeout(() => process.exit(lastExitCode), forceExitMs);
-    if (forceExitTimer.unref) forceExitTimer.unref();
-
-    const activeSessions = sessionManager.listSessions();
-    const runningCount = activeSessions.filter(
-      (s) => s.status === "running" || s.status === "waiting_approval"
-    ).length;
-
-    console.error(
-      `[codex-mcp] shutdown triggered (reason=${reason}, activeSessions=${runningCount}, total=${activeSessions.length})`
-    );
-
-    // The disk comes first, and synchronously. A shutdown usually starts because
-    // the client went away, and every write to that client from here on can block
-    // for as long as the kernel buffer stays full: an MCP notification sent
-    // afterwards would take the record of these sessions down with it.
-    try {
-      sessionManager.finalizeForShutdown();
-    } catch (err) {
-      console.error("[codex-mcp] Failed to write the sessions down on shutdown:", err);
-    }
-
-    if (server.isConnected()) {
-      await withDeadline(
-        server.sendLoggingMessage({
-          level: "info",
-          data: {
-            event: "server_stopping",
-            reason,
-            activeSessions: runningCount,
-            totalSessions: activeSessions.length,
-          },
-        }),
-        CLIENT_WRITE_DEADLINE_MS,
-        "the server_stopping notification"
-      );
-    }
-
-    await withDeadline(server.close(), CLIENT_WRITE_DEADLINE_MS, "the transport close");
-
-    persistence?.destroy();
-    process.exitCode = lastExitCode;
-
-    try {
-      await new Promise<void>((resolve) => process.stderr.write("", () => resolve()));
-    } catch {
-      // ignore stderr flush errors
-    } finally {
-      clearTimeout(forceExitTimer);
-    }
-  };
-
-  function handleStdinError(error: Error) {
-    console.error("[codex-mcp] stdin error:", error);
-    lastExitCode = 1;
-    void shutdown("stdin_error");
-  }
-
-  const evaluateStdinTermination = () => {
-    if (closing || stdinClosedAt === undefined) return;
-
-    const stdinUnavailable =
-      process.stdin.destroyed || process.stdin.readableEnded || !process.stdin.readable;
-    const elapsedMs = Date.now() - stdinClosedAt;
-    const active = hasActiveSessions();
-    const decision = decideStdinShutdown({
-      stdinUnavailable,
-      elapsedMs,
-      maxWaitMs: STDIN_SHUTDOWN_MAX_WAIT_MS,
-      hasActiveSessions: active,
-    });
-
-    if (decision === "clear") {
-      // Stdin stream recovered — drop this shutdown attempt.
-      stdinClosedAt = undefined;
-      stdinClosedReason = undefined;
-      return;
-    }
-    if (decision === "shutdown_now") {
-      console.error("[codex-mcp] stdin closed with no active sessions — shutting down");
-      void shutdown(`stdin_${stdinClosedReason ?? "closed"}`);
-      return;
-    }
-    if (decision === "shutdown_timeout") {
-      console.error(
-        `[codex-mcp] stdin closed and drain period (${STDIN_SHUTDOWN_MAX_WAIT_MS}ms) elapsed — forcing shutdown`
-      );
-      void shutdown(`stdin_${stdinClosedReason ?? "closed"}_timeout`);
-      return;
-    }
-    // decision === "reschedule": keep waiting
-    if (active) {
-      console.error(
-        `[codex-mcp] stdin closed; ${sessionManager.getActiveSessionCount()} active session(s) — waiting up to ${STDIN_SHUTDOWN_MAX_WAIT_MS}ms (elapsed: ${elapsedMs}ms)`
-      );
-    }
-    stdinShutdownTimer = setTimeout(evaluateStdinTermination, STDIN_SHUTDOWN_CHECK_MS);
-    if (stdinShutdownTimer.unref) stdinShutdownTimer.unref();
-  };
-
-  function handleStdinTerminated(event: "end" | "close") {
-    if (closing) return;
-    if (stdinClosedAt === undefined) {
-      stdinClosedAt = Date.now();
-      stdinClosedReason = event;
-      console.error(`[codex-mcp] stdin ${event} observed — entering guarded shutdown checks`);
-    }
-    clearStdinShutdownTimer();
-    stdinShutdownTimer = setTimeout(evaluateStdinTermination, STDIN_SHUTDOWN_CHECK_MS);
-    if (stdinShutdownTimer.unref) stdinShutdownTimer.unref();
-  }
-
-  const handleUnexpectedError = (error: unknown) => {
-    console.error("[codex-mcp] Unhandled runtime error:", error);
-    lastExitCode = 1;
-    void shutdown("runtime_error");
-  };
-
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
-  // Windows: Ctrl+Break / console close scenarios.
-  process.on("SIGBREAK", () => void shutdown("SIGBREAK"));
-  // `beforeExit` fires with an empty event loop: nothing is left to serve, so the
-  // sessions are written down before the process goes. `server.isConnected()`
-  // cannot gate this — the stdio transport reports itself connected for the life
-  // of the process — and `shutdown` runs once whatever calls it.
-  process.on("beforeExit", () => void shutdown("beforeExit"));
-  process.on("uncaughtException", handleUnexpectedError);
-  process.on("unhandledRejection", handleUnexpectedError);
-
-  // Keep stdin alive so the MCP stdio transport continues to receive frames.
-  if (typeof process.stdin.resume === "function") {
-    process.stdin.resume();
-  }
-  process.stdin.on("error", handleStdinError);
-  // Guarded shutdown: some clients can transiently trigger stdio close-like signals.
-  // We only exit after checking connection/session state.
-  process.stdin.on("end", onStdinEnd);
-  process.stdin.on("close", onStdinClose);
+  const lifecycle = new ServerLifecycle(server, sessionManager, persistence);
+  lifecycle.installProcessHandlers();
 
   await server.connect(transport);
   console.error(`codex-mcp server started (cwd: ${serverCwd})`);
 
-  await reapAdoptedOrphans();
+  await reapAdoptedOrphans(recovered);
 }
 
 main().catch((err) => {

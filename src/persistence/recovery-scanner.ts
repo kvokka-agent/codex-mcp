@@ -168,6 +168,75 @@ function metaFromDirectory(sessionId: string, mtimeMs: number): RecoveredSession
 }
 
 /**
+ * The metadata to recover a session directory with, or null to skip the directory.
+ *
+ * A directory whose meta.json is there and unusable is still recovered, from what the
+ * directory itself says; one whose meta.json was written by a newer schema is skipped.
+ */
+function resolveSessionMeta(
+  entry: string,
+  sessionDir: string,
+  mtimeMs: number
+): { meta: RecoveredSessionMeta; damaged: boolean } | null {
+  const metaRead = readJson<RecoveredSessionMeta>(join(sessionDir, "meta.json"));
+  // A directory with no meta.json is a session that wrote none: nothing to recover.
+  if (metaRead.state === "absent") return null;
+
+  const stored = metaRead.state === "ok" && metaRead.value.sessionId ? metaRead.value : null;
+  if (!stored) {
+    // Dropping the directory would take its pid.json with it, and the orphan reaper
+    // would leave that session's codex process running for good.
+    console.error(
+      `[recovery] Session ${entry}: meta.json is unusable — recovering the directory` +
+        ` without it, so its pid.json is still read`
+    );
+  } else if (stored.schemaVersion !== undefined && stored.schemaVersion > SCHEMA_VERSION) {
+    console.error(
+      `[recovery] Skipping session ${stored.sessionId}: schema version ${stored.schemaVersion} > ${SCHEMA_VERSION}`
+    );
+    return null;
+  }
+
+  return stored
+    ? { meta: stored, damaged: false }
+    : { meta: metaFromDirectory(entry, mtimeMs), damaged: true };
+}
+
+/** Read one session directory back, or null when it holds no session to recover. */
+function recoverSessionDir(
+  entry: string,
+  sessionDir: string,
+  mtimeMs: number
+): RecoveredSession | null {
+  const resolved = resolveSessionMeta(entry, sessionDir, mtimeMs);
+  if (!resolved) return null;
+  const { meta, damaged } = resolved;
+
+  const eventLog = scanEventsJsonl(join(sessionDir, "events.jsonl"));
+  if (eventLog.corruptLines > 0) {
+    console.error(
+      `[recovery] Session ${meta.sessionId}: skipped ${eventLog.corruptLines} corrupt line(s) in events.jsonl`
+    );
+  }
+
+  const result = readJsonSafe<unknown>(join(sessionDir, "result.json"));
+  const pidInfo = readJsonSafe<RecoveredPidInfo>(join(sessionDir, "pid.json"));
+
+  return {
+    sessionId: meta.sessionId,
+    meta,
+    corruptEventLines: eventLog.corruptLines,
+    ...(damaged ? { metaDamaged: true as const } : {}),
+    lastSeq: eventLog.lastSeq,
+    result,
+    pidInfo,
+    owner: ownerState(readOwner(sessionDir)),
+    ...(eventLog.lastActivity ? { lastActivity: eventLog.lastActivity } : {}),
+    sessionDir,
+  };
+}
+
+/**
  * Scan `sessionsDir` for persisted sessions and return recovered metadata.
  *
  * A directory that is not there holds no sessions. A directory that is there and cannot
@@ -192,49 +261,8 @@ export function scanRecoverableSessions(sessionsDir: string): RecoveredSession[]
     const stat = statSync(sessionDir, { throwIfNoEntry: false });
     if (!stat?.isDirectory()) continue;
 
-    const metaRead = readJson<RecoveredSessionMeta>(join(sessionDir, "meta.json"));
-    // A directory with no meta.json is a session that wrote none: nothing to recover.
-    if (metaRead.state === "absent") continue;
-
-    const stored = metaRead.state === "ok" && metaRead.value.sessionId ? metaRead.value : null;
-    if (!stored) {
-      // Dropping the directory would take its pid.json with it, and the orphan reaper
-      // would leave that session's codex process running for good.
-      console.error(
-        `[recovery] Session ${entry}: meta.json is unusable — recovering the directory` +
-          ` without it, so its pid.json is still read`
-      );
-    } else if (stored.schemaVersion !== undefined && stored.schemaVersion > SCHEMA_VERSION) {
-      console.error(
-        `[recovery] Skipping session ${stored.sessionId}: schema version ${stored.schemaVersion} > ${SCHEMA_VERSION}`
-      );
-      continue;
-    }
-
-    const meta = stored ?? metaFromDirectory(entry, stat.mtimeMs);
-
-    const eventLog = scanEventsJsonl(join(sessionDir, "events.jsonl"));
-    if (eventLog.corruptLines > 0) {
-      console.error(
-        `[recovery] Session ${meta.sessionId}: skipped ${eventLog.corruptLines} corrupt line(s) in events.jsonl`
-      );
-    }
-
-    const result = readJsonSafe<unknown>(join(sessionDir, "result.json"));
-    const pidInfo = readJsonSafe<RecoveredPidInfo>(join(sessionDir, "pid.json"));
-
-    results.push({
-      sessionId: meta.sessionId,
-      meta,
-      corruptEventLines: eventLog.corruptLines,
-      ...(stored ? {} : { metaDamaged: true as const }),
-      lastSeq: eventLog.lastSeq,
-      result,
-      pidInfo,
-      owner: ownerState(readOwner(sessionDir)),
-      ...(eventLog.lastActivity ? { lastActivity: eventLog.lastActivity } : {}),
-      sessionDir,
-    });
+    const recovered = recoverSessionDir(entry, sessionDir, stat.mtimeMs);
+    if (recovered) results.push(recovered);
   }
 
   return results;
