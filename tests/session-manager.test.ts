@@ -78,6 +78,7 @@ function threadAnswer(overrides: Record<string, unknown> = {}): Record<string, u
     approvalPolicy: "on-request",
     sandbox: { type: "workspaceWrite", networkAccess: false },
     reasoningEffort: "medium",
+    approvalsReviewer: "user",
     ...overrides,
   };
 }
@@ -117,6 +118,7 @@ describe("the settings a session runs with", () => {
       approvalPolicy: "on-request",
       sandbox: { type: "workspaceWrite", networkAccess: false },
       cwd: "/srv/work",
+      approvalsReviewer: "user",
     });
     // What the call asked for is still there, under the session's own fields.
     expect(session.model).toBe("o4-mini");
@@ -147,6 +149,65 @@ describe("the settings a session runs with", () => {
     const session = manager.getSession(sessionId, true);
     expect(session.effective?.reasoningEffort).toBeUndefined();
     expect(session.effective?.model).toBe("gpt-5.6-luna");
+  });
+
+  it("reports the reviewer Codex settled on for a call that named none", async () => {
+    // `approvalsReviewer` is thread state Codex settles, so a call naming none
+    // still runs under one and reads it here.
+    client.threadStartResult = threadAnswer({ approvalsReviewer: "auto_review" });
+
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    expect(manager.getSession(sessionId, true).effective?.approvalsReviewer).toBe("auto_review");
+    // The call asked for no reviewer, and nothing is copied over from the answer.
+    expect(manager.getSession(sessionId, true).approvalsReviewer).toBeUndefined();
+  });
+
+  it("carries the legacy reviewer spelling through as the backend answered it", async () => {
+    client.threadStartResult = threadAnswer({ approvalsReviewer: "guardian_subagent" });
+
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    expect(manager.getSession(sessionId, true).effective?.approvalsReviewer).toBe(
+      "guardian_subagent"
+    );
+  });
+
+  it("reports the reviewer and the profile as unknown when the answer carries neither", async () => {
+    // The schema requires `approvalsReviewer` of the response and a session
+    // runs without knowing its reviewer, so an answer missing it degrades.
+    client.threadStartResult = threadAnswer({
+      approvalsReviewer: undefined,
+      activePermissionProfile: null,
+    });
+
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    const effective = manager.getSession(sessionId, true).effective;
+    expect(effective?.approvalsReviewer).toBeUndefined();
+    expect(effective?.activePermissionProfile).toBeUndefined();
+    expect(effective?.model).toBe("gpt-5.6-luna");
+  });
+
+  it("drops a reviewer the schema's enum does not name", async () => {
+    client.threadStartResult = threadAnswer({ approvalsReviewer: "the-night-watch" });
+
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    expect(manager.getSession(sessionId, true).effective?.approvalsReviewer).toBeUndefined();
+  });
+
+  it("reads the parent of a profile that extends another", async () => {
+    client.threadStartResult = threadAnswer({
+      activePermissionProfile: { id: "tight", extends: ":read-only" },
+    });
+
+    const { sessionId } = await manager.createSession("hi", workspace, {}, "medium");
+
+    expect(manager.getSession(sessionId, true).effective?.activePermissionProfile).toEqual({
+      id: "tight",
+      extends: ":read-only",
+    });
   });
 
   it("carries on with the settings unknown when the answer carries none of them", async () => {

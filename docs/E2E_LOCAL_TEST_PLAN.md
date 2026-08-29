@@ -453,9 +453,11 @@ Validate:
 
 1. `action="list"` returns every session of the state directory, each with its `activity` and its `owner` when a running server holds it.
 2. `action="get"` returns details, `effective` among them: the model, provider,
-   reasoning effort, approval policy and sandbox Codex answered the thread call
-   with. Start a session naming no `model` and confirm `effective.model` names
-   the model `config.toml` picked, while `model` stays absent.
+   reasoning effort, approval policy, sandbox, approvals reviewer and active
+   permission profile Codex answered the thread call with. Start a session
+   naming no `model` and confirm `effective.model` names the model `config.toml`
+   picked, while `model` stays absent, and that `effective.approvalsReviewer`
+   names a reviewer the call never asked for.
 3. `action="cancel"` moves to `cancelled`.
 4. `action="interrupt"` works only while active turn is running.
 5. `action="fork"` creates a new session/thread branch.
@@ -642,9 +644,10 @@ Checks:
 
 1. Call `codex_setup`. Expect `permissionProfiles.profiles` to carry the ids of this machine — `:read-only`, `:workspace` and `:danger-full-access` are the built-ins — each with an `allowed` flag.
 2. Start a session with `permissions: ":read-only"` and no `sandbox`. Expect it to start, and a prompt that writes a file to be refused by the profile.
-3. Send `sandbox` and `permissions` together. Expect `INVALID_ARGUMENT` from the tool schema naming both, with no codex process spawned.
-4. Send `permissions: "no-such-profile"`. Expect `INVALID_ARGUMENT` listing the ids this machine offers, and not the Codex message about a `[permissions]` table.
-5. Send a `codex` call naming neither `sandbox` nor `permissions`, with `CODEX_MCP_DEFAULT_SANDBOX` unset. Expect it refused, naming both ways out.
+3. `codex_session(action="get")` on that session. Expect `permissions: ":read-only"` for what the call asked for, `sandbox` absent beside it, and `effective.activePermissionProfile.id` naming the profile the active permissions came from.
+4. Send `sandbox` and `permissions` together. Expect `INVALID_ARGUMENT` from the tool schema naming both, with no codex process spawned.
+5. Send `permissions: "no-such-profile"`. Expect `INVALID_ARGUMENT` listing the ids this machine offers, and not the Codex message about a `[permissions]` table.
+6. Send a `codex` call naming neither `sandbox` nor `permissions`, with `CODEX_MCP_DEFAULT_SANDBOX` unset. Expect it refused, naming both ways out.
 
 ## 7.5 Long Polling (`waitMs`)
 

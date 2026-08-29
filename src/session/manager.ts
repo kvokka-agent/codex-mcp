@@ -7,6 +7,8 @@ import { AppServerClient } from "../app-server/client.js";
 import type { ICodexClient } from "../app-server/client-interface.js";
 import type { AppServerSpawnOptions } from "../app-server/lifecycle.js";
 import {
+  ANSWERED_APPROVALS_REVIEWERS,
+  type ApprovalsReviewer as AnsweredApprovalsReviewer,
   APPROVAL_POLICY_PRESETS,
   type AskForApproval,
   type AskForApprovalGranular,
@@ -47,6 +49,7 @@ import {
   DEFAULT_POLL_INTERVAL,
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
+  type EffectivePermissionProfile,
   type EffectiveSettings,
   type EffortLevel,
   ErrorCode,
@@ -2785,6 +2788,8 @@ function publicInfoOfRecovered(rec: RecoveredSession): PublicSessionInfo {
     model: normalizeOptionalString(rec.meta.model),
     approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
     sandbox: rec.meta.sandbox as SandboxMode | undefined,
+    permissions: normalizeOptionalString(rec.meta.permissions),
+    approvalsReviewer: rec.meta.approvalsReviewer as ApprovalsReviewer | undefined,
     pendingRequestCount: 0,
     activity: rec.lastActivity,
     owner: ownershipOf(rec.owner),
@@ -3697,6 +3702,8 @@ function toPublicInfo(session: SessionInfo, owner?: SessionOwnership): PublicSes
     model: session.model,
     approvalPolicy: session.approvalPolicy,
     sandbox: session.sandbox,
+    permissions: session.permissions,
+    approvalsReviewer: session.approvalsReviewer,
     pendingRequestCount: Array.from(session.pendingRequests.values()).filter((r) => !r.resolved)
       .length,
     activity: session.progressState?.activity,
@@ -3958,6 +3965,10 @@ function readEffectiveSettings(source: unknown): EffectiveSettings | undefined {
     approvalPolicy: readAskForApproval(source.approvalPolicy),
     sandbox: readSandboxPolicy(source.sandbox),
     cwd: readNonEmptyString(source.cwd),
+    // Required by the schema, and a session that does not know its reviewer
+    // still runs, so an answer without one reports it unknown like the rest.
+    approvalsReviewer: readApprovalsReviewer(source.approvalsReviewer),
+    activePermissionProfile: readActivePermissionProfile(source.activePermissionProfile),
   };
   return Object.values(settings).some((value) => value !== undefined) ? settings : undefined;
 }
@@ -3977,6 +3988,26 @@ function readAskForApproval(value: unknown): AskForApproval | undefined {
   return value as unknown as AskForApprovalGranular;
 }
 
+/** One of the reviewers the schema's `ApprovalsReviewer` enum names. */
+function readApprovalsReviewer(value: unknown): AnsweredApprovalsReviewer | undefined {
+  return typeof value === "string" &&
+    ANSWERED_APPROVALS_REVIEWERS.includes(value as AnsweredApprovalsReviewer)
+    ? (value as AnsweredApprovalsReviewer)
+    : undefined;
+}
+
+/**
+ * The profile of the active permissions, which the answer identifies by `id`.
+ * `extends` is null for a profile naming no parent, and absent then here too.
+ */
+function readActivePermissionProfile(value: unknown): EffectivePermissionProfile | undefined {
+  if (!isRecord(value)) return undefined;
+  const id = readNonEmptyString(value.id);
+  if (id === undefined) return undefined;
+  const parent = readNonEmptyString(value.extends);
+  return parent === undefined ? { id } : { id, extends: parent };
+}
+
 /** One of the four policy objects the schema's `SandboxPolicy` union carries. */
 function readSandboxPolicy(value: unknown): SandboxPolicy | undefined {
   if (!isRecord(value) || typeof value.type !== "string") return undefined;
@@ -3990,8 +4021,7 @@ function publicEffectiveSettings(
   effective: EffectiveSettings | undefined
 ): PublicEffectiveSettings | undefined {
   if (!effective) return undefined;
-  const { model, modelProvider, reasoningEffort, approvalPolicy, sandbox } = effective;
-  const redacted = { model, modelProvider, reasoningEffort, approvalPolicy, sandbox };
+  const { cwd: _cwd, ...redacted } = effective;
   return Object.values(redacted).some((value) => value !== undefined) ? redacted : undefined;
 }
 

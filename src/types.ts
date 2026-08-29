@@ -5,7 +5,11 @@
  * TypeScript types can derive from the same source of truth.
  */
 
-import type { AskForApproval, SandboxPolicy } from "./app-server/protocol.js";
+import type {
+  ApprovalsReviewer as AnsweredApprovalsReviewer,
+  AskForApproval,
+  SandboxPolicy,
+} from "./app-server/protocol.js";
 
 // ── Constants ──────────────────────────────────────────────────────
 
@@ -110,6 +114,27 @@ export interface EffectiveSettings {
   /** The sandbox policy object the thread runs under, as Codex answered it. */
   sandbox?: SandboxPolicy;
   cwd?: string;
+  /**
+   * Who Codex routes this thread's approval requests to. The legacy spelling
+   * `guardian_subagent` is carried through as answered.
+   */
+  approvalsReviewer?: AnsweredApprovalsReviewer;
+  /**
+   * The profile that produced the active permissions, which is what says where
+   * `sandbox` came from. Absent where the answer named none.
+   */
+  activePermissionProfile?: EffectivePermissionProfile;
+}
+
+/**
+ * The permission profile a session reports, read off the answer's
+ * `activePermissionProfile`.
+ */
+export interface EffectivePermissionProfile {
+  /** A built-in such as `:workspace`, or a `[permissions.<id>]` profile of the user's config. */
+  id: string;
+  /** The parent this profile extends. The answer's null names none, and is reported as absent. */
+  extends?: string;
 }
 
 /** The effective settings a redacted view carries: `cwd` is a path and stays out. */
@@ -341,6 +366,13 @@ export interface PublicSessionInfo {
   model?: string;
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
+  /**
+   * The permission profile id the call named in place of a sandbox. It names a
+   * permission level the same way `sandbox` does, so it is reported beside it.
+   */
+  permissions?: string;
+  /** Who the call asked to review its approval requests. */
+  approvalsReviewer?: ApprovalsReviewer;
   pendingRequestCount: number;
   /**
    * The last line the session said it was doing. On an abandoned session it is
@@ -359,7 +391,8 @@ export interface PublicSessionInfo {
   owner?: SessionOwnership;
   /**
    * The settings Codex answered with, which are what the session runs with.
-   * `model`, `approvalPolicy` and `sandbox` above are what the call asked for.
+   * `model`, `approvalPolicy`, `sandbox`, `permissions` and `approvalsReviewer`
+   * above are what the call asked for.
    */
   effective?: PublicEffectiveSettings;
 }

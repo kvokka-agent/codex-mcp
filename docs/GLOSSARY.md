@@ -54,9 +54,10 @@ lost it reads it back.
 
 **effective settings** — what Codex answered the session's thread call with:
 the model, the model provider, the reasoning effort, the approval policy, the
-sandbox policy and the cwd the thread actually runs with. `codex_session`
-reports them as `effective`, beside the values the call asked for. A setting
-absent from the block is one the answer did not carry, which means unknown.
+sandbox policy, the approvals reviewer, the permission profile the sandbox came
+from and the cwd the thread actually runs with. `codex_session` reports them as
+`effective`, beside the values the call asked for. A setting absent from the
+block is one the answer did not carry, which means unknown.
 
 **rollout log** — Codex's own transcript of a thread, written by the Codex CLI
 under `~/.codex/sessions/`. Every reasoning step, command and message of a turn

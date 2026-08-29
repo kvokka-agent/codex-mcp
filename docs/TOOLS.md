@@ -239,20 +239,23 @@ only when asked for), `olderThanMs`, `dryRun`, and `includeDisk` (default
 `true`).
 
 Each listed session carries `status`, `createdAt`, `lastActiveAt`,
-`pendingRequestCount`, the `model`, `approvalPolicy` and `sandbox` it was asked
-to run with, `effective`, `activity`, `lastTurn`, and `owner` —
-`{ pid, state: "self" | "other" }` for a session a running server holds, and
-nothing at all for a free one.
+`pendingRequestCount`, the `model`, `approvalPolicy`, `sandbox`, `permissions`
+and `approvalsReviewer` it was asked to run with, `effective`, `activity`,
+`lastTurn`, and `owner` — `{ pid, state: "self" | "other" }` for a session a
+running server holds, and nothing at all for a free one.
 
 `effective` is what Codex answered the thread call with: `model`,
 `modelProvider`, `reasoningEffort`, `approvalPolicy` and `sandbox` — the policy
-object, not the mode string the call takes — plus `cwd` with
+object, not the mode string the call takes — `approvalsReviewer`,
+`activePermissionProfile` as `{ id, extends }`, plus `cwd` with
 `includeSensitive: true`. Those are the settings the session runs with, so a
-`codex` call naming no model reads its model there and nowhere else. A field the
-answer did not carry is absent, which says unknown; the whole block is absent
-when the answer carried none of them. `model`, `approvalPolicy` and `sandbox`
-beside it stay what the call asked for, so the two together say what was asked
-and what is.
+`codex` call naming no model reads its model there and nowhere else, and one
+started on `permissions` reads its permission level in
+`effective.activePermissionProfile`. A field the answer did not carry is absent,
+which says unknown; the whole block is absent when the answer carried none of
+them. `model`, `approvalPolicy`, `sandbox`, `permissions` and
+`approvalsReviewer` beside it stay what the call asked for, so the two together
+say what was asked and what is.
 
 `lastTurn` is `{ turnId, outcome, status, completedAt, error }` for the last turn
 that ended, absent until one does. `status` says what the session is now and

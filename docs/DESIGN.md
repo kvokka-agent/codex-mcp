@@ -691,14 +691,22 @@ id there is only a seed — the `turn/started` notification settles `activeTurnI
 ### Reading the settings out of the same responses
 
 The three thread responses carry one more block: `model`, `modelProvider`,
-`cwd`, `approvalPolicy` and `sandbox`, required on each of them, plus an
-optional `reasoningEffort`. It says what the thread runs with, which is not what
-the call asked for — a `thread/start` naming neither model nor provider on
-`codex-cli 0.150.1` answered `"model":"gpt-5.6-luna","modelProvider":"myproxy"`.
-The server writes that block onto the session as its effective settings and
-`codex_session` reports it. Where the two differ Codex's answer is what the
-session runs on, so the request's own values stay under the session's `model`,
-`approvalPolicy` and `sandbox` and never overwrite the answer.
+`cwd`, `approvalPolicy`, `sandbox` and `approvalsReviewer`, required on each of
+them, plus an optional `reasoningEffort` and `activePermissionProfile`. It says
+what the thread runs with, which is not what the call asked for — a
+`thread/start` naming neither model nor provider on `codex-cli 0.150.1` answered
+`"model":"gpt-5.6-luna","modelProvider":"myproxy"`. The server writes that block
+onto the session as its effective settings and `codex_session` reports it. Where
+the two differ Codex's answer is what the session runs on, so the request's own
+values stay under the session's `model`, `approvalPolicy`, `sandbox`,
+`permissions` and `approvalsReviewer` and never overwrite the answer.
+
+`activePermissionProfile` is what the `sandbox` object alone cannot say: which
+profile derived it. A session started on `permissions` sets no sandbox of its
+own, so the profile id — `{"id":":read-only","extends":null}` for a
+`thread/start` naming `permissions: ":read-only"` — is the only place its
+permission level is readable. `extends` is reported only where the profile names
+a parent.
 
 `thread/resume` is where it decides most: it restores the thread from Codex's
 rollout log, so the thread's own persisted metadata says what it runs with and
