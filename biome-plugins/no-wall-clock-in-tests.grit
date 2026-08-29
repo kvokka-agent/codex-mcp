@@ -1,0 +1,31 @@
+// A test that reads the wall clock asserts on the runner's luck: a real
+// setTimeout(f, 40) runs on libuv's millisecond loop clock and fires with a
+// Date.now() delta of 39 about once in two thousand waits, which is how a green
+// pull request turned into a red master. tests/helpers/clock.ts holds the fake
+// clock the waits are measured on, and the readings of the real one a fixture
+// legitimately needs.
+language js
+
+or {
+    `Date.now` as $reading where {
+        register_diagnostic(
+            span = $reading,
+            message = "A test measures on the fake clock. Drive it with useFakeClock() from tests/helpers/clock.js, or date a fixture with isoMsAgo/msAgo/msSince from there.",
+            severity = "error"
+        )
+    },
+    `performance.now` as $reading where {
+        register_diagnostic(
+            span = $reading,
+            message = "A test measures on the fake clock. Drive it with useFakeClock() from tests/helpers/clock.js.",
+            severity = "error"
+        )
+    },
+    `process.hrtime` as $reading where {
+        register_diagnostic(
+            span = $reading,
+            message = "A test measures on the fake clock. Drive it with useFakeClock() from tests/helpers/clock.js.",
+            severity = "error"
+        )
+    }
+}

@@ -14,7 +14,6 @@ import {
 } from "./lib/stdio-check.mjs";
 
 function usage(exitCode = 0) {
-  // eslint-disable-next-line no-console
   console.error(
     [
       "Usage:",
@@ -74,7 +73,6 @@ async function main() {
   }
 
   for (const line of describeStdioReport(report, run)) {
-    // eslint-disable-next-line no-console
     console.error(line);
   }
 
@@ -82,7 +80,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  // eslint-disable-next-line no-console
   console.error("FAILED:", err?.stack || String(err));
   process.exitCode = 1;
 });

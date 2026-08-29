@@ -109,12 +109,13 @@ processes the old one left behind.
 bun run check
 ```
 
-That is the CI gate in one command: `lint`, `format:check`, `typecheck`,
-`build`, `lint:fallow`, then `check:stdio`, `smoke:mcp` and `lint:md`. `check:stdio` proves
-stdout carries nothing but JSON-RPC before the handshake, and `smoke:mcp` drives
-a real MCP client against the built server and asserts the five tools and the
-resources are there. Both accept `--bunx` to run the published package instead of
-`dist/`, and take a command after `--`.
+That is the CI gate in one command: `lint`, `typecheck`, `build`, `lint:fallow`,
+then `check:stdio`, `smoke:mcp` and `lint:md`. `lint` runs biome over the lint
+rules and the formatting in one pass, and `bun run format` writes the formatting
+back. `check:stdio` proves stdout carries nothing but JSON-RPC before the
+handshake, and `smoke:mcp` drives a real MCP client against the built server and
+asserts the five tools and the resources are there. Both accept `--bunx` to run
+the published package instead of `dist/`, and take a command after `--`.
 
 Both start a real server, and both put its state directory in a fresh temporary
 one unless `CODEX_MCP_STATE_DIR` says otherwise, so a check run never disturbs

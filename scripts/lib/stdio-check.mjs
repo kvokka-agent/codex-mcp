@@ -187,6 +187,7 @@ export function describeStdioReport(report, output) {
     ];
   }
 
-  const note = output.stderr.trim().length > 0 ? ["(Note) server wrote to stderr (this is fine)."] : [];
+  const note =
+    output.stderr.trim().length > 0 ? ["(Note) server wrote to stderr (this is fine)."] : [];
   return [...head, "OK: stdout is clean.", ...note, captured];
 }
