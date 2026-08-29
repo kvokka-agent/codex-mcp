@@ -310,28 +310,44 @@ the CLI answered.
 ## `codex_setup` — is this machine ready
 
 Takes an optional `cwd` and answers `ready`, the resolved `executable`, the
-`auth` state (`authenticated`, `unauthenticated` or `unknown`, from
-`codex login status`), the `backend` (the Codex CLI version `codex --version`
-printed, the minimum this server drives, and whether the one found clears it),
-the `runtime` (state directory), `projectContext` (whether a user and a project
-`config.toml` exist), `permissionProfiles`, and `warnings` with `nextSteps`.
+`auth` state (`authenticated`, `unauthenticated`, `not_required` or `unknown`,
+from what `account/read` answered), the `backend` (the Codex CLI version
+`codex --version` printed, the minimum this server drives, and whether the one
+found clears it), the `runtime` (state directory), `projectContext` (whether a
+user and a project `config.toml` exist), `permissionProfiles`, and `warnings`
+with `nextSteps`. On Windows it also answers `windowsSandbox`.
 
 `permissionProfiles` is `{ ok, profiles?, detail }` — the ids a `codex` call may
 pass as `permissions`, each with its `allowed` flag and its description. This is
 where they live because they are read out of the user's `config.toml` and the
 project layers under `cwd`: only a call to the local Codex can name them, and
 `codex-mcp:///config` and `codex-mcp:///delegation-guide` are static text built
-from the server's own defaults. Reading them stands up one `codex app-server`,
-which is what makes this tool the slowest of the five. `profiles` is absent
-where the listing failed or was never run, which is not a machine that offers
-none; `detail` says which of the two it was, and a failure also reaches
-`warnings` and `nextSteps`.
+from the server's own defaults. Reading them rides the `codex app-server` this
+tool stands up for `account/read`, which is what makes it the slowest of the
+five. `profiles` is absent where the listing failed or was never run, which is
+not a machine that offers none; `detail` says which of the two it was, and a
+failure also reaches `warnings` and `nextSteps`.
 
-`ready` is true only when all three clear: the executable resolves, the login
-probe answered `authenticated`, and the CLI is at or above `minimumCliVersion`.
+`auth` is what `account/read` answered. The tool starts an app server of its
+own for it, asks right after `initialize` — the call needs no thread and no
+login — and shuts it down again.
 
-A binary named `codex-internal` skips the login probe and reports
-`auth.state: "unknown"`.
+| `auth.state` | What the app server answered |
+| --- | --- |
+| `not_required` | `requiresOpenaiAuth: false`: the configured model provider carries its own credentials, so no Codex login is needed |
+| `authenticated` | an account, named by `auth.accountType` — `apiKey`, `chatgpt` or `amazonBedrock` |
+| `unauthenticated` | `requiresOpenaiAuth: true` with no account |
+| `unknown` | nothing answered: the app server did not start, or `account/read` failed. `auth.detail` carries the failure |
+
+`windowsSandbox: { status }` is what `windowsSandbox/readiness` answered:
+`ready`, `notConfigured` or `updateRequired`. It is asked for on Windows only —
+the backend gates the method on no platform and a Linux or macOS app server
+answers `notConfigured`, which is what a Windows machine with no sandbox
+answers too.
+
+`ready` is true when the executable resolves, `auth.state` is `authenticated`
+or `not_required`, the CLI is at or above `minimumCliVersion`, and — on Windows
+— `windowsSandbox.status` is not `notConfigured` or `updateRequired`.
 
 ## Errors
 

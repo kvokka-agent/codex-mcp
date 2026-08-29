@@ -641,6 +641,23 @@ runs and the answer carries `cleanCalled: true` with the listing's error, so the
 caller is told the state is unknown rather than that the thread is clear. A CLI
 below 0.150.1, which serves neither `list` nor `terminate`, takes that path.
 
+### The setup probe
+
+`codex_setup` starts an app server of its own, asks it `account/read`, and shuts
+it down: what account this install signs with, and whether it needs an OpenAI
+login at all, is data the backend answers right after `initialize`, with no
+thread and no auth. `requiresOpenaiAuth: false` is an install whose configured
+model provider carries its own credentials, and the null account beside it is
+not a missing login. A connection that fails, or an `account/read` that does,
+leaves `auth.state: "unknown"` carrying the failure.
+
+On Windows the same connection also asks `windowsSandbox/readiness`. The backend
+gates that method on no platform — a Linux 0.150.1 answers
+`{"status":"notConfigured"}`, which is what a Windows machine with no sandbox
+answers — so `process.platform === "win32"` decides whether it is asked at all.
+The MCP server and the app server run on the same machine, so that value is the
+one that counts.
+
 ### Checking a permissions profile before the thread starts
 
 `thread/start` answers an id Codex does not know with

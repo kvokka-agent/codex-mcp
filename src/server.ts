@@ -221,7 +221,8 @@ const setupResultShape = {
   }),
   auth: z.object({
     ok: z.boolean(),
-    state: z.enum(["authenticated", "unauthenticated", "unknown"]),
+    state: z.enum(["authenticated", "unauthenticated", "not_required", "unknown"]),
+    accountType: z.enum(["apiKey", "chatgpt", "amazonBedrock"]).optional(),
     detail: z.string(),
   }),
   backend: z.object({
@@ -230,6 +231,10 @@ const setupResultShape = {
     minimumCliVersion: z.string(),
     detail: z.string(),
   }),
+  windowsSandbox: z
+    .object({ status: z.enum(["ready", "notConfigured", "updateRequired"]) })
+    .optional()
+    .describe("Windows only: what `windowsSandbox/readiness` answered."),
   runtime: z.object({
     sameMachineRequired: z.boolean(),
     stateDir: z.string(),
@@ -894,7 +899,7 @@ function registerCodexSetupTool(ctx: ToolContext): void {
     {
       title: "Codex Setup",
       description:
-        "Run local readiness checks for codex-mcp: executable resolution, login status, Codex CLI version against the minimum this server drives, project config, and the permission profile ids this machine offers as `permissions`. Use this before starting a session when setup is uncertain, or to learn which profile ids exist here.",
+        "Run local readiness checks for codex-mcp: executable resolution, the account the app server answers with, Codex CLI version against the minimum this server drives, the Windows sandbox on Windows, project config, and the permission profile ids this machine offers as `permissions`. Use this before starting a session when setup is uncertain, or to learn which profile ids exist here.",
       inputSchema: {
         cwd: z
           .string()
