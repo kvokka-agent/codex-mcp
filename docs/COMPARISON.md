@@ -1,208 +1,594 @@
 # codex-mcp against the alternatives
 
-Every way of driving Codex from a coding agent, what it reaches, and where it
-stops. Terms are defined in [GLOSSARY.md](GLOSSARY.md).
+The work this project exists for: an agent inside Claude Code hands a QA run, a
+code review or a heavy refactor to Codex, gets the answer back in its own
+context, and the person is not in the loop. Terms are defined in
+[GLOSSARY.md](GLOSSARY.md).
 
-Two kinds of statement appear below and are marked apart. A **property** is
-readable in the source named beside it. A **measurement** is a number from a run
-on one machine, and carries the conditions it was taken under.
+Everything below was read from source at the SHA named beside it, on
+2026-08-28, and every behavioural claim about the Codex CLI was run against
+`codex-cli 0.150.1`. A **property** is readable at the file and line given. A
+**measurement** carries the binary and the conditions it was taken under.
+
+## What the work needs
+
+1. **The turn outlives the caller's call.** Claude Code caps one Bash call at
+   600,000 ms and cannot be told otherwise; an MCP tool call is capped by the
+   client's own ceiling, 60,000 ms by default in the MCP SDK. A twenty-minute
+   review must depend on neither, and must not be kept alive by a subagent
+   sending heartbeats.
+2. **No subagent inside a subagent.** A design that needs one agent to spawn
+   another to reach Codex adds a failure surface and a second timeout to
+   disarm.
+3. **Model, reasoning effort, sandbox, approval policy and cwd per
+   delegation** — chosen by the caller for this delegation, in this repository,
+   and still in force on the second turn.
+4. **A status the caller can poll without paying for the transcript.** Codex's
+   deltas, reasoning and command output must stay out of the caller's context.
+5. **Ten delegations at once**, each with its own Codex process.
+6. **The work survives the process that started it.** A client restart, a
+   compaction or a crash must not lose a running turn.
+7. **A failed Codex run reaches the caller as a failure**, distinguishable from
+   an answer.
+8. **Somebody maintains it.**
+
+## What the Codex CLI settles
+
+These decide which wrapper designs are possible at all. Read at
+`openai/codex@868c9edb`, confirmed against the installed `codex-cli 0.150.1`.
+
+- **`codex mcp-server` is deprecated in its own source** and prints so at every
+  start (`codex-rs/cli/src/main.rs:1181-1184`). It exposes two tools, `codex`
+  and `codex-reply` (`mcp-server/src/message_processor.rs:342-345`), streams
+  through a proprietary `codex/event` notification rather than MCP progress
+  (`mcp-server/src/outgoing_message.rs:111-133`), drops model-driven
+  elicitation on the floor (`codex_tool_runner.rs:260-264`), and continues a
+  thread by an in-memory map lookup with no `ThreadResume` call anywhere in the
+  crate (`message_processor.rs:476`) — so a thread cannot be picked up after
+  the process exits. MCP is how tools reach *into* Codex; the app server is how
+  a client drives it.
+- **The app server carries what a delegation needs.** 157 client request
+  methods, 9 server-initiated requests and 83 notifications
+  (`app-server-protocol/src/protocol/common.rs:496-1958`). `turn/start` takes
+  `model`, `effort`, `summary`, `personality`, `cwd`, `approvalPolicy`,
+  `sandboxPolicy`, `permissions`, `outputSchema`
+  (`protocol/v2/turn.rs:152-259`); approvals and user input arrive as
+  server-initiated requests (`common.rs:1685-1710`).
+- **`[profiles.*]` in `config.toml` is dead.** Selecting one is a hard load
+  error — "legacy `profile = \"X\"` config is no longer supported"
+  (`core/src/config/mod.rs:3271-3277`). A profile is now a whole file,
+  `$CODEX_HOME/<name>.config.toml`, layered by `--profile`
+  (`utils/cli/src/shared_options.rs:34-36`), at precedence 21, above
+  `config.toml` at 20 and below `-c` at 30 (`config/src/config_layer_source.rs:33-51`).
+- **The app server cannot select a config profile at all** — not at startup,
+  not per thread, not per turn. `--profile` is not among its flags
+  (`cli/src/main.rs:546-596`), and `user_config_profile` is set only by the
+  TUI, `cli` and `exec`. *Measurement: `codex app-server -p X` answers `error:
+  unexpected argument '-p' found`; `codex -p X app-server` answers `--profile
+  only applies to runtime commands`.* A wrapper that advertises profiles on the
+  app-server route is describing a protocol that no longer exists — including
+  this one, see the limits below.
+- **`codex exec resume` accepts only clap-global flags after the word
+  `resume`**: `model`, `--yolo` and `--dangerously-bypass-hook-trust` are
+  promoted (`exec/src/cli.rs:140-146`); `--profile`, `--sandbox`, `--cd` and
+  `--add-dir` must precede it. Worse, exec always sends `model_provider`, and
+  that alone suppresses the merge of persisted thread metadata
+  (`exec/src/lib.rs:1219`, `app-server/src/request_processors/thread_processor.rs:259-268`),
+  so a resumed exec thread silently loses its recorded model and reasoning
+  effort. When a session id does not resolve, exec starts a brand-new thread
+  instead of failing (`exec/src/lib.rs:842-850`).
+- **`--full-auto` does not exist** anywhere in the tree; `--approve-for-me`
+  replaced it (`utils/cli/src/shared_options.rs:44-50`). Any wrapper still
+  emitting it is broken on a current Codex.
+- **`approval_policy = "never"` is not auto-approval.** A command needing
+  approval is refused with "approval required by policy, but AskForApproval is
+  set to Never" (`core/src/exec_policy.rs:216-224`).
+- **The rollout log is the durable copy.**
+  `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl`
+  (`rollout/src/recorder.rs:1624-1646`), one `TurnContext` per turn carrying
+  cwd, approval policy, sandbox, model, effort and personality
+  (`protocol/src/protocol.rs:3151-3200`). A server that keeps its own
+  transcript is duplicating this.
+
+## The verdict
+
+Requirement numbers are those above. `~` is partial; the paragraph for each
+project says which half.
+
+| Project | SHA / version | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|---|
+| `openai/codex-plugin-cc` | `db52e28` | ✗ | ✗ | ✗ | ~ | ✗ | ✗ | ✗ | ✗ |
+| `xihuai18/codex-mcp` (upstream) | `8bc082b` | ✓ | ✓ | ~ | ✗ | ✓ | ✗ | ✓ | ✗ |
+| `FYZAFH/mcp-codex-dev` | `d1dc724` | ✗ | ✓ | ✗ | ✓ | ~ | ✗ | ~ | ✗ |
+| `andreahaku/codex_mcp` | `1ff521c` | ✗ | ✓ | ✗ | ✗ | ~ | ✗ | ✗ | ✗ |
+| `cexll/codex-mcp-server` | `19fbc1b` | ~ | ✓ | ~ | ✗ | ✓ | ✗ | ✗ | ✗ |
+| `kky42/codex-as-mcp` | `4642dff` | ✗ | ✓ | ✗ | ✓ | ~ | ✗ | ✓ | ✓ |
+| `tuannvm/codex-mcp-server` | `a57acb6` | ✗ | ✓ | ~ | ✗ | ~ | ✗ | ✗ | ✗ |
+| `raysonmeng/agent-bridge` | `a3e927f` | ✓ | ✓ | ✗ | ✗ | ✗ | ~ | ~ | ~ |
+| `EthanSK/agent-bridge` | `ea257e5` | ~ | ~ | ~ | ✗ | ~ | ✓ | ✓ | ~ |
+| orchestrators | see below | ✓ | ✓ | ~ | ✗ | ✓ | ✓ | ✓ | ~ |
+| `codex-mcp` | 2.6.1 | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ | — |
 
 ## `openai/codex-plugin-cc`
 
-OpenAI's own Claude Code plugin, version 1.0.6. Not an MCP server: seven slash
-commands, a subagent, three skills, three hooks and a Node.js script that speaks
-JSON-RPC to `codex app-server`, optionally through a per-workspace broker.
+OpenAI's own Claude Code plugin: seven slash commands, a subagent, three
+skills, three hooks and a Node script speaking JSON-RPC to `codex app-server`,
+optionally through a per-workspace broker. Read at `db52e28`.
 
-### Where codex-mcp reaches further
+- **Nesting is load-bearing, and documented as such.** `commands/rescue.md:7-8`
+  instructs Claude to invoke the `codex-rescue` subagent and explains why it
+  cannot be removed: "The command runs inline so the `Agent` tool stays in
+  scope; forked general-purpose subagents do not expose it." That subagent's
+  whole job is to forward stdout — "Return the stdout of the `codex-companion`
+  command exactly as-is" (`agents/codex-rescue.md:41`).
+- **The only detached path is forbidden to the shipped agent.**
+  `spawnDetachedTaskWorker` exists (`codex-companion.mjs:671-682`), and
+  `skills/codex-cli-runtime/SKILL.md:28` orders the subagent to strip
+  `--background` before calling `task`. `--background` is declared for `review`
+  and never read — `handleReviewCommand` calls `runForegroundCommand`
+  unconditionally (`codex-companion.mjs:715`, `:739`), which `commands/review.md:38`
+  admits. What is left is Claude Code's own background Bash, under the 600,000 ms
+  ceiling.
+- **Profiles are absent.** `profile` does not occur anywhere under
+  `plugins/codex/scripts/`; `[profiles.*]` is never read. `approvalPolicy` is
+  hardcoded `"never"` and no caller passes anything else
+  (`lib/codex.mjs:67`, `:80`). The sandbox is one boolean —
+  `sandbox: request.write ? "workspace-write" : "read-only"`
+  (`codex-companion.mjs:491`). Both keys ride every `thread/start` and
+  `thread/resume`, so they override the user's `config.toml`, contrary to the
+  README. cwd is discarded: the git root is resolved and passed instead
+  (`codex-companion.mjs:462`, `:485`), so a monorepo subdirectory cannot be the
+  Codex cwd.
+- **One turn at a time per repository.** The broker answers a second caller
+  `-32001 "Shared Codex broker is busy."` (`app-server-broker.mjs:179`), and
+  the client's recovery is to spawn a private app server and re-run the whole
+  closure from the top (`lib/codex.mjs:635-637`) — a second process, and a
+  second thread if the busy error arrived after `thread/start` had succeeded.
+- **`SessionEnd` reaps other people's work.** The hook kills every queued or
+  running job of the ending session and `saveState` then deletes those jobs and
+  their logs (`session-lifecycle-hook.mjs:59-74`, `lib/state.mjs:105-112`); it
+  also tears down the broker, which is keyed by workspace root, not by session
+  (`session-lifecycle-hook.mjs:100-113`).
+- **Completion is inferred and reported as success.** With no `turn/completed`,
+  a 250 ms timer synthesizes `{id: "inferred-turn", status: "completed"}`
+  (`lib/codex.mjs:359-364`), and `buildResultStatus` maps that to exit 0 while
+  ignoring the stored `state.error` (`:757`, `:530`). Filed as
+  <https://github.com/openai/codex-plugin-cc/issues/696>.
+- **Failure is instructed to vanish.** "If the Bash call fails or Codex cannot
+  be invoked, return nothing" (`agents/codex-rescue.md:42`, repeated in
+  `skills/codex-result-handling/SKILL.md:18`). The caller cannot tell "Codex
+  found nothing" from "Codex never ran".
+- **The Stop gate fails closed on a broken install.** Its inner `spawnSync`
+  timeout equals the hook's own 900 s budget, so the "timed out" branch is dead
+  code, and every non-`ALLOW:` outcome — empty output, invalid JSON, non-zero
+  exit — emits `decision: "block"` (`stop-review-gate-hook.mjs:16`, `:109`,
+  `:167-172`).
+- **Maintenance.** 29 commits, last on 2026-07-07; 234 open issues and 207 open
+  PRs against 28 PRs ever merged of roughly 447 opened; 32,493 stars.
 
-**Any MCP client, not one.** `codex-mcp` is an MCP stdio server, so Claude Code,
-Claude Desktop, Cursor and anything else speaking the protocol drive it.
-`codex-plugin-cc` is a Claude Code plugin and runs nowhere else.
+Ahead of `codex-mcp`: Codex's own `review/start` with a JSON output schema and
+structured findings (`lib/codex.mjs:1026-1038`), git-aware review targeting
+with byte-capped inline diffs (`lib/git.mjs:7-9`), `externalAgentConfig/import`
+turning a live Claude transcript into a resumable Codex thread
+(`lib/codex.mjs:661-679`), and cancellation that combines `turn/interrupt` with
+a process-group kill (`codex-companion.mjs:976-986`).
 
-**Sessions run at once.** `codex-mcp` holds one child process per session
-(`src/session/manager.ts`) and no lock above them; ten sessions run ten Codex
-processes. `codex-plugin-cc`'s broker is single-flight — it holds one request
-slot and one stream slot, and a second client gets JSON-RPC error `-32001`,
-`"Shared Codex broker is busy."`
-(`plugins/codex/scripts/app-server-broker.mjs`). The broker is keyed by
-workspace, so two Claude Code windows open on one repository contend for it.
+## `xihuai18/codex-mcp` — the upstream this forked
 
-*Measurement: ten `codex` sessions started from one client against one server
-ran to their results concurrently on a live stand, one Codex process each.*
+The nearest thing to the right design, and the reason this repository is a fork
+rather than a rewrite: one MCP stdio server, one child process per session,
+non-blocking `codex`/`codex_reply` carried by `codex_check(action="poll")`, an
+app-server backend with an `exec` fallback. MIT, read at `8bc082b`.
 
-**A turn outlives any tool-call budget.** `codex` returns a `sessionId` at once
-and `codex_check(action="poll", waitMs=…)` waits for the next thing the caller
-must act on; one wait is capped at 120,000 ms
-(`MAX_LONG_POLL_WAIT_MS`, `src/types.ts`) and the caller repeats it for as long
-as the turn runs. Nothing in the path is bounded by the client's Bash tool.
-`codex-plugin-cc`'s foreground path runs Codex inside one Bash call, and Claude
-Code's Bash tool caps a call at 600,000 ms — a harness limit, not the plugin's.
-The plugin does have a real escape: `codex-companion.mjs task --background`
-spawns a detached worker process that outlives the call
-(`plugins/codex/scripts/codex-companion.mjs`). Its own `codex-rescue` subagent
-cannot use it — the `codex-cli-runtime` skill instructs the subagent to strip
-`--background` before calling `task`
-(`plugins/codex/skills/codex-cli-runtime/SKILL.md`).
+- **The published source and the published package are different servers.**
+  `package.json:3` reads 2.1.0 with no git tag and no release, while
+  `@leo000001/codex-mcp` shipped through 2.1.7 (2026-04-06). Unpacking 2.1.7
+  shows `CODEX_MCP_STATE_DIR`, `meta.json`, `events.jsonl`, long-poll `waitMs`,
+  a state-directory lockfile and an orphan reaper — **none of which occur in
+  `src/`**; its own `CHANGELOG.md` files them under `## [Unreleased]`. The
+  durability features a long delegation depends on exist only in the tarball.
+- **Poll returns the transcript.** `codex_check` answers with event records,
+  and in the default `minimal` mode those carry `delta` — the model's streamed
+  text and reasoning (`manager.ts:1139`, `:1765-1795`). Reading a turn means
+  pulling it through the caller's context one event per call
+  (`types.ts:268`). A cheap status poll is reachable via
+  `pollOptions.includeEvents:false`, and nothing in the tool descriptions points
+  a caller at it.
+- **Approvals auto-decline before a compliant caller returns.** The default
+  approval timeout is 60 s (`types.ts:280`, `manager.ts:1251-1279`) while the
+  tool description tells callers to "sleep at least 2 minutes between polls"
+  (`server.ts:522`). The turn then proceeds without the approval.
+- **Nothing survives the process.** State is two in-memory `Map`s
+  (`manager.ts:125`); the only filesystem write in `src/` is a temp output
+  schema. `threadResume` is reachable from no tool. Children are spawned
+  `detached` with no reaper, so a crash orphans every `codex app-server`.
+- **Parameters vanish silently.** exec resume drops sandbox, cwd and
+  `outputSchema` to a `console.error` line no MCP caller reads
+  (`exec-client.ts:463-478`); `effort` never reaches the exec backend at all,
+  on any turn — the word does not occur in that file. `profile` is a spawn
+  argument (`lifecycle.ts:17-19`) and is absent from `codex_reply`.
+- **A `codex_reply` deletes the previous turn's result.**
+  `clearTerminalEvents` filters every `result` and `error` event out of the
+  buffer (`manager.ts:286`, `:1552-1554`).
+- **exec mode can hang a session forever.** A terminal event is synthesized only
+  when the child exits non-zero (`exec-client.ts:283-291`); a clean exit with no
+  `turn.completed` leaves the session `running` until the 4-hour sweeper cancels
+  it (`types.ts:282`).
+- **Tests prove the mock.** 98 tests against a hand-written
+  `MockAppServerClient`; no test spawns a codex binary. *Measurement: v8
+  coverage on this SHA is 67.95% of statements, `server.ts` at 18.18%, and
+  `exec-client.ts` (709 lines, the entire content of the last commit) is loaded
+  by no test and absent from the report. CI gates nothing.*
+- **Maintenance.** 43 of 47 commits landed in twelve days ending 2026-02-27,
+  one since.
 
-*Measurement: a twelve-minute Codex turn was carried to its result by repeated
-`waitMs=120000` polls, on a live stand.*
+Worth keeping, and kept: cursor handling with stale-cursor reset, pin-protected
+buffer eviction, `maxBytes` truncation that preserves the approval a caller must
+answer, the vendored `codex-schema/` bundle, protocol-correct denials for late
+requests on a cancelled session, and the stdio contamination preflight.
 
-**The session survives the client.** When the codex-mcp process holding a
-session goes away mid-turn, the session comes back as `abandoned`, its
-`owner.json` is gone, and `codex_session(action="resume")` starts a new Codex
-process and restores the thread from Codex's rollout log, the cut-off turn
-included (`src/session/manager.ts`, proven by
-`tests/server-lifecycle.e2e.test.ts`). `codex-plugin-cc` reaps on the way out:
-its `SessionEnd` hook kills every queued or running job of the ending session
-and tears the broker down
-(`plugins/codex/scripts/session-lifecycle-hook.mjs`), so a background job does
-not survive Claude closing.
+## `FYZAFH/mcp-codex-dev`
 
-**Two servers share one state directory.** Ownership is per session, not per
-directory: each server writes `owner.json` into the sessions it drives, lists
-everybody's, and refuses to act on another's with
-`SESSION_HELD_BY_OTHER_SERVER`. `tests/server-lifecycle.e2e.test.ts` runs two
-servers over one state directory and checks each sees the other's sessions and
-leaves them alone.
+Blocking MCP tools around `codex exec`, with a browser sidecar for progress.
+Read at `d1dc724`.
 
-**A status protocol instead of an event stream.** `codex_check` answers with
-where the session stands and what it waits for — status, `progress`, `actions[]`
-and the finished turn's result — and never with the turn's events. The
-transcript stays in Codex's rollout log under `~/.codex/sessions/`. A long poll
-wakes only on a status change, a new action or the end of the turn, so the
-delta and token-counter traffic in between costs the caller nothing.
+- **The advertised timeouts are a README example, not a default.** 2,000,000 ms
+  and 3,000,000 ms live in `README.md:72-73`; `config.ts:60` gives `timeout` no
+  default, and `codex-executor.ts:250-251` creates no timer when it is
+  undefined. Out of the box a run is unbounded — and the call is blocking, so
+  the client's ceiling is the real bound.
+- **An interrupted call loses the work irrecoverably.** A new session id is
+  written to tracking only after a clean exit (`codex-exec.ts:79-86`), and
+  `session_list` reads only that file. On abort the server kills the direct
+  child of a `shell: true` spawn, not the process group
+  (`codex-executor.ts:195-207`); on timeout the rejection carries no stdout
+  (`:262-267`). The Codex rollout still exists on disk; this server can no
+  longer name it.
+- **Resume silently disables the sandbox.** `codex-executor.ts:116-122` drops
+  `--sandbox` and substitutes `--dangerously-bypass-approvals-and-sandbox`. A
+  repository pinned to `workspace-write` becomes full bypass on the second
+  turn. With nothing configured the default is `danger-full-access`
+  (`config.ts:156`).
+- **Profiles are a regex.** The only thing read from `~/.codex/config.toml` is a
+  `model` string, matched by `/^\s*model\s*=\s*["']…["']$/m` — which hits the
+  first `model =` line in the file, including one inside a `[profiles.x]` table
+  (`config.ts:255`, `:351-358`). No `--profile`, no reasoning effort, no `--cd`.
+  Only `workingDirectory` is a per-call parameter.
+- **Two projects merge into one feed.** On `EADDRINUSE` the second process
+  becomes a client and POSTs its events into the first one's `/ingest`
+  (`progress-server.ts:36-44`) — the project's own open issue #4. `/ingest` has
+  no auth and no Origin check, so any page in the user's browser can inject
+  progress entries; the stream carries reasoning, full shell commands and their
+  output.
+- **A failed `full` review discards the finished half.** `Promise.all` with no
+  cancellation leaves the sibling `codex` process running and throws its result
+  away (`codex-review.ts:128`). `stderr` is collected and never surfaced.
+- 31 commits over fourteen days, no tests, no CI, no LICENSE file, npm 1.0.1.
 
-*Measurement: on one run of ten parallel agents, 20.2% of the traffic from
-app-server was agent-message deltas and 25.7% token-counter updates; waking a
-long poll on those cut the median round trip to 4.8 s and put the whole
-transcript through the caller's context (recorded in `src/session/manager.ts`).
-Across a before-and-after pair of ten-agent runs the caller's token bill went
-from 44.6M to 2.35M — 19×. The two runs were not on the same project; adjusting
-for that difference leaves a lower bound of 13.2×.*
+Ahead of `codex-mcp`: the live browser view of a run — reasoning, commands, exit
+codes and file changes at zero token cost, with a per-operation sidebar — is
+better for a human watching than any polling tool.
 
-**One line saying what the agent is doing.** `progress.activity` carries the
-last `%%%ACTIVITY: …%%%` line Codex wrote, in Codex's own words and in the
-language of the request. It is overwritten, never accumulated, and the server
-cuts every marker out of the answer the caller reads
-(`src/session/activity-marker.ts`).
+## `andreahaku/codex_mcp`
 
-**Edits are asked for, not announced.** With `approvalPolicy` set to anything
-but `never`, Codex's approval requests arrive in `actions[]` and the turn waits
-until the caller answers each by `requestId`. `codex-plugin-cc` starts every
-thread with `approvalPolicy: "never"` — nothing passes another value
-(`plugins/codex/scripts/lib/codex.mjs`) — and its client answers every
-server-initiated request with `-32601`
-(`plugins/codex/scripts/lib/app-server.mjs`). `--write` flips the sandbox to
-`workspace-write` and is the documented default for `/codex:rescue`. The list of
-touched files is computed and reaches the job JSON, but the rendered answer is
-Codex's raw output, so a Claude Code caller learns about the edits from the
-answer text.
+Two products in one repository: an MCP server and a bash skill. Read at
+`1ff521c`.
 
-**A failed turn reports as a failed turn.** `codex-mcp` sets `isError: true` and
-returns `Error [CODE]: message` in the tool result. `codex-plugin-cc` sets
-`process.exitCode = 1` when a turn does not end `completed`
-(`plugins/codex/scripts/codex-companion.mjs`), and its `codex-rescue` subagent
-is instructed "If the Bash call fails or Codex cannot be invoked, return
-nothing" (`plugins/codex/agents/codex-rescue.md`), so a failed Codex run can
-reach the main thread as an empty answer.
+- **The MCP server is dead code the repository itself warns against.**
+  `SKILL.md:13` — "Do not use this repository's MCP server when this skill is
+  active." Its last change was 2025-11-19; every commit since is skill-only.
+- **120,000 ms, hardcoded, with no resume** (`index.ts:260`, `:412`). Node's
+  `exec` kills the child at two minutes and the turn is gone.
+- **Streaming does not exist and would be billed if it did.**
+  `codex-process-simple.ts:337` sets `supportsStreaming = false` and the file
+  contains no `emit(`; the code path that would have used it concatenates the
+  events into the returned tool text (`index.ts:291`).
+- **`cancel` lies.** `kill()` is `// Nothing to kill for exec-based approach`
+  (`codex-process-simple.ts:212`) while the handler answers "🛑 forcefully
+  terminated".
+- **Command injection, open since 2026-04-27.** `params.model` is joined into a
+  shell string unescaped (`codex-process-simple.ts:105-106`); only the prompt is
+  escaped. Issue #1.
+- **`grep -rn profile skill src README.md` returns nothing.** The skill sets
+  `-c model_reasoning_effort=…` and friends per invocation from `CODEX_SKILL_*`
+  env vars; the server passes `--full-auto`, which no longer exists.
+- Every handler returns its error as text inside a successful result
+  (`index.ts:274-279`), so "Codex refused" and "binary missing" are
+  indistinguishable.
 
-**Turn completion is not inferred.** `codex-mcp` ends a turn on the backend's
-`turn/completed`. `codex-plugin-cc` also arms a 250 ms timer after the final
-message and, when the timer wins, records the turn as `status: "completed"`
-without having seen one (`plugins/codex/scripts/lib/codex.mjs`).
+Ahead of `codex-mcp`: the skill's `run-with-timeout.sh` is the best file in the
+repository — it drops `timeout --preserve-status` because a killed Codex exits
+0, and falls back to a bash watchdog with a recursive tree kill and an on-disk
+sentinel (`:95-158`). Its `codex exec --json -o <file>` shape keeps events on
+disk and bills only the final message.
 
-**Session history is kept until it is pruned by age, count and size.**
-`codex-plugin-cc` keeps at most 50 jobs and deletes the rest along with their
-logs on every state write (`plugins/codex/scripts/lib/state.mjs`).
+## `cexll/codex-mcp-server`
 
-### Where `codex-plugin-cc` reaches further
+A small, readable blocking wrapper — 3,449 lines, four dependencies. Read at
+`19fbc1b`, last commit 2025-11-02.
 
-**Nothing to install or keep running.** Three slash commands and a setup check,
-no `mcpServers` entry to hand-edit, and `/codex:setup` will install the Codex
-CLI when it is missing. `codex-mcp` needs a server entry in the client's
-configuration — the plugin in this repository is what closes that gap for Claude
-Code, and does nothing for other clients.
+- **No resume of any kind.** No session or thread id is captured and
+  `codex exec resume` is never invoked. Every follow-up is a cold thread.
+- **The whole transcript is the tool result**, reasoning included by default
+  (`ask-codex.tool.ts:64-67`), with no `--json`, no summarisation and no file
+  handoff.
+- **Failures arrive as successes.** Every exception is caught and returned as a
+  string (`:177-289`), so `isError` is false and Claude receives ~1,500 tokens
+  of troubleshooting markdown where an error should be.
+- **`--full-auto` is emitted before the `exec` subcommand**
+  (`codexExecutor.ts:219`, `:310`). *Measurement: `codex --full-auto exec …` on
+  0.150.1 → `error: unexpected argument '--full-auto' found`.* The advertised
+  automation mode cannot run.
+- **The long-prompt path sends the wrong prompt.** For a prompt over 100 KB it
+  pushes the literal argv token `< /tmp/codex-prompt-xxxx.txt` with no shell
+  (`codexExecutor.ts:155`), deletes the file, and returns a confident answer to
+  that string.
+- **Object-form `config` corrupts.** Entries are comma-joined into one `-c`
+  value (`:262-265`); *measurement: `-c 'model_reasoning_effort=low,model=gpt-5'`
+  → `level "low,model=gpt-5" not supported`.*
+- `yolo: true` is a plain boolean on the public schema
+  (`ask-codex.tool.ts:36`) and the error text coaches the caller toward it
+  (`:263-270`). 43 open issues, 26 open PRs, `"test": "echo \"No tests yet\""`
+  run under `continue-on-error: true`.
 
-**Hooks.** An MCP server is call-and-response and is never told the session
-started or ended. `codex-plugin-cc` registers `SessionStart`, `SessionEnd` and a
-`Stop` gate; the `Stop` gate runs a full Codex review of Claude's last turn and
-can block the stop. Nothing in MCP expresses that.
+Ahead of `codex-mcp`: progress as `notifications/progress` that never reaches
+the model (`index.ts:72-118`), and a working-directory chain that infers the
+right repository per call without configuration
+(`workingDirResolver.ts:172-224`).
 
-**Slash commands and mid-flow questions.** Its commands carry argument hints,
-per-command tool allowlists and pre-executed bash whose output is expanded into
-the prompt with no tool round trip, and they use `AskUserQuestion` to ask the
-person wait-or-background before a long review. MCP has no user-invocable
-command surface, and a server can prompt the person only through elicitation,
-which few clients implement.
+## `kky42/codex-as-mcp` and `tuannvm/codex-mcp-server`
 
-**Prompting ships as skills.** Three skills with reference files load only when
-relevant. An MCP server's only lever on the caller's behaviour is its tool
-descriptions, which sit in context on every call.
+Both are blocking text-mode shell-outs to `codex exec`. Neither reads Codex
+profiles. `tuannvm` is **not** a wrapper around `codex mcp-server` — `git log -S`
+over `src/` finds no commit that ever spawned it.
 
-**Session transfer.** `/codex:transfer` reads the Claude transcript and turns it
-into a resumable Codex thread. It depends on the transcript path the
-`SessionStart` hook exported; an MCP server is never told where that file is.
+`codex-as-mcp` (`4642dff`, 324 lines, PyPI current) is the honest minimum:
+prompt over stdin, `--output-last-message` as the only thing returned, so no
+reasoning reaches the caller. Its disqualifiers: `DEFAULT_TIMEOUT_SECONDS` is
+dead code referenced nowhere (`server.py:31`), so a hung Codex hangs the call
+forever; survival past the client deadline rests entirely on a 2 s progress
+ping plus `AGENTS.md:33` telling you to set
+`MCP_REQUEST_MAX_TOTAL_TIMEOUT=28800000` — the heartbeat hack, made policy;
+`--dangerously-bypass-approvals-and-sandbox` is a hardcoded list element
+(`:110`) no argument can weaken; cwd is `os.getcwd()` of the server process
+(`:98`), so parallel agents all write one directory with the sandbox off.
 
-**One warm Codex process per workspace.** The broker's single-flight behaviour
-is the cost of a design that also spares every caller the spawn and `initialize`
-cost. `codex-mcp` pays a cold start per session, deliberately.
+`tuannvm/codex-mcp-server` (`a57acb6`, last commit 2026-04-13, 22 open PRs) is
+the larger version of the same shape: the tool result is
+`result.stdout || result.stderr` up to a 10 MB buffer; no timeout exists in
+`src/` at all; a non-zero exit resolves as success whenever the child produced
+output (`command.ts:105`); thread continuity is a regex over stderr
+(`handlers.ts:187-195`) that degrades on no match to pasting 200- and
+100-character truncations of prior turns; resume deliberately drops sandbox,
+`fullAuto` and cwd (`:166-169`); sessions live in a `Map` that a restart
+empties, while `docs/session-management.md:4` calls them persistent.
 
-## The other routes
+## The agent bridges
 
-**`codex mcp-server`.** OpenAI deprecated it in favour of the app server: an MCP
-tool's request/response shape carries no streaming diffs, no approval workflow,
-no thread persistence and no server-initiated requests. MCP remains the way to
-connect tools *to* Codex; the app server is how a client connects *to* Codex.
-`codex-mcp` is on the app server for that reason.
+Peer-to-peer daemons between the two CLIs. Both drive Codex through its app
+server, and both put the answer where a delegation must not put it.
 
-**`codex exec` from a subagent's Bash call.** The plainest route, bounded by the
-client's Bash ceiling, and `codex exec` has no way to ask its caller a question
-mid-run. `codex-mcp` uses `codex exec --json` itself, but only as the fallback
-for a codex binary carrying no `app-server` subcommand.
+**`raysonmeng/agent-bridge`** (`a3e927f`, last commit 2026-07-07, 28 open PRs)
+addresses nothing. `MessageSource` is `"claude" | "codex"` (`src/types.ts:3`);
+`chat_id` is only stuffed into a message id; `require_reply` is one global
+boolean whose own header warns that a stray arm force-forwards "that unrelated
+turn's chatter … as if it were the required reply"
+(`src/reply-required-tracker.ts:14-19`). `get_messages` snapshots **and clears**
+the shared queue (`src/claude-adapter.ts:359-363`), so one subagent's drain
+destroys another's reply. A concurrent second delegation is `busy_reject`ed
+(`src/daemon.ts:1691`); a second Claude session is closed with "another Claude
+session is already connected" (`:1791`). Answers land in the main session by
+design, over an undocumented `notifications/claude/channel`
+(`src/claude-adapter.ts:246`). It launches both CLIs at maximum permission for
+you — `--yolo` for Codex (`src/cli/max-permissions.ts:37`) and
+`--dangerously-skip-permissions --dangerously-load-development-channels` for
+Claude (`src/cli/claude.ts:107`) — and pins itself to Codex's experimental
+`tui_app_server` (`src/cli/codex.ts:230-239`).
 
-**Agent bridges.** `raysonmeng/agent-bridge` attaches exactly one Claude Code
-session to its daemon and refuses the second, and inside a session it addresses
-nothing: every message carries a `source` of `claude` or `codex`, so two
-subagents delegating at once read each other's answers. `EthanSK/agent-bridge`
-solves the addressing with personas and thread binding, and rests on Claude Code
-Channels, which needs a claude.ai login and loads custom channels only behind
-`--dangerously-load-development-channels`; channels push into the session rather
-than into the subagent, which is the opposite of keeping a delegation out of the
-main context.
+**`EthanSK/agent-bridge`** (`ea257e5`, last commit 2026-08-12) is the better
+engineering and still not a delegation channel. It has real addressing —
+`target`/`fromTarget` slash addresses, exact-thread verification on resume, a
+busy alias queues instead of rejecting — and it states the problem itself:
+"incoming messages are pushed automatically into the running parent session;
+**channel pushes do NOT reach subagents**. Subagents that need to receive a
+bridge reply should call this tool with `wait: true, timeout_seconds: 30` and
+loop on `timed_out: true`" (`mcp-server/src/tools.ts:919`). That loop is a
+60 s-capped poll (`:1146`) with no `reply_to` filter on the blocking path
+(`:1223`), over an inbox whose arrival signal is broadcast and whose consumption
+is destructive first-come (`watcher.ts:196-205`). Personas are per-process env
+vars, so all subagents of one session share one inbox. There is no model and no
+reasoning-effort knob anywhere; policy is fixed per binding. Installation is
+`curl … | bash` off unpinned `main` and rewrites `~/.claude/settings.json`
+(`scripts/plugin-registry-rewire.mjs:417-432`), with a launchd job re-running
+it. 17,912 lines of tests and no workflow that runs them.
 
-**Orchestrators standing above both CLIs.** Conductor, Emdash, Vibe Kanban and
-the rest put the orchestration protocol into every prompt and take the
-delegation decision away from the agent making it.
+Two corrections to what is commonly said about these: neither requires a
+claude.ai login — the only credential in `EthanSK` is an SSH keypair — and the
+`--dangerously-load-development-channels` requirement is not a differentiator,
+since `raysonmeng` injects the same flag automatically.
+
+## The orchestrators
+
+Conductor, Emdash, Vibe Kanban, batty, AQ, Nimbalyst, Crystal. A third process
+stands above both CLIs, owns the worktree and the board, and the human drives
+it.
+
+- **Three of the seven can be called by an agent.** Vibe Kanban ships an MCP
+  server with `start_workspace(executor=…)`, `run_session_prompt` and
+  `get_execution`; Nimbalyst ships `create_session` / `send_prompt` /
+  `get_session_result` on a loopback endpoint; Conductor exposes a hosted MCP
+  and REST API taking `agent: claude|codex|cursor`. In all three the result is a
+  workspace to poll rather than a subagent's finished report, Nimbalyst's
+  `create_session` deliberately forces children into the shared workspace, and
+  Conductor's control plane is cloud-only on the $50/mo tier.
+- **Emdash is the clean failure**: task creation exists only behind an Electron
+  MessagePort exposed by preload to the renderer
+  (`tasks/api/wire-contract.ts:41`). A human clicks.
+- **batty states the inversion in the prompt**: "Every time you need to
+  communicate … you MUST run `batty send` as a bash command. If you don't run
+  the command, your message is lost. No one reads your terminal."
+  (`src/team/templates/batty_architect.md:142`). Which CLI serves a role is a
+  YAML field the agent never sees.
+- **The coupling is to unstable surfaces.** Vibe Kanban pins
+  `@anthropic-ai/claude-code@2.1.119` and `@openai/codex@0.124.0` and uses
+  `--input-format=stream-json --include-partial-messages --replay-user-messages`
+  (`claude.rs:66`, `codex.rs:448`, `:189-193`); Nimbalyst runs a MITM proxy in
+  front of the Anthropic API to observe its own agent
+  (`ClaudeCliSessionLauncher.ts:263-285`) and reverse-engineers the
+  `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` path
+  (`claudeCliJsonlPath.ts:16-21`); Emdash writes
+  `hasTrustDialogAccepted` into `~/.claude.json` (`claude/trust.ts:14-36`).
+- **Sandboxes are switched off, not added**: `--dangerously-skip-permissions`
+  in batty, Nimbalyst and Emdash, Codex `sandbox_mode="danger-full-access"` in
+  Emdash. Vibe Kanban is the exception at `workspace-write`.
+- **Status.** Vibe Kanban is sunsetting — its README says so, no commit since
+  2026-04-24, 383 issues and 150 PRs open. Crystal was deprecated in February
+  2026 in favour of Nimbalyst. AQ and Conductor are closed source.
+
+Ahead of `codex-mcp`, and genuinely: worktree lifecycle as a product, human diff
+review and merge, unattended verification with merge-on-green, durability past
+the laptop, and absorbing vendor churn once for every session.
+
+## Routing an OpenAI model into Claude Code
+
+`claude-code-router`, LiteLLM's `/v1/messages` adapter, or a bare
+`ANTHROPIC_BASE_URL` swap. This is a different answer to the same motive —
+spend someone else's quota — and it fails on economics, not on plumbing.
+
+- **Prompt caching is dropped by an explicit condition in every translator.**
+  LiteLLM applies `cache_control` only when the target is a Claude or Bedrock
+  model (`transformation.py:337`); `claude-code-router` v1 ships a transformer
+  whose only job is to delete cache breakpoints
+  (`cleancache.transformer.ts:12-14`); v3's parser never emits it. Every turn
+  then re-bills the entire transcript at full input price — the discount that
+  made the quota efficient is the first thing to go.
+- **The context gauge stops working.** CCR answers `/v1/messages/count_tokens`
+  with a word count, `Math.max(1, Math.ceil((asciiWords + cjkChars) * 1.15))`
+  (`claude-code-router-plugin.ts:1683`), and Claude Code sizes auto-compact
+  from a model name the gateway has rewritten behind it.
+- **Errors are laundered.** Unmapped finish reasons become `end_turn` in all
+  three translators, so `content_filter` and `refusal` read as a normal finished
+  turn; a conversion exception becomes a 500 carrying the provider payload
+  inline (`anthropic.transformer.ts:1062-1066`); in `model-chain` mode any
+  status ≥ 400 — including one caused by the translator's own malformed body —
+  silently retries the prompt on a different model
+  (`failure-classifier.ts:14-15`).
+- Images are dropped by CCR v3 (`ai-gateway src/utils.ts:240`) and stringified
+  by v1.
+- Two things commonly said about this route are wrong. Subagents, hooks,
+  commands and skills are client-side and provider-independent, which Anthropic
+  documents. And a ChatGPT subscription *can* be wired in: LiteLLM hardcodes the
+  Codex CLI's OAuth client id and `originator = "codex_cli_rs"` against
+  `chatgpt.com/backend-api/codex` (`llms/chatgpt/common_utils.py:21-23`) and
+  CCR imports `~/.codex/auth.json`. No OpenAI page permits third-party clients
+  to use those credentials and none forbids it; OpenAI's own guidance is "Use
+  API key authentication for programmatic Codex CLI workflows". The obstacle is
+  unsettled terms, not missing code.
+- Anthropic's position on the whole route: "Anthropic doesn't endorse, maintain,
+  or audit third-party gateway products, and doesn't support routing Claude Code
+  to non-Claude models through any gateway."
+
+## What codex-mcp does
+
+The tool surface is in [TOOLS.md](TOOLS.md) and the mechanism in
+[DESIGN.md](DESIGN.md). Against the eight requirements:
+
+- **The turn is carried by the poll, not by the call.** `codex` returns once
+  `turn/start` is accepted (`src/session/manager.ts:524-531`). One
+  `codex_check(action="poll", waitMs=…)` waits up to `MAX_LONG_POLL_WAIT_MS`,
+  3,600,000 ms (`src/types.ts:417`), cut by `PollWindow` to the client's own
+  tool-call ceiling less a 5,000 ms margin (`src/utils/poll-window.ts:82-134`) —
+  and `CLAUDECODE=1` declares no ceiling, so under Claude Code the wait stands.
+  The caller repeats it for as long as the turn runs. A held call speaks every
+  30,000 ms as `notifications/progress` when the caller sent a
+  `_meta.progressToken` (`src/types.ts:428`, `src/tools/codex-check.ts:271-307`).
+  No Bash call is anywhere in the path.
+- **No subagent is required.** Any MCP client drives the five tools. The plugin
+  in `plugins/codex-mcp/` adds a `codex` subagent on Haiku and a `PreToolUse`
+  hook that keeps the Codex tools inside it — one level, and optional.
+- **`codex_check` answers with status, never with events.** `progress`,
+  `actions[]`, `interactionState`, `recommendedNextAction` and the finished
+  turn's `result`; `maxEvents`, `cursor` and `responseMode` are refused with a
+  message naming the replacement (`src/server.ts:225-233`). The transcript stays
+  in Codex's rollout log. A long poll wakes only on `signalOf` — status, the
+  open request ids, the result timestamp, the activity timestamp
+  (`manager.ts:2989-3002`) — so deltas and token counters cost the caller
+  nothing.
+- **One line of what the agent is doing.** The server appends an activity-marker
+  instruction to `developerInstructions`, reassembles `%%%ACTIVITY: …%%%` across
+  deltas, and strips every marker out of the answer
+  (`src/session/activity-marker.ts:40-185`). It reaches the caller as
+  `progress.activity`, in Codex's own words.
+- **Ten sessions, ten processes, no lock.** One client and one child per session
+  (`manager.ts:169-170`); the only per-session cap is four concurrent long polls
+  (`manager.ts:139`).
+- **The session survives the server.** Orderly shutdown rewrites every running
+  session to `abandoned` (`manager.ts:1197-1207`); a hard kill is derived on the
+  next start. `codex_session(action="resume")` respawns with the recorded
+  profile, model, policy, sandbox and config and calls `thread/resume`, and
+  Codex restores the thread from its own rollout log
+  (`manager.ts:1092-1149`). Pending approvals are lost.
+- **Two servers share one state directory.** Ownership is per session:
+  `owner.json` holds `{pid, startedAt}`, listings show `owner.state`, and
+  adopting another server's session fails with `SESSION_HELD_BY_OTHER_SERVER`
+  (`src/persistence/session-owner.ts:20-98`, `manager.ts:1164-1171`).
+- **Edits are asked for, not announced.** With `approvalPolicy` other than
+  `never`, Codex's requests arrive in `actions[]` with their `availableDecisions`
+  and the turn waits until the caller answers by `requestId`
+  (`manager.ts:2065-2120`). Unanswered, they auto-decline at
+  `DEFAULT_APPROVAL_TIMEOUT_MS`, 60,000 ms, and the turn continues; a
+  `waiting_approval` session advertises a 1,000 ms poll interval.
+- **A failed turn is a failed turn.** Every handler returns `isError: true` and
+  `Error [CODE]: message` over fourteen codes (`src/server.ts:488-495`,
+  `src/types.ts:378-393`), and the terminal `result` keeps `outcome`, `error`
+  and `turnError` readable on every later check.
 
 ## What codex-mcp does not do
 
-- **`exec` mode cannot resume or fork.** On a codex binary with no `app-server`,
-  `codex_session(action="resume")` and `action="fork"` fail with
-  `THREAD_FORK_RESUME_FAILED` carrying `EXEC_NOT_SUPPORTED`, because `codex exec`
-  implements no thread resume. An abandoned session keeps its status and the work
-  has to be handed to a new session. Exec mode also carries no approvals, no user
-  input and no activity line.
+- **`profile` cannot work in app-server mode.** `buildAppServerArgs` pushes
+  `-p <name>` after the `app-server` subcommand
+  (`src/app-server/lifecycle.ts:17-19`), which the CLI rejects, and
+  `tests/spawn-options.test.ts:20` asserts that argument vector. *Measurement on
+  `codex-cli 0.150.1`: `codex app-server -p X` → `error: unexpected argument
+  '-p' found`; `codex -p X app-server` → `--profile only applies to runtime
+  commands`.* Only the exec backend passes a profile that Codex acts on. Per the
+  ground truth above, the app server has no route for a config profile at all —
+  the equivalent is `-c key=value` overrides, which this server already passes
+  through `advanced.config`.
+- **`codex_reply` cannot change the profile**, and the launch defaults
+  `CODEX_MCP_DEFAULT_MODEL`, `_EFFORT`, `_APPROVAL_POLICY`, `_SANDBOX` and
+  `_APPROVAL_TIMEOUT_MS` apply to `codex` only. A per-call parameter always
+  beats a default (`src/utils/config.ts:39-46`).
+- **exec mode is a fallback, and it is narrow.** `fork`, `resume`, approvals and
+  user input all throw `EXEC_NOT_SUPPORTED`
+  (`src/app-server/exec-client.ts:293-311`). `effort`, `summary`, `personality`
+  and both instruction fields are dropped on every exec turn — which is why exec
+  carries no activity line — and an exec resume additionally drops `sandbox`,
+  `cwd` and `outputSchema`, reported to the caller as `compatWarnings`.
 - **A session whose owner cannot be checked stays held.** When the recorded pid
-  answers neither a liveness probe nor a start-time read, `codex-mcp` treats the
-  session as held and refuses to resume it. No flag overrides that. Deleting
-  `owner.json` from the session's directory is the only way out, and it is on the
-  person who knows the process is gone.
-- **The resume path has not been driven by a real Codex.** Ownership handover,
-  resume, and the turn parameters a resumed session runs with are covered by the
-  unit tests, by the end-to-end suite against a stand-in codex binary, and by
-  `codex-schema/`. What a live `codex app-server` does with a reasoning effort on
-  a resumed thread is stated from the schema, not observed.
-- **The end-to-end suite skips itself on Windows.** `tests/server-lifecycle.e2e.test.ts`
-  hands the server a `.mjs` stand-in as the codex binary, and Windows spawns an
-  executable by its extension. The lifetimes it measures — startup, stdin EOF,
-  shutdown, ownership handover, resume — carry evidence from Linux and macOS
-  only. The pieces underneath them are covered per platform by the unit tests.
-- **It has no hooks, no slash commands and cannot ask the person a question.**
-  Those belong to the client. For Claude Code, the plugin in this repository
-  supplies the subagent and the hook.
-- **The client and the server run on one machine.** Everything travels over
-  stdio, child processes share the local filesystem and `~/.codex/config.toml`,
-  and every `cwd` is a local path.
+  answers neither a liveness probe nor a start-time read, `ownerState` returns
+  `held` unproven (`src/persistence/session-owner.ts:85-92`) and resume is
+  refused. No flag overrides it; deleting `owner.json` is the only way out, and
+  it is on the person who knows the process is gone.
+- **The vendored schema is 45 releases behind.** `codex-schema/` was generated
+  by CLI 0.106.0 on 2026-02-27; the installed CLI is 0.150.1. Between them the
+  app server went from 52 to 157 client methods and from 41 to 83 notifications,
+  `ThreadStartParams` lost `persistExtendedHistory` for `historyMode`, and the
+  `profile` field the bundle still advertises on `NewConversationParams` no
+  longer exists.
+- **The end-to-end suite proves the harness, not Codex.**
+  `tests/server-lifecycle.e2e.test.ts` runs against `tests/helpers/fake-codex.mjs`
+  and skips itself on Windows (`tests/helpers/server-harness.ts:31`), so
+  ownership handover, `abandoned` and resume carry evidence from a stand-in
+  binary on Linux and macOS. What a live `codex app-server` restores from a
+  rollout log is stated from the schema, not observed.
+- **There is no coverage gate.** `bun run check` runs `bun test` without
+  coverage, `coverage/` is gitignored, and no workflow enforces a threshold.
+- **No hooks, no slash commands, no way to ask the person a question.** Those
+  belong to the client; MCP elicitation is implemented by few of them. For
+  Claude Code the plugin in this repository supplies the subagent and the hook.
+- **The client and the server run on one machine.** stdio, local child
+  processes, a shared `~/.codex/config.toml`, and every `cwd` is a local path.
 
 ## Relationship to the upstream project
 
@@ -214,4 +600,8 @@ The fork exists because that repository stands at 2.1.0 while releases through
 2.1.7 went out on npm alone, so the published source and the published package
 describe different servers. This fork reconstructs 2.1.1 through 2.1.7 from the
 sourcemaps of the published packages, puts them under test, and releases from
-the tree it publishes.
+the tree it publishes. Since 2.2.0 it has replaced the global state-directory
+lock with per-session ownership, added `abandoned` and
+`codex_session(action="resume")`, cut `codex_check` down from an event stream to
+a status protocol, added the activity marker, the long poll and its heartbeat,
+and moved the toolchain to bun.

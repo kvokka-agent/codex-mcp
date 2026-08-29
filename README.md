@@ -1,44 +1,40 @@
 # codex-mcp
 
-[![npm version](https://img.shields.io/npm/v/@kvokka/codex-mcp.svg)](https://www.npmjs.com/package/@kvokka/codex-mcp)
+[![version](https://img.shields.io/npm/v/@kvokka/codex-mcp.svg)](https://www.npmjs.com/package/@kvokka/codex-mcp)
+![Bun](https://img.shields.io/badge/Bun-%23000000.svg?style=for-the-badge&logo=bun&logoColor=white)
+[![downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fomo.dev%2Fapi%2Fnpm-downloads&style=flat-square)](https://www.npmjs.com/package/@kvokka/codex-mcp)
+![CI Status](https://github.com/kvokka/codex-mcp/actions/workflows/ci.yml/badge.svg)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/kvokka/codex-mcp)
 [![license](https://img.shields.io/npm/l/@kvokka/codex-mcp.svg)](https://github.com/kvokka/codex-mcp/blob/master/LICENSE)
-[![node](https://img.shields.io/node/v/@kvokka/codex-mcp.svg)](https://nodejs.org)
 
-An MCP server that runs [OpenAI Codex](https://github.com/openai/codex) as a
-background agent. Start a session, get an id back, check on it: five tools, any
-MCP client, one Codex process per session.
+Use [OpenAI Codex](https://github.com/openai/codex) as a native Claude agent with
+your subscription.
 
-## What it is for
+TL;DR
 
-Handing a long pass — review this diff, QA this change, fix this suite — to
-Codex from inside an agent run, and getting the answer back without the run
-paying for the transcript.
+[docs/COMPARISON.md](docs/COMPARISON.md)
 
-- **A turn is not bounded by a tool call.** `codex` returns as soon as the
-  session starts; `codex_check` waits for the next thing the caller must act on.
-  A turn that thinks for twenty minutes is checked, not killed.
-- **The caller reads status, not events.** Where the session stands, what it
-  waits for, one line in Codex's own words saying what it is doing, and the
-  result when the turn ends. Codex's own rollout log keeps the transcript.
-- **The wait reports.** A poll answers the moment Codex says it is working on
-  something new, carrying that line and how long it has stood, so the person
-  waiting reads the work rather than a spinner. A held poll also sends the line
-  as `notifications/progress`, and repeats it every 30 seconds.
-- **Sessions run at once.** One child process per session and no lock above
-  them.
-- **A session outlives the process driving it.** When the server goes away
-  mid-turn the session comes back as `abandoned`, and
-  `codex_session(action="resume")` picks the thread up where Codex left it.
-- **Codex asks before it acts.** Approval requests arrive as `actions[]` and the
-  turn waits for an answer.
-- **Your Codex configuration is the configuration.** Model, profile and sandbox
-  defaults come from `~/.codex/config.toml`; a call overrides what it needs.
+## Features
+
+- Support multiple agents on 1 repo/worktree in parallel
+- Async execution
+- Long sessions support
+- Bi-directional communication
+- Progress execution updates
+- No agent execution time limit
+- Session resume
+- RAM, context and tokens efficient
+- Codex config support + various customisations
+- Use codex app-server
+- Auto cleanup for finished and abandoned agents
+- Follow Anthropic ToS
+
+Almost like Caude native agent
 
 ## Install
 
-[bun](https://bun.com) >= 1.4, which starts and runs the server, and the
-[Codex CLI](https://github.com/openai/codex) installed and logged in. Node.js is
-not part of it.
+- [bun](https://bun.com) >= 1.4
+- [Codex CLI](https://github.com/openai/codex) installed and logged in.
 
 ### Claude Code
 
@@ -68,19 +64,6 @@ does.
 
 [docs/INSTALL.md](docs/INSTALL.md) covers the global install, the Windows
 wrapper, picking the codex binary, and every environment variable.
-
-## How it compares
-
-Against `openai/codex-plugin-cc`, the closest alternative: codex-mcp serves any
-MCP client rather than Claude Code alone, runs sessions concurrently rather than
-one turn at a time behind a single-flight broker, carries a turn past any Bash
-ceiling, keeps a session alive when the client dies, and makes Codex ask before
-it writes. `codex-plugin-cc` reaches further where the client does: hooks, slash
-commands, skills, and asking the person a question mid-flow.
-
-[docs/COMPARISON.md](docs/COMPARISON.md) puts each of those against the source
-that proves it, marks the measurements and their conditions, and lists what
-codex-mcp does not do.
 
 ## Documentation
 
