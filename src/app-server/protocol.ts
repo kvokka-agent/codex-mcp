@@ -74,7 +74,12 @@ export interface InitializeResult {
 
 // ── Shared enums / aliases ─────────────────────────────────────────
 
-export type ApprovalPolicy = "untrusted" | "on-request" | "never";
+/**
+ * The string branch of `AskForApproval`, as a list a reader can hold a response
+ * field against.
+ */
+export const APPROVAL_POLICY_PRESETS = ["untrusted", "on-request", "never"] as const;
+export type ApprovalPolicy = (typeof APPROVAL_POLICY_PRESETS)[number];
 
 /**
  * Object branch of the schema's `AskForApproval` union: names each approval
@@ -139,11 +144,18 @@ export type DynamicToolSpec =
     };
 
 /**
+ * Every reviewer the schema's `ApprovalsReviewer` enum names, which is what a
+ * thread answer can carry.
+ */
+export const ANSWERED_APPROVALS_REVIEWERS = ["user", "auto_review", "guardian_subagent"] as const;
+
+/**
  * Where approval requests are routed for review. Absent means the schema
  * default `user`. `auto_review` hands the decision to a subagent;
- * `guardian_subagent` is the legacy spelling of it.
+ * `guardian_subagent` is the legacy spelling of it, which this server never
+ * sends and a backend can still answer with.
  */
-export type ApprovalsReviewer = "user" | "auto_review" | "guardian_subagent";
+export type ApprovalsReviewer = (typeof ANSWERED_APPROVALS_REVIEWERS)[number];
 
 /** Persisted thread history contract. */
 export type ThreadHistoryMode = "legacy" | "paginated";
@@ -235,12 +247,52 @@ export interface ThreadStartParams {
 }
 
 /**
- * thread/start response — schema v2/ThreadStartResponse.json.
- * Only `thread.id` is modelled: no caller reads another field off the response.
+ * What `thread/start`, `thread/fork` and `thread/resume` answer with — the
+ * settings the thread runs with, which are not the settings the request asked
+ * for. On `codex-cli 0.150.1` a `thread/start` naming neither model nor
+ * provider answered `"model":"gpt-5.6-luna","modelProvider":"myproxy"`.
+ *
+ * The three responses carry the same block (v2/ThreadStartResponse.json,
+ * v2/ThreadForkResponse.json, v2/ThreadResumeResponse.json). Modelled here are
+ * the id and the settings a session reports; the rest of the block —
+ * `instructionSources`, `runtimeWorkspaceRoots`, `serviceTier`,
+ * `multiAgentMode` and the resume cursors — has no reader.
  */
-export interface ThreadStartResult {
+export interface ThreadSettingsResult {
   thread: { id: string };
+  model: string;
+  modelProvider: string;
+  cwd: string;
+  approvalPolicy: AskForApproval;
+  /** The policy object, not the `sandbox` mode string `thread/start` takes. */
+  sandbox: SandboxPolicy;
+  /** Optional on the response, and null for a model advertising no effort. */
+  reasoningEffort?: ReasoningEffort | null;
+  /** Who the thread routes its approval requests to, whatever the call named. */
+  approvalsReviewer: ApprovalsReviewer;
+  /**
+   * The profile that produced the active permissions. Null where Codex names
+   * none, and the only field saying which profile derived `sandbox`.
+   */
+  activePermissionProfile?: ActivePermissionProfile | null;
 }
+
+/**
+ * The permissions profile a thread runs under, as a thread answer names it
+ * (schema definition `ActivePermissionProfile`).
+ */
+export interface ActivePermissionProfile {
+  /**
+   * An id of `default_permissions`, a built-in such as `:workspace`, or a
+   * user-defined `[permissions.<id>]` profile.
+   */
+  id: string;
+  /** The parent id of the profile's `extends`, null where it names no parent. */
+  extends?: string | null;
+}
+
+/** thread/start response — schema v2/ThreadStartResponse.json. */
+export type ThreadStartResult = ThreadSettingsResult;
 
 export interface ThreadForkParams {
   threadId: string;
@@ -282,9 +334,7 @@ export interface ThreadForkParams {
 }
 
 /** thread/fork response — schema v2/ThreadForkResponse.json. */
-export interface ThreadForkResult {
-  thread: { id: string };
-}
+export type ThreadForkResult = ThreadSettingsResult;
 
 /** How much of each turn a `thread/resume` answer carries back. */
 export type TurnItemsView = "notLoaded" | "summary" | "full";
@@ -332,12 +382,85 @@ export interface ThreadResumeParams {
 }
 
 /** thread/resume response — schema v2/ThreadResumeResponse.json. */
-export interface ThreadResumeResult {
-  thread: { id: string };
-}
+export type ThreadResumeResult = ThreadSettingsResult;
 
+/**
+ * thread/backgroundTerminals/clean — schema v2/ThreadBackgroundTerminalsCleanParams.json.
+ * The response is `{"type":"object"}` with no properties, so the call says
+ * nothing about what it cleaned.
+ */
 export interface ThreadBackgroundTerminalsCleanParams {
   threadId: string;
+}
+
+/** thread/backgroundTerminals/list — schema v2/ThreadBackgroundTerminalsListParams.json. */
+export interface ThreadBackgroundTerminalsListParams {
+  threadId: string;
+  /** Opaque cursor a previous page answered with. */
+  cursor?: string | null;
+  /** Page size. Codex picks one when this is absent. */
+  limit?: number | null;
+}
+
+/** One entry of the list answer — schema definition `ThreadBackgroundTerminal`. */
+export interface ThreadBackgroundTerminal {
+  command: string;
+  cwd: string;
+  itemId: string;
+  processId: string;
+  osPid?: number | null;
+  cpuPercent?: number | null;
+  rssKb?: number | null;
+}
+
+/** thread/backgroundTerminals/list response — schema v2/ThreadBackgroundTerminalsListResponse.json. */
+export interface ThreadBackgroundTerminalsListResult {
+  data: ThreadBackgroundTerminal[];
+  /** Null when the page is the last one. */
+  nextCursor?: string | null;
+}
+
+/** thread/backgroundTerminals/terminate — schema v2/ThreadBackgroundTerminalsTerminateParams.json. */
+export interface ThreadBackgroundTerminalsTerminateParams {
+  threadId: string;
+  processId: string;
+}
+
+/**
+ * thread/backgroundTerminals/terminate response — schema
+ * v2/ThreadBackgroundTerminalsTerminateResponse.json. `terminated` is the one
+ * per-process measurement the protocol offers.
+ */
+export interface ThreadBackgroundTerminalsTerminateResult {
+  terminated: boolean;
+}
+
+// ── Permission profiles ────────────────────────────────────────────
+
+/** permissionProfile/list — schema v2/PermissionProfileListParams.json. */
+export interface PermissionProfileListParams {
+  /** Working directory whose project config layers are resolved. */
+  cwd?: string | null;
+  /** Opaque cursor from a previous call. */
+  cursor?: string | null;
+  /** Page size. Omitted answers the full result set. */
+  limit?: number | null;
+}
+
+/** One profile of a `permissionProfile/list` page. */
+export interface PermissionProfileSummary {
+  /** Available permission profile identifier, such as `:read-only`. */
+  id: string;
+  /** Whether the effective requirements allow selecting this profile. */
+  allowed: boolean;
+  description?: string | null;
+}
+
+/** permissionProfile/list response — schema v2/PermissionProfileListResponse.json. */
+export interface PermissionProfileListResult {
+  data: PermissionProfileSummary[];
+  /** Cursor for the next page. Null means the listing is exhausted. */
+  nextCursor?: string | null;
 }
 
 /** thread/delete — schema v2/ThreadDeleteParams.json. The response is empty. */
@@ -345,7 +468,80 @@ export interface ThreadDeleteParams {
   threadId: string;
 }
 
+// ── Account ────────────────────────────────────────────────────────
+
+/** account/read — schema v2/GetAccountParams.json. */
+export interface GetAccountParams {
+  /**
+   * Refresh the token before answering. Default false, and left there here:
+   * this server reads the account, it does not manage the credential.
+   */
+  refreshToken?: boolean;
+}
+
+/** The plan a ChatGPT account is on — schema definition `PlanType`. */
+export type PlanType =
+  | "free"
+  | "go"
+  | "plus"
+  | "pro"
+  | "prolite"
+  | "team"
+  | "self_serve_business_prolite"
+  | "self_serve_business_usage_based"
+  | "business"
+  | "ent26"
+  | "enterprise_cbp_automation"
+  | "enterprise_cbp_usage_based"
+  | "enterprise"
+  | "edu"
+  | "edu_plus"
+  | "edu_pro"
+  | "unknown";
+
+/** The credential the account signs requests with — schema definition `Account`. */
+export type Account =
+  | { type: "apiKey" }
+  | { type: "chatgpt"; email: string | null; planType: PlanType }
+  | { type: "amazonBedrock"; usesCodexManagedCredentials?: boolean };
+
+/**
+ * account/read response — schema v2/GetAccountResponse.json.
+ *
+ * `requiresOpenaiAuth` is false where the configured model provider carries its
+ * own credentials, and a null `account` there is not a missing login.
+ */
+export interface GetAccountResult {
+  requiresOpenaiAuth: boolean;
+  account?: Account | null;
+}
+
+// ── Windows sandbox ────────────────────────────────────────────────
+
+/** schema definition `WindowsSandboxReadiness`. */
+export type WindowsSandboxReadiness = "ready" | "notConfigured" | "updateRequired";
+
+/**
+ * windowsSandbox/readiness response — schema
+ * v2/WindowsSandboxReadinessResponse.json. The method takes null params.
+ *
+ * The backend answers on every platform and gates nothing on the operating
+ * system: a Linux 0.150.1 answers `{"status":"notConfigured"}`, the same value a
+ * Windows machine with no sandbox gives, so only a `win32` caller may read it.
+ */
+export interface WindowsSandboxReadinessResult {
+  status: WindowsSandboxReadiness;
+}
+
 // ── SandboxPolicy ──────────────────────────────────────────────────
+
+/** The `type` discriminators of `SandboxPolicy`, in the order the schema lists them. */
+export const SANDBOX_POLICY_TYPES = [
+  "dangerFullAccess",
+  "readOnly",
+  "externalSandbox",
+  "workspaceWrite",
+] as const;
 
 export type SandboxPolicy =
   | { type: "dangerFullAccess" }
@@ -466,6 +662,17 @@ export interface TurnSteerParams {
   clientUserMessageId?: string | null;
   /** Flattened into the upstream `x-codex-turn-metadata` client metadata. */
   responsesapiClientMetadata?: Record<string, string> | null;
+}
+
+/**
+ * turn/steer response — schema v2/TurnSteerResponse.json.
+ *
+ * `turnId` is the turn that was already running, not a new one. Measured on
+ * codex-cli 0.150.1: a steer sent 2s into an 8s turn answered the running turn's
+ * id, and no `turn/started` or `turn/completed` followed it.
+ */
+export interface TurnSteerResult {
+  turnId: string;
 }
 
 // ── Approval Requests (server → client) ────────────────────────────
@@ -680,6 +887,72 @@ export interface TextRange {
   end: TextPosition;
 }
 
+// ── Approval auto-review (approvalsReviewer: auto_review) ──────────
+
+/**
+ * Lifecycle state of one approval auto-review.
+ *
+ * `inProgress` opens the review; the other four end it, and only `approved`
+ * lets the action through.
+ */
+export type GuardianApprovalReviewStatus =
+  | "inProgress"
+  | "approved"
+  | "denied"
+  | "timedOut"
+  | "aborted";
+
+/**
+ * The review object of an `item/autoApprovalReview/*` notification.
+ *
+ * The schema marks `GuardianApprovalReview` `[UNSTABLE]` — "This shape is
+ * expected to change soon" — so only `status` is declared here and nothing in
+ * this server reads deeper. `rationale`, `riskLevel` and `userAuthorization`
+ * are on the wire and are not to be depended on.
+ */
+export interface GuardianApprovalReview {
+  status: GuardianApprovalReviewStatus;
+}
+
+/** item/autoApprovalReview/started — schema ItemGuardianApprovalReviewStartedNotification. */
+export interface AutoApprovalReviewStartedParams {
+  /** `GuardianApprovalReviewAction`, left unread: it is `[UNSTABLE]` too. */
+  action: unknown;
+  review: GuardianApprovalReview;
+  /** Stable identifier for this review. */
+  reviewId: string;
+  /** Unix milliseconds when the review started. */
+  startedAtMs: number;
+  /** The reviewed item, absent for a network-policy review, which targets no item. */
+  targetItemId?: string | null;
+  threadId: string;
+  turnId: string;
+}
+
+/** item/autoApprovalReview/completed — schema ItemGuardianApprovalReviewCompletedNotification. */
+export interface AutoApprovalReviewCompletedParams {
+  /** `GuardianApprovalReviewAction`, left unread: it is `[UNSTABLE]` too. */
+  action: unknown;
+  /** Unix milliseconds when the review completed. */
+  completedAtMs: number;
+  /** What produced the terminal decision; the schema gives one value, `agent`. */
+  decisionSource: "agent";
+  review: GuardianApprovalReview;
+  reviewId: string;
+  startedAtMs: number;
+  targetItemId?: string | null;
+  threadId: string;
+  turnId: string;
+}
+
+/** autoApprovalReview/strictReviewRequired — schema StrictReviewRequiredNotification. */
+export interface StrictReviewRequiredParams {
+  /** Unix milliseconds when the review started. */
+  startedAtMs: number;
+  threadId: string;
+  turnId: string;
+}
+
 export interface DeprecationNoticeNotificationParams {
   summary: string;
   details?: string | null;
@@ -690,6 +963,107 @@ export interface ConfigWarningNotificationParams {
   details?: string | null;
   path?: string | null;
   range?: TextRange | null;
+}
+
+/**
+ * `warning` — free text the backend wants shown to the person, with no code and
+ * no structure to branch on.
+ */
+export interface WarningNotificationParams {
+  message: string;
+  threadId?: string | null;
+}
+
+/** `guardianWarning` — the same free text from the approvals reviewer. */
+export interface GuardianWarningNotificationParams {
+  message: string;
+  threadId: string;
+}
+
+/**
+ * `model/safetyBuffering/updated` — the backend is holding the model's output
+ * back, and `reasons` names why. `showBufferingUi` is the backend saying whether
+ * the person is meant to be told.
+ */
+export interface ModelSafetyBufferingUpdatedNotificationParams {
+  model: string;
+  reasons: string[];
+  showBufferingUi: boolean;
+  threadId: string;
+  turnId: string;
+  useCases: string[];
+  fasterModel?: string | null;
+}
+
+/** Which lifecycle point of a turn a hook is configured to run at. */
+export type HookEventName =
+  | "preToolUse"
+  | "permissionRequest"
+  | "postToolUse"
+  | "preCompact"
+  | "postCompact"
+  | "sessionStart"
+  | "sessionEnd"
+  | "userPromptSubmit"
+  | "subagentStart"
+  | "subagentStop"
+  | "stop"
+  | "interrupt";
+
+/** `blocked` and `stopped` are a hook holding the turn back; `failed` is one that broke. */
+export type HookRunStatus = "running" | "completed" | "failed" | "blocked" | "stopped";
+
+export type HookOutputEntryKind = "warning" | "stop" | "feedback" | "context" | "error";
+
+/** One line a hook wrote for display, tagged with what kind of line it is. */
+export interface HookOutputEntry {
+  kind: HookOutputEntryKind;
+  text: string;
+}
+
+/** Where the hook was configured. The schema defaults it to `unknown`. */
+export type HookSource =
+  | "system"
+  | "user"
+  | "project"
+  | "mdm"
+  | "sessionFlags"
+  | "plugin"
+  | "cloudRequirements"
+  | "cloudManagedConfig"
+  | "legacyManagedConfigFile"
+  | "legacyManagedConfigMdm"
+  | "unknown";
+
+/** One run of one hook, as `hook/started` and `hook/completed` report it. */
+export interface HookRunSummary {
+  id: string;
+  displayOrder: number;
+  entries: HookOutputEntry[];
+  eventName: HookEventName;
+  executionMode: "sync" | "async";
+  handlerType: "command" | "mcpTool" | "prompt" | "agent";
+  scope: "thread" | "turn";
+  /** Absolute, normalized path of the file the hook was configured in. */
+  sourcePath: string;
+  /** Unix milliseconds. */
+  startedAt: number;
+  status: HookRunStatus;
+  /** The line the hook's author wrote for display. Null when they wrote none. */
+  statusMessage?: string | null;
+  completedAt?: number | null;
+  durationMs?: number | null;
+  source?: HookSource;
+}
+
+/**
+ * `hook/started` and `hook/completed`, which carry the same shape. `turnId` is
+ * absent for a hook whose `scope` is the thread.
+ */
+export interface HookNotificationParams {
+  run: HookRunSummary;
+  threadId: string;
+  turnId?: string | null;
 }
 
 // ── Legacy Approval (deprecated) ───────────────────────────────────
@@ -712,7 +1086,12 @@ export const Methods = {
   THREAD_RESUME: "thread/resume",
   THREAD_FORK: "thread/fork",
   THREAD_BACKGROUND_TERMINALS_CLEAN: "thread/backgroundTerminals/clean",
+  THREAD_BACKGROUND_TERMINALS_LIST: "thread/backgroundTerminals/list",
+  THREAD_BACKGROUND_TERMINALS_TERMINATE: "thread/backgroundTerminals/terminate",
   THREAD_DELETE: "thread/delete",
+  PERMISSION_PROFILE_LIST: "permissionProfile/list",
+  ACCOUNT_READ: "account/read",
+  WINDOWS_SANDBOX_READINESS: "windowsSandbox/readiness",
   TURN_START: "turn/start",
   TURN_INTERRUPT: "turn/interrupt",
   TURN_STEER: "turn/steer",
@@ -751,6 +1130,9 @@ export const Methods = {
   REASONING_SUMMARY_PART_ADDED: "item/reasoning/summaryPartAdded",
   PLAN_DELTA: "item/plan/delta",
   MCP_TOOL_PROGRESS: "item/mcpToolCall/progress",
+  AUTO_APPROVAL_REVIEW_STARTED: "item/autoApprovalReview/started",
+  AUTO_APPROVAL_REVIEW_COMPLETED: "item/autoApprovalReview/completed",
+  AUTO_APPROVAL_REVIEW_STRICT_REQUIRED: "autoApprovalReview/strictReviewRequired",
   MODEL_REROUTED: "model/rerouted",
   FUZZY_FILE_SEARCH_SESSION_UPDATED: "fuzzyFileSearch/sessionUpdated",
   FUZZY_FILE_SEARCH_SESSION_COMPLETED: "fuzzyFileSearch/sessionCompleted",
@@ -758,4 +1140,9 @@ export const Methods = {
   ACCOUNT_LOGIN_COMPLETED: "account/login/completed",
   DEPRECATION_NOTICE: "deprecationNotice",
   CONFIG_WARNING: "configWarning",
+  WARNING: "warning",
+  GUARDIAN_WARNING: "guardianWarning",
+  MODEL_SAFETY_BUFFERING_UPDATED: "model/safetyBuffering/updated",
+  HOOK_STARTED: "hook/started",
+  HOOK_COMPLETED: "hook/completed",
 } as const;

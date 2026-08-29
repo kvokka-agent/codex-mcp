@@ -1,6 +1,6 @@
 /**
- * codex_session tool — manage sessions
- * (list/get/resume/cancel/interrupt/fork/clean/clean_background_terminals).
+ * codex_session tool — manage sessions (list/get/resume/cancel/interrupt/steer/
+ * fork/clean/clean_background_terminals/terminate_background_terminal).
  */
 import type { SessionManager } from "../session/manager.js";
 import { type CleanableStatus, ErrorCode, type SessionAction } from "../types.js";
@@ -13,6 +13,8 @@ export interface CodexSessionParams {
   olderThanMs?: number;
   dryRun?: boolean;
   includeDisk?: boolean;
+  processId?: string;
+  prompt?: string;
 }
 
 /** What an action that works on one session answers when the caller named none. */
@@ -20,6 +22,33 @@ function missingSessionId(action: SessionAction): { error: string; isError: true
   return {
     error: `Error [${ErrorCode.INVALID_ARGUMENT}]: sessionId required for '${action}'`,
     isError: true,
+  };
+}
+
+/** The two background-terminal actions. Both answer `backgroundTerminals`. */
+async function backgroundTerminalAction(
+  args: CodexSessionParams,
+  sessionManager: SessionManager
+): Promise<unknown> {
+  if (!args.sessionId) return missingSessionId(args.action);
+  if (args.action === "clean_background_terminals") {
+    return {
+      sessionId: args.sessionId,
+      backgroundTerminals: await sessionManager.cleanBackgroundTerminals(args.sessionId),
+    };
+  }
+  if (!args.processId) {
+    return {
+      error: `Error [${ErrorCode.INVALID_ARGUMENT}]: processId required for '${args.action}'`,
+      isError: true,
+    };
+  }
+  return {
+    sessionId: args.sessionId,
+    backgroundTerminals: await sessionManager.terminateBackgroundTerminal(
+      args.sessionId,
+      args.processId
+    ),
   };
 }
 
@@ -49,6 +78,17 @@ export async function executeCodexSession(
       await sessionManager.interruptSession(args.sessionId);
       return { success: true, message: `Session ${args.sessionId} interrupted` };
 
+    case "steer": {
+      if (!args.sessionId) return missingSessionId(args.action);
+      if (!args.prompt) {
+        return {
+          error: `Error [${ErrorCode.INVALID_ARGUMENT}]: prompt required for '${args.action}'`,
+          isError: true,
+        };
+      }
+      return await sessionManager.steerSession(args.sessionId, args.prompt);
+    }
+
     case "fork":
       if (!args.sessionId) return missingSessionId(args.action);
       return await sessionManager.forkSession(args.sessionId);
@@ -62,12 +102,8 @@ export async function executeCodexSession(
       });
 
     case "clean_background_terminals":
-      if (!args.sessionId) return missingSessionId(args.action);
-      await sessionManager.cleanBackgroundTerminals(args.sessionId);
-      return {
-        success: true,
-        message: `Background terminals cleaned for session ${args.sessionId}`,
-      };
+    case "terminate_background_terminal":
+      return await backgroundTerminalAction(args, sessionManager);
 
     default:
       return {

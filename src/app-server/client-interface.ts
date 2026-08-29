@@ -7,9 +7,17 @@
  */
 import type { AppServerSpawnOptions } from "./lifecycle.js";
 import type {
+  GetAccountParams,
+  GetAccountResult,
   InitializeResult,
+  PermissionProfileListParams,
+  PermissionProfileListResult,
   RequestId,
   ThreadBackgroundTerminalsCleanParams,
+  ThreadBackgroundTerminalsListParams,
+  ThreadBackgroundTerminalsListResult,
+  ThreadBackgroundTerminalsTerminateParams,
+  ThreadBackgroundTerminalsTerminateResult,
   ThreadDeleteParams,
   ThreadForkParams,
   ThreadForkResult,
@@ -20,6 +28,9 @@ import type {
   TurnInterruptParams,
   TurnStartParams,
   TurnStartResult,
+  TurnSteerParams,
+  TurnSteerResult,
+  WindowsSandboxReadinessResult,
 } from "./protocol.js";
 
 export interface ICodexClient {
@@ -40,19 +51,48 @@ export interface ICodexClient {
   /** Resume a previously forked/saved thread. */
   threadResume(params: ThreadResumeParams): Promise<ThreadResumeResult>;
 
-  /** Clean background terminals for a thread. */
+  /** Sweep every background terminal of a thread. The answer is empty. */
   threadBackgroundTerminalsClean(
     params: ThreadBackgroundTerminalsCleanParams
   ): Promise<Record<string, never>>;
 
+  /** One page of the background terminals of a thread. */
+  threadBackgroundTerminalsList(
+    params: ThreadBackgroundTerminalsListParams
+  ): Promise<ThreadBackgroundTerminalsListResult>;
+
+  /** Terminate one background terminal, and answer whether it died. */
+  threadBackgroundTerminalsTerminate(
+    params: ThreadBackgroundTerminalsTerminateParams
+  ): Promise<ThreadBackgroundTerminalsTerminateResult>;
+
   /** Delete a thread and the history Codex keeps for it. */
   threadDelete(params: ThreadDeleteParams): Promise<Record<string, never>>;
+
+  /** The permission profiles this machine offers, one page per call. */
+  permissionProfileList(params: PermissionProfileListParams): Promise<PermissionProfileListResult>;
+  /**
+   * What account this install signs Codex requests with, and whether it needs
+   * an OpenAI login at all. Answered right after `initialize`, with no thread.
+   */
+  accountRead(params?: GetAccountParams): Promise<GetAccountResult>;
+
+  /** Whether the Windows sandbox is set up. Only a `win32` answer means anything. */
+  windowsSandboxReadiness(): Promise<WindowsSandboxReadinessResult>;
 
   /** Start a new agent turn within a thread. */
   turnStart(params: TurnStartParams, timeout?: number): Promise<TurnStartResult>;
 
   /** Interrupt a running turn. */
   turnInterrupt(params: TurnInterruptParams): Promise<void>;
+
+  /**
+   * Add input to the turn already running, and answer the id of that turn.
+   *
+   * `expectedTurnId` must name the running turn: the backend answers `-32600`
+   * otherwise, and the same when no turn is running at all.
+   */
+  turnSteer(params: TurnSteerParams): Promise<TurnSteerResult>;
 
   /** Register handler for server notifications. */
   onNotification(handler: (method: string, params: unknown) => void): void;

@@ -42,6 +42,10 @@ codex app-server
   -p <profile>                    ← profile
 ```
 
+`permissions` takes no flag: it is a `thread/start` parameter, and a call that
+names it sends no `-c sandbox_mode=` at all — the environment default included —
+because a profile and a sandbox mode would each decide the same thing.
+
 `advanced.config` values serialize by type: a primitive through `String()`, an
 object or array through `JSON.stringify()`. The CLI then loads
 `~/.codex/config.toml`, applies the profile, and applies the `-c` overrides on
@@ -142,6 +146,16 @@ delivered the closing sentinel as `"%%"` then `"%\n"`. The scanner decides on
 the concatenation of the deltas and holds at most eleven characters between
 markers, or 480 inside one.
 
+**What fills the silence before it.** A hook of the user's own codex config
+writes a `statusMessage` for display — `hooks/list` on Codex CLI 0.150.1 answers
+one carrying `"Loading the engineering rules"` — and `hook/started` and
+`hook/completed` carry it. That line stands in `activity` only while the turn has
+written no marker of its own: `progressState.activityFromHook` records which of
+the two the standing line came from, a marker always overwrites a hook line, and
+a hook line never overwrites a marker. `turn/started` clears both, so each turn
+starts with the hooks speaking again until Codex does. Whatever the hook rate,
+the session keeps one line.
+
 **Why it wakes a long poll.** `signalOf` carries the instant the line arrived, so
 each new heading ends the wait and the poll answers with it. That is what the
 person waiting reads: the caller writes the line out and polls again, and a turn
@@ -149,6 +163,36 @@ of an hour reads as a list of what the work was on rather than as an hour of
 silence. A turn writes a handful of headings, so the round trips stay in the
 handful too — the deltas, the reasoning and the token counters underneath them
 move `signalOf` not at all.
+
+### Why a turn is quiet
+
+The marker is a scrape: it reports what Codex wrote, and a turn blocked,
+throttled or held by a hook writes nothing. Four notifications say why on the
+wire, and each becomes one entry of `warnings[]` on the `codex_check` answer —
+`{ method, message, at }`, the method being the one that carried it.
+
+| Notification | What becomes a warning |
+| --- | --- |
+| `warning` | The `message`, which is free text with no code to branch on |
+| `guardianWarning` | The `message`, the same way |
+| `model/safetyBuffering/updated` | The model and the `reasons`, when `showBufferingUi` is true. The flag is the backend deciding whether the person is told, so a buffering it marks silent stays in the event log alone |
+| `hook/completed` | A run whose `status` is `blocked`, `failed` or `stopped`: its `eventName`, its `status`, its `statusMessage` and the `stop`, `error` and `warning` entries it wrote |
+
+The message is free text this server did not write, so `redactPaths` runs over
+it before it is stored, the same as on the error path.
+
+**The bound.** A `preToolUse` hook fires once per tool call and the backend sends
+a `warning` whenever it wants to, and neither rate is measured. So a session
+holds a ring of the five newest warnings, each cut to 400 characters, and the
+backend repeating the standing one refreshes its `at` and adds no entry.
+
+**Why a new one wakes a long poll.** `signalOf` carries `warningSeq`, which
+counts the entries recorded. While a turn stalls, a warning is the only thing
+that will be said, and a caller holding a window of minutes would otherwise
+learn why only after the window ran out. A repeat moves `warningSeq` not at all,
+so a hook repeating itself per tool call wakes a poll once. A warning also
+travels to the activity listeners, so a held call's `notifications/progress`
+carries it before the poll it wakes returns.
 
 ## The event log
 
@@ -180,6 +224,8 @@ log at `data.method`.
 | `item/reasoning/textDelta`, `…/summaryTextDelta`, `…/summaryPartAdded` | progress | |
 | `item/plan/delta` | progress | Experimental |
 | `item/mcpToolCall/progress` | progress | |
+| `item/autoApprovalReview/started`, `autoApprovalReview/strictReviewRequired` | progress | The `auto_review` reviewer opening a decision |
+| `item/autoApprovalReview/completed` | approval_result | The decision, with the `review.status` it carried; a status other than `approved` also becomes the activity line |
 | `turn/started` | progress | The source of `activeTurnId` |
 | `turn/completed` | result | |
 | `turn/diff/updated`, `turn/plan/updated` | progress | |
@@ -188,6 +234,10 @@ log at `data.method`.
 | `thread/closed`, `thread/compacted` | progress | Neither is a failure |
 | `thread/archived`, `thread/unarchived`, `thread/name/updated`, `thread/tokenUsage/updated` | progress | |
 | `deprecationNotice`, `configWarning` | progress | |
+| `warning`, `guardianWarning` | progress | Also one `warnings[]` entry on the check answer |
+| `model/safetyBuffering/updated` | progress | A `warnings[]` entry when `showBufferingUi` is true |
+| `hook/started` | progress | The run's `statusMessage` stands in `activity` while the turn has written no marker |
+| `hook/completed` | progress | The same, plus a `warnings[]` entry for a run that blocked, failed or was stopped |
 | `model/rerouted` | progress | |
 | `fuzzyFileSearch/sessionUpdated`, `fuzzyFileSearch/sessionCompleted` | progress | |
 | `windows/worldWritableWarning` | progress | |
@@ -273,6 +323,28 @@ the failure the poll loop exists to fix.
 
 ## Approval arbitration
 
+`approvalsReviewer` decides who arbitrates. Under `user`, the schema default,
+the flow below runs. Under `auto_review` a Codex subagent decides instead, and
+this server reports the outcome rather than answering it — `thread/start`,
+`thread/fork`, `thread/resume` and every `turn/start` carry the field, and
+`meta.json` records it so a resume restores it.
+
+The two are not exclusive on the wire: whether a command that would raise
+`item/commandExecution/requestApproval` under `user` still reaches this server
+under `auto_review` is not settled here. Both paths hold — the request is
+answered exactly as it is below where one arrives, and the review notifications
+are reported whether or not one does.
+
+`item/autoApprovalReview/completed` carries `review.status`, one of
+`inProgress`, `approved`, `denied`, `timedOut` and `aborted`. That field is the
+only one read: the schema marks `GuardianApprovalReview` `[UNSTABLE]` — "This
+shape is expected to change soon" — so `rationale`, `riskLevel` and
+`userAuthorization` reach `events.jsonl` with the rest of the raw params and
+nothing branches on them. A status other than `approved` becomes the session's
+activity line, so the next poll says why the turn did what it did.
+
+Under `user`:
+
 1. app-server sends a server-initiated request:
    `item/commandExecution/requestApproval`,
    `item/fileChange/requestApproval` or `item/tool/requestUserInput`.
@@ -317,7 +389,9 @@ by `owner.json`.
   parameters it was created with, and what `turn/start` takes on every turn —
   reasoning effort, summary mode and personality are not thread state, so a turn
   that omits them falls back to `~/.codex/config.toml` rather than to what the
-  session was started with. `PersistedSessionMeta` in
+  session was started with, plus `effective`, the settings Codex answered the
+  thread call with, so a listing served from disk reports what a session runs
+  with. `PersistedSessionMeta` in
   `src/session/persistence.ts` is the field list; read it there rather than from
   a copy. The file is rewritten when any of those fields changes — the thread id
   reaches it the moment Codex hands it over, and a turn's parameters when the
@@ -376,6 +450,12 @@ Ingest then loads them into memory:
   skipped entirely, so restart-dated timestamps cannot defeat cleanup and
   retention.
 - An unrecognized status becomes `error`.
+- `approvalPolicy`, `sandbox` and `approvalsReviewer` are each held against the
+  set `codex_session` publishes and left out where the value is not in it — an
+  older release wrote `approvalPolicy: "on-failure"`, which this one no longer
+  takes. The field then reports as unknown, which is what a field nothing could
+  read is, and the session lists beside every other session of the directory
+  rather than failing the whole answer against the tool's output schema.
 - `result.json` becomes `lastResult`, so the outcome of a finished session is
   still readable.
 - The event-log sequence resumes at `lastSeq + 1`.
@@ -525,7 +605,92 @@ app-server hangs the turn when one goes unanswered.
 ### turn/start input
 
 `prompt` becomes `input: [{ type: "text", text: prompt }]`, and each entry of
-`advanced.images` appends `{ type: "localImage", path }`.
+`advanced.images` appends `{ type: "localImage", path }`. `turn/steer` takes the
+same `UserInput[]` and is built by the same function.
+
+### turn/steer
+
+`codex_session(action="steer")` sends `turn/steer` with `expectedTurnId:
+session.activeTurnId`. It adds no state to the session machine: measured on
+`codex-cli 0.150.1` with a stub holding the model response for 8 s and a steer at
+2 s, the call answered the running turn's id, sent neither `turn/started` nor
+`turn/completed`, delivered the steered text as a `userMessage` item at +8232 ms
+and made a second upstream request inside the same turn. `activeTurnId`, the
+status and `signalOf` all stand, and the turn writes its one `lastResult` at its
+end.
+
+Nothing `signalOf` reads moves, so a steer wakes no long poll — a woken waiter
+would answer with the state it already had. The steer is written to
+`events.jsonl` as a `progress` record naming `turn/steer` and the turn: Codex's
+rollout log carries the `userMessage` item without saying who sent it, so that
+record is the only place saying this server put text into a turn it did not
+start.
+
+The backend refuses a steer with `-32600` in two cases — `no active turn to
+steer` and ``expected active turn id `X` but found `Y` `` — and both reach the
+caller as `SESSION_NOT_RUNNING` carrying the backend's own sentence. Any other
+failure of the call is raised as it was.
+
+### Background terminals
+
+`ThreadBackgroundTerminalsCleanResponse.json` is `{"type":"object"}` with no
+properties, so `thread/backgroundTerminals/clean` cannot say what it cleaned.
+`clean_background_terminals` therefore measures instead of calling it:
+`thread/backgroundTerminals/list` for what is there, one
+`thread/backgroundTerminals/terminate` per `processId` — which answers
+`terminated: boolean` per process — and a second listing for what is left. The
+listing's `nextCursor` is followed to `MAX_BACKGROUND_TERMINAL_PAGES` (20) and no
+further; a cursor still standing there is reported as `truncated: true`.
+
+`clean` is the fallback for one case: a first listing that failed. The sweep then
+runs and the answer carries `cleanCalled: true` with the listing's error, so the
+caller is told the state is unknown rather than that the thread is clear. A CLI
+below 0.150.1, which serves neither `list` nor `terminate`, takes that path.
+
+### The setup probe
+
+`codex_setup` starts one app server, asks it everything it reports from the
+backend, and shuts it down: `account/read`, then `windowsSandbox/readiness` on
+Windows, then `permissionProfile/list` for the `cwd` the call named. Each answer
+is data the backend gives right after `initialize`, with no thread and no auth,
+and the connection costs one spawn plus `initialize` plus a request — 52, 37 and
+41 ms on Codex CLI 0.150.1 — which is what the tool waits on.
+
+`requiresOpenaiAuth: false` is an install whose configured model provider carries
+its own credentials, and the null account beside it is not a missing login. An
+`account/read` that fails leaves `auth.state: "unknown"` carrying the failure and
+leaves the other two questions to answer for themselves; a listing that fails
+reports `permissionProfiles.ok: false` beside the auth state that was read. A
+connection that never came up stops all three, and the report names that one
+failure once.
+
+The backend gates `windowsSandbox/readiness` on no platform — a Linux 0.150.1
+answers `{"status":"notConfigured"}`, which is what a Windows machine with no
+sandbox answers — so `process.platform === "win32"` decides whether it is asked
+at all. The MCP server and the app server run on the same machine, so that value
+is the one that counts.
+
+### Checking a permissions profile before the thread starts
+
+`thread/start` answers an id Codex does not know with
+`-32600 failed to load configuration: default_permissions requires a
+\`[permissions]\` table`, which names a TOML table the caller never wrote. So
+`permissionProfile/list` runs first, on the client that is already up, for the
+cwd of the session: the id is either in the listing and `allowed`, or the caller
+is told which ids exist. `codex_reply` runs the same check before the session
+leaves `idle`, so a bad id costs an error and not a turn.
+
+Three answers are told apart. An id no entry carries does not exist here. An
+entry carrying `allowed: false` exists and cannot be selected. A listing that
+raised, answered no `data` array, carried an entry without a string `id` and a
+boolean `allowed`, or handed back more than twenty pages without exhausting its
+cursor, is a listing that says nothing about which profiles exist — it surfaces
+as `INTERNAL` naming the reason, and the id is not sent on the guess that it is
+fine.
+
+`codex_setup` runs the same listing on the connection it opened for
+`account/read`, for the `cwd` it was given: it answers before any session
+exists, so no session's client answers for that directory.
 
 ### Reading ids out of responses
 
@@ -534,6 +699,38 @@ and the server reads the id at `thread.id` and nowhere else: a session needs a
 real thread id, so a differently shaped answer raises `INTERNAL` rather than
 carrying on with an invented one. `turn/start` answers `{ turn: Turn }` and the
 id there is only a seed — the `turn/started` notification settles `activeTurnId`.
+
+### Reading the settings out of the same responses
+
+The three thread responses carry one more block: `model`, `modelProvider`,
+`cwd`, `approvalPolicy`, `sandbox` and `approvalsReviewer`, required on each of
+them, plus an optional `reasoningEffort` and `activePermissionProfile`. It says
+what the thread runs with, which is not what the call asked for — a
+`thread/start` naming neither model nor provider on `codex-cli 0.150.1` answered
+`"model":"gpt-5.6-luna","modelProvider":"myproxy"`. The server writes that block
+onto the session as its effective settings and `codex_session` reports it. Where
+the two differ Codex's answer is what the session runs on, so the request's own
+values stay under the session's `model`, `approvalPolicy`, `sandbox`,
+`permissions` and `approvalsReviewer` and never overwrite the answer.
+
+`activePermissionProfile` is what the `sandbox` object alone cannot say: which
+profile derived it. A session started on `permissions` sets no sandbox of its
+own, so the profile id — `{"id":":read-only","extends":null}` for a
+`thread/start` naming `permissions: ":read-only"` — is the only place its
+permission level is readable. `extends` is reported only where the profile names
+a parent.
+
+`thread/resume` is where it decides most: it restores the thread from Codex's
+rollout log, so the thread's own persisted metadata says what it runs with and
+this server's `meta.json` does not.
+
+Unlike the id, none of it is load-bearing. A field the answer does not carry in
+the shape the schema gives it is a setting the session reports as unknown; the
+session runs on, and nothing stands in for the value Codex did not send.
+
+`codex-mcp:///server-info` reports `defaultModel` from the same place: the model
+answered to a `thread/start` this server sent with none. Until a start has
+measured it, it is null.
 
 ## Security
 

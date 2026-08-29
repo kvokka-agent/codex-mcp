@@ -217,8 +217,63 @@ describe("executeCodex", () => {
     ).rejects.toThrow("approvalPolicy is required");
     await expect(
       executeCodex({ prompt: "hello", approvalPolicy: "never" }, sessionManager, cwd, DEFAULTS)
-    ).rejects.toThrow("sandbox is required");
+    ).rejects.toThrow("name a sandbox or a permissions profile");
 
     expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("takes a permissions profile in place of the sandbox, and refuses the two together", async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "codex-tool-"));
+    tempDirs.push(cwd);
+    const { createSession, sessionManager } = stubManager("sess_7");
+
+    await executeCodex(
+      { prompt: "hello", approvalPolicy: "never", permissions: ":read-only" },
+      sessionManager,
+      cwd,
+      DEFAULTS
+    );
+
+    expect(createSession).toHaveBeenCalledWith(
+      "hello",
+      cwd,
+      expect.objectContaining({ approvalPolicy: "never", sandbox: undefined }),
+      "low",
+      expect.objectContaining({ permissions: ":read-only" })
+    );
+
+    await expect(
+      executeCodex(
+        {
+          prompt: "hello",
+          approvalPolicy: "never",
+          sandbox: "read-only",
+          permissions: ":read-only",
+        },
+        sessionManager,
+        cwd,
+        DEFAULTS
+      )
+    ).rejects.toThrow("name sandbox or permissions, not both");
+  });
+
+  it("keeps the environment's sandbox off a call that named a permissions profile", async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "codex-tool-"));
+    tempDirs.push(cwd);
+    const { createSession, sessionManager } = stubManager("sess_8");
+
+    await executeCodex({ prompt: "hello", permissions: ":workspace" }, sessionManager, cwd, {
+      ...DEFAULTS,
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+    });
+
+    expect(createSession).toHaveBeenCalledWith(
+      "hello",
+      cwd,
+      expect.objectContaining({ sandbox: undefined }),
+      "low",
+      expect.objectContaining({ permissions: ":workspace" })
+    );
   });
 });

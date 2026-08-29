@@ -27,7 +27,7 @@ Minimum pass target:
 2. `codex` and `codex_reply` are asynchronous (return immediately, then progress via polling).
 3. Approval flow works (`respond_permission`) and session state changes correctly.
 4. A real coding task closes the loop: test fails -> agent fixes -> test passes.
-5. Session management works (`list/get/resume/cancel/interrupt/fork/clean/clean_background_terminals`).
+5. Session management works (`list/get/resume/cancel/interrupt/steer/fork/clean/clean_background_terminals/terminate_background_terminal`).
 6. A session whose server went away comes back as `abandoned` and `resume` carries its thread on.
 
 Optional but recommended:
@@ -109,7 +109,7 @@ Expected tool names:
 4. `codex_session`
 5. `codex_check`
 
-Call `codex_setup` first. It reports executable resolution, `codex login status`, the Codex CLI version against the minimum this server drives, the state directory, and whether user/project `config.toml` files are visible. Fix anything in `nextSteps` before TC1; `ready: false` means later tests will fail for environment reasons, not server reasons.
+Call `codex_setup` first. It reports executable resolution, the account `account/read` answered with, the Codex CLI version against the minimum this server drives, the Windows sandbox on Windows, the state directory, and whether user/project `config.toml` files are visible. Fix anything in `nextSteps` before TC1; `ready: false` means later tests will fail for environment reasons, not server reasons.
 
 ## 3.2 Resource Discovery
 
@@ -256,8 +256,9 @@ When starting a session with `codex`, these are required:
 
 1. `prompt`
 2. `approvalPolicy`: `untrusted|on-request|never`
-3. `sandbox`: `read-only|workspace-write|danger-full-access`
+3. `sandbox`: `read-only|workspace-write|danger-full-access`, or `permissions` naming a profile id instead — one of the two, never both
 4. `effort` is optional: any non-empty string, and Codex 0.150.1 advertises `low|medium|high|xhigh|max|ultra` (default: `low`). For complex tasks, explicitly set `medium`, `high` or `xhigh`.
+5. `approvalsReviewer` is optional: `user` (default) or `auto_review`.
 
 For `codex_reply`, required:
 
@@ -268,12 +269,12 @@ For `codex_reply`, required:
 
 After `codex` or `codex_reply`:
 
-1. Check with `codex_check(action="poll")`. Every action — `poll`, `respond_permission`, `respond_user_input` — answers with the same payload: `{ sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }`.
+1. Check with `codex_check(action="poll")`. Every action — `poll`, `respond_permission`, `respond_user_input` — answers with the same payload: `{ sessionId, status, progress, actions[], warnings[], result?, interactionState, recommendedNextAction }`.
 2. No check returns the events of the turn. Codex writes the whole run to its rollout log under `~/.codex/sessions/**/rollout-*.jsonl`, and codex-mcp writes its own view to `events.jsonl` in the state directory. Read either from disk; the tool reports state.
 3. Terminal statuses are `idle`, `error`, `cancelled`. `abandoned` also ends the turn, but the session is resumable rather than finished.
 4. `result` arrives with the first check that sees a terminal status and carries the turn's final answer. Every later check of that terminal session carries the same result again.
-5. `waitMs` long-polls: the call blocks until the status changes, a new action arrives, or the turn ends. Reasoning, command output and token counters do not end the wait. It is capped at `3600000` ms and cut further to what the MCP client sits through in one tool call, and a session accepts 4 concurrent long polls — the fifth returns immediately instead of waiting.
-6. `progress` reports `phase`, `lastEventAt`, `activeTurnId`, `pendingActionCount`, `tokens` when the backend reports them, and `activity` — one line in Codex's own words saying what it is doing, absent until the turn writes one. `interactionState` and `recommendedNextAction` tell you what to call next.
+5. `waitMs` long-polls: the call blocks until the status changes, a new action arrives, a new warning arrives, or the turn ends. Reasoning, command output and token counters do not end the wait. It is capped at `3600000` ms and cut further to what the MCP client sits through in one tool call, and a session accepts 4 concurrent long polls — the fifth returns immediately instead of waiting.
+6. `progress` reports `phase`, `lastEventAt`, `activeTurnId`, `pendingActionCount`, `tokens` when the backend reports them, and `activity` — one line in Codex's own words saying what it is doing, or the line a hook wrote while the turn has written none, absent until one of them arrives. `warnings[]` says why a turn is producing no output at all. `interactionState` and `recommendedNextAction` tell you what to call next.
 7. Inputs the tool no longer takes — `cursor`, `nextCursor`, `maxEvents`, `responseMode`, `pollOptions` — are refused with a message naming what replaced them.
 
 codex-mcp does not poll the app-server. The backend pushes JSON-RPC notifications as they happen, and the only recurring timer in the server is the once-a-minute TTL sweep. During long reasoning phases 30-60+ seconds with no notification is normal.
@@ -451,13 +452,22 @@ Pass criteria:
 Validate:
 
 1. `action="list"` returns every session of the state directory, each with its `activity` and its `owner` when a running server holds it.
-2. `action="get"` returns details.
+2. `action="get"` returns details, `effective` among them: the model, provider,
+   reasoning effort, approval policy, sandbox, approvals reviewer and active
+   permission profile Codex answered the thread call with. Start a session
+   naming no `model` and confirm `effective.model` names the model `config.toml`
+   picked, while `model` stays absent, and that `effective.approvalsReviewer`
+   names a reviewer the call never asked for.
 3. `action="cancel"` moves to `cancelled`.
 4. `action="interrupt"` works only while active turn is running.
 5. `action="fork"` creates a new session/thread branch.
 6. `action="resume"` is refused with `SESSION_BUSY` on a session this server already drives, and with `SESSION_HELD_BY_OTHER_SERVER` on one another running server holds. Section 7.7 covers the case it is for.
 7. `action="clean"` batch-removes terminal sessions. Run it first with `dryRun: true` and confirm `matchedSessionIds` lists only `idle`/`error`/`cancelled` sessions, then run it for real and confirm `removedCount` matches and `codex_session(action="list")` no longer shows them.
-8. `action="clean_background_terminals"` returns success and does not crash the session. **Note:** codex-mcp asks for the `experimentalApi` capability during `initialize`, so a CLI build that carries this method serves it. An older build that does not know the capability answers `Error [INTERNAL]` naming `experimentalApi` — record the error and continue.
+8. `action="clean_background_terminals"` answers `backgroundTerminals` and does not crash the session. On a thread that ran no background command it reads `terminals: []`, `survivors: []`, `truncated: false`. Start one (`codex_reply` with a prompt that runs a command in the background) and confirm the same call then lists it, carries `terminated` for it, and reports it in `survivors` or as `gone: true`.
+9. `action="terminate_background_terminal"` with a `processId` from step 8 answers `terminals: [{ processId, terminated }]`. A `processId` no longer running answers `terminated: false` rather than an error.
+10. `action="steer"` on a running turn answers `turnId` equal to the `activeTurnId` the previous poll reported, and `status: "running"`. Use the slow prompt below, poll once to confirm `running`, then steer with `"Also list the file sizes"`. The session stays on the same turn — no new `turnId` appears — and the final `result` covers what the steer asked for. Steering an `idle` session answers `SESSION_NOT_RUNNING`; steering with no `prompt` answers `INVALID_ARGUMENT`.
+
+**Note:** `thread/backgroundTerminals/list` and `…/terminate` arrived in Codex CLI 0.150; the floor this server drives is 0.101.0. codex-mcp asks for the `experimentalApi` capability during `initialize`, so a build that carries these methods serves them. A build that does not answers `Error [INTERNAL]`: `clean_background_terminals` falls back to `thread/backgroundTerminals/clean` and reports `cleanCalled: true` with `listError.stage: "before"`, and `terminate_background_terminal` raises the error. Record which of the two you saw and continue.
 
 Example payload:
 
@@ -465,7 +475,13 @@ Example payload:
 { "action": "clean", "statuses": ["cancelled"], "olderThanMs": 0, "dryRun": true }
 { "action": "clean", "statuses": ["cancelled"], "olderThanMs": 0 }
 { "action": "clean_background_terminals", "sessionId": "<SESSION_ID>" }
+{ "action": "terminate_background_terminal", "sessionId": "<SESSION_ID>", "processId": "<PROCESS_ID>" }
+{ "action": "steer", "sessionId": "<SESSION_ID>", "prompt": "Also list the file sizes" }
 ```
+
+The `steer` action needs the same `running` window the `interrupt` trigger below
+creates, so run both against that session: steer it first, confirm the turn
+carried on, then interrupt it.
 
 Interrupt trigger strategy:
 
@@ -494,7 +510,8 @@ Pass criteria:
 2. No transport crash on management operations.
 3. `interrupt` successfully stops a running turn (or is documented as missed due to timing).
 4. `clean` reports `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }`, and the dry run removes nothing.
-5. `clean_background_terminals` returns `{ success: true, message }`, or `Error [INTERNAL]` on a CLI build that does not know the `experimentalApi` capability (see note in step 7 above).
+5. `clean_background_terminals` returns `{ sessionId, backgroundTerminals }` whose `terminals` and `survivors` match what the thread actually ran, and `terminate_background_terminal` returns the `terminated` the CLI answered — never `Error [INTERNAL]` on a CLI at 0.150 or above (see the note under step 9 for one below it).
+6. `steer` answers the running turn's own id and the turn carries on to one result covering the steered request; a steer that arrives after the turn ended answers `SESSION_NOT_RUNNING` carrying `no active turn to steer`, and is recorded as that rather than as a steer that landed.
 
 ## TC6 (Optional): Structured Output
 
@@ -612,6 +629,26 @@ Checks:
 1. Send `codex_check(action="poll", cursor=0)`, then the same with `maxEvents`, `responseMode`, and `pollOptions`. Each is refused with a message naming what replaced it.
 2. Send `codex_check(action="respond_permission", ..., waitMs=1000)`. It is refused: `waitMs` belongs to `poll`.
 
+## 7.4a Approval auto-review (`approvalsReviewer`)
+
+Checks:
+
+1. Start a session with `approvalPolicy: "on-request"`, `sandbox: "workspace-write"`, `approvalsReviewer: "auto_review"` and a prompt that must step outside the sandbox — reaching the network is the plainest one. Poll it. Expect `actions[]` to stay empty: the decision is made inside Codex and no approval reaches this server.
+2. Where the review denies, expect `progress.activity` to read "Approval auto-review denied an action of this turn", and `<STATE_DIR>/sessions/<sessionId>/events.jsonl` to carry an `approval_result` record with `method: "item/autoApprovalReview/completed"`, its `reviewId` and `status: "denied"`.
+3. Run the same prompt with `approvalsReviewer: "user"` and the same policy. Expect the approval to arrive in `actions[]` for you to answer, which is what the two settings differ in.
+4. Resume the `auto_review` session in a second server (`codex_session(action="resume")`) and reply on it. Expect the reviewer to still be `auto_review`: it is recorded in `meta.json` and goes back on `thread/resume`.
+
+## 7.4b Permission profiles (`permissions`)
+
+Checks:
+
+1. Call `codex_setup`. Expect `permissionProfiles.profiles` to carry the ids of this machine — `:read-only`, `:workspace` and `:danger-full-access` are the built-ins — each with an `allowed` flag.
+2. Start a session with `permissions: ":read-only"` and no `sandbox`. Expect it to start, and a prompt that writes a file to be refused by the profile.
+3. `codex_session(action="get")` on that session. Expect `permissions: ":read-only"` for what the call asked for, `sandbox` absent beside it, and `effective.activePermissionProfile.id` naming the profile the active permissions came from.
+4. Send `sandbox` and `permissions` together. Expect `INVALID_ARGUMENT` from the tool schema naming both, with no codex process spawned.
+5. Send `permissions: "no-such-profile"`. Expect `INVALID_ARGUMENT` listing the ids this machine offers, and not the Codex message about a `[permissions]` table.
+6. Send a `codex` call naming neither `sandbox` nor `permissions`, with `CODEX_MCP_DEFAULT_SANDBOX` unset. Expect it refused, naming both ways out.
+
 ## 7.5 Long Polling (`waitMs`)
 
 Checks:
@@ -628,7 +665,18 @@ Checks:
 2. Poll a turn that stays on one line for longer than the window. Expect `waitedMs` at the window, the same `progress.activity`, and `progress.activityStandingMs` grown by about the window.
 3. Poll with `_meta.progressToken` set. Expect a `notifications/progress` for the standing line, one per new line, and one every 30 s carrying the standing line with how long it has stood. Set `CODEX_MCP_PROGRESS_HEARTBEAT_MS=5000` and expect the repeat every five seconds instead.
 
-## 7.7 Restart Recovery And Orphan Reaping
+## 7.7 Why a turn is quiet
+
+Requires a hook in the user's own `~/.codex` config; `hooks/list` on the installed CLI shows what is configured.
+
+Checks:
+
+1. Configure a `preToolUse` hook carrying a `statusMessage` and start a turn. Expect `progress.activity` to read that message before Codex writes its first marker, and to be replaced by the marker when it arrives — the hook line does not come back for the rest of that turn.
+2. Configure a hook that refuses the command it is asked about. Expect `warnings[]` to carry an entry whose `method` is `hook/completed` and whose `message` names the event, the `blocked` status and whatever the hook said.
+3. Poll with `waitMs: 300000` while such a hook fires. Expect the call to answer on the warning rather than sitting out the window, and a repeat of the same warning not to end a later wait.
+4. Confirm `<STATE_DIR>/sessions/<sessionId>/events.jsonl` carries a `progress` record for every `hook/started` and `hook/completed`, whether or not it reached `warnings[]`.
+
+## 7.8 Restart Recovery And Orphan Reaping
 
 Requires control over the server process, so run it only when you launched codex-mcp yourself.
 
@@ -644,7 +692,7 @@ Expected:
 1. The session is present with `status: "abandoned"` and no `owner` — the work was cut off, nothing failed, and nobody holds it.
 2. Its `activity` says what it was cut off doing.
 3. `codex_reply` on it answers `SESSION_NOT_RUNNING` and names `resume`.
-4. `codex_session(action="resume", sessionId=...)` answers `status: "idle"`, and `codex_reply` then carries the same thread on — the agent knows what the interrupted turn was about.
+4. `codex_session(action="resume", sessionId=...)` answers `status: "idle"`, and `codex_reply` then carries the same thread on — the agent knows what the interrupted turn was about. Its `effective` block now carries what the rollout log says the thread runs with, which the server before the restart never recorded.
 5. A completed session recovered the same way still returns its last `result`.
 6. The `codex` child process from before the restart is gone; the server logs the reap count to stderr.
 7. Starting a second server against the same state directory reports how many sessions belong to another running codex-mcp and keeps serving; each server lists the other's sessions and acts on none of them.

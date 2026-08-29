@@ -844,7 +844,7 @@ describe("runtime metadata in server-info and compat-report", () => {
   function register(deps: {
     version?: string;
     activeSessions?: () => number;
-    observedModel?: string | null;
+    codexDefaultModel?: string | null;
     diskPersistence?: boolean;
     sessionDefaults?: SessionDefaults;
   }) {
@@ -870,7 +870,7 @@ describe("runtime metadata in server-info and compat-report", () => {
         },
         sessionManager: {
           getActiveSessionCount: deps.activeSessions ?? (() => 0),
-          getObservedDefaultModel: () => deps.observedModel ?? null,
+          getCodexDefaultModel: () => deps.codexDefaultModel ?? null,
         },
       }
     );
@@ -1002,14 +1002,14 @@ describe("runtime metadata in server-info and compat-report", () => {
     expect(on.runtimeWarnings).toEqual([]);
   });
 
-  it("marks the default model source unknown until a session reports one", () => {
-    const withoutModel = register({ observedModel: null }).json(RESOURCE_URIS.serverInfo);
-    const withModel = register({ observedModel: "gpt-5-codex" }).json(RESOURCE_URIS.serverInfo);
+  it("reports the default model Codex answered with, and null until one has", () => {
+    const withoutModel = register({ codexDefaultModel: null }).json(RESOURCE_URIS.serverInfo);
+    const withModel = register({ codexDefaultModel: "gpt-5-codex" }).json(RESOURCE_URIS.serverInfo);
 
     expect(withoutModel.defaultModel).toBeNull();
-    expect(withoutModel.defaultModelSource).toBe("unknown");
     expect(withModel.defaultModel).toBe("gpt-5-codex");
-    expect(withModel.defaultModelSource).toBe("session-default");
+    // One source, so nothing names it: null is what unknown looks like.
+    expect(withModel).not.toHaveProperty("defaultModelSource");
   });
 
   it("re-reads the live session count on every read", () => {

@@ -81,7 +81,7 @@ function collect(
   overrides: {
     version?: string;
     activeSessions?: number;
-    observedModel?: string;
+    codexDefaultModel?: string;
     diskPersistence?: boolean;
   } = {}
 ): Registered[] {
@@ -114,8 +114,8 @@ function collect(
     },
     sessionManager: {
       getActiveSessionCount: () => overrides.activeSessions ?? 3,
-      getObservedDefaultModel: () =>
-        "observedModel" in overrides ? overrides.observedModel : "o4-mini",
+      getCodexDefaultModel: () =>
+        "codexDefaultModel" in overrides ? overrides.codexDefaultModel : "o4-mini",
     } as never,
   });
 
@@ -200,7 +200,6 @@ describe("resources", () => {
     expect(payload.codexCliVersion).toBe("0.150.1");
     expect(payload.activeSessions).toBe(7);
     expect(payload.defaultModel).toBe("o4-mini");
-    expect(payload.defaultModelSource).toBe("session-default");
 
     expect(payload.supportedApprovalPolicies).toEqual(["untrusted", "on-request", "never"]);
     expect(payload.supportedSandboxModes).toEqual([
@@ -232,13 +231,13 @@ describe("resources", () => {
     }
   });
 
-  it("marks the model unknown until a session observes one", () => {
+  it("leaves the default model out until a thread/start answers one", () => {
     const payload = readJson(
-      resource(collect({ observedModel: undefined }), RESOURCE_URIS.serverInfo)
+      resource(collect({ codexDefaultModel: undefined }), RESOURCE_URIS.serverInfo)
     );
 
     expect(payload.defaultModel).toBeUndefined();
-    expect(payload.defaultModelSource).toBe("unknown");
+    expect(payload).not.toHaveProperty("defaultModelSource");
   });
 
   it("reports capability flags and the runtime block in the compat report", () => {

@@ -3,6 +3,7 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { ANSWERED_APPROVALS_REVIEWERS } from "./app-server/protocol.js";
 import { registerResources } from "./resources/register-resources.js";
 import { SessionManager, type SessionManagerOptions } from "./session/manager.js";
 import { executeCodex } from "./tools/codex.js";
@@ -14,6 +15,7 @@ import {
   ADVERTISED_EFFORT_LEVELS,
   ALL_DECISIONS,
   APPROVAL_POLICIES,
+  APPROVALS_REVIEWERS,
   CHECK_ACTIONS,
   CLEANABLE_STATUSES,
   ErrorCode,
@@ -27,7 +29,11 @@ import {
 import { PollWindow } from "./utils/poll-window.js";
 import { progressReporterFor } from "./utils/progress-notifier.js";
 import { redactPaths } from "./utils/redact.js";
-import { resolveSessionDefaults, type SessionDefaults } from "./utils/session-defaults.js";
+import {
+  resolveSessionDefaults,
+  SESSION_DEFAULT_ENV,
+  type SessionDefaults,
+} from "./utils/session-defaults.js";
 import { classifyTurnCompatibilityError, compatibilityErrorMessage } from "./utils/turn-compat.js";
 
 declare const __PKG_VERSION__: string;
@@ -118,6 +124,37 @@ const lastTurnSchema = z
     "How the last turn ended. `status` says what the session is now, and a session closed after it answered reads `cancelled`; this says what the work came to, and closing the session does not touch it."
   );
 
+/**
+ * What Codex answered the session's thread call with. `cwd` is a path, so it
+ * rides with the other sensitive fields of `get` and is absent everywhere else.
+ */
+const effectiveSettingsSchema = z
+  .object({
+    model: z.string().optional(),
+    modelProvider: z.string().optional(),
+    reasoningEffort: z.string().optional(),
+    approvalPolicy: z
+      .union([z.enum(APPROVAL_POLICIES), z.record(z.string(), z.unknown())])
+      .optional(),
+    sandbox: z.record(z.string(), z.unknown()).optional(),
+    cwd: z.string().optional(),
+    approvalsReviewer: z
+      .enum(ANSWERED_APPROVALS_REVIEWERS)
+      .optional()
+      .describe(
+        "Who Codex routes this thread's approval requests to. `guardian_subagent` is the legacy spelling of `auto_review` and is reported as answered."
+      ),
+    activePermissionProfile: z
+      .object({ id: z.string(), extends: z.string().optional() })
+      .optional()
+      .describe(
+        "The permission profile that produced the active permissions, and the only field saying which profile derived `sandbox`."
+      ),
+  })
+  .describe(
+    "The settings Codex answered with, which are the ones the session runs with. A field is absent where the answer did not carry it."
+  );
+
 const publicSessionInfoSchema = z.object({
   sessionId: z.string(),
   status: z.enum(SESSION_STATUSES),
@@ -128,6 +165,14 @@ const publicSessionInfoSchema = z.object({
   model: z.string().optional(),
   approvalPolicy: z.enum(APPROVAL_POLICIES).optional(),
   sandbox: z.enum(SANDBOX_MODES).optional(),
+  permissions: z
+    .string()
+    .optional()
+    .describe("The permission profile id the call named in place of a sandbox."),
+  approvalsReviewer: z
+    .enum(APPROVALS_REVIEWERS)
+    .optional()
+    .describe("Who the call asked to review its approval requests."),
   pendingRequestCount: z.number().int(),
   activity: z
     .string()
@@ -140,6 +185,7 @@ const publicSessionInfoSchema = z.object({
       "The codex-mcp process holding the session. Absent means nobody holds it, which is what makes it resumable."
     ),
   lastTurn: lastTurnSchema.optional(),
+  effective: effectiveSettingsSchema.optional(),
 });
 
 const errorOutputShape = {
@@ -196,7 +242,8 @@ const setupResultShape = {
   }),
   auth: z.object({
     ok: z.boolean(),
-    state: z.enum(["authenticated", "unauthenticated", "unknown"]),
+    state: z.enum(["authenticated", "unauthenticated", "not_required", "unknown"]),
+    accountType: z.enum(["apiKey", "chatgpt", "amazonBedrock"]).optional(),
     detail: z.string(),
   }),
   backend: z.object({
@@ -205,6 +252,10 @@ const setupResultShape = {
     minimumCliVersion: z.string(),
     detail: z.string(),
   }),
+  windowsSandbox: z
+    .object({ status: z.enum(["ready", "notConfigured", "updateRequired"]) })
+    .optional()
+    .describe("Windows only: what `windowsSandbox/readiness` answered."),
   runtime: z.object({
     sameMachineRequired: z.boolean(),
     stateDir: z.string(),
@@ -213,6 +264,23 @@ const setupResultShape = {
     hasUserConfig: z.boolean(),
     hasProjectConfig: z.boolean(),
   }),
+  permissionProfiles: z
+    .object({
+      ok: z.boolean(),
+      profiles: z
+        .array(
+          z.object({
+            id: z.string(),
+            allowed: z.boolean(),
+            description: z.string().optional(),
+          })
+        )
+        .optional(),
+      detail: z.string(),
+    })
+    .describe(
+      "The ids a `codex` call may pass as `permissions`. `profiles` is absent where the listing failed or was never run, which is not the same as a machine offering none."
+    ),
   warnings: z.array(z.string()),
   nextSteps: z.array(z.string()),
 };
@@ -240,7 +308,9 @@ const sessionToolInputShape = {
   sessionId: z
     .string()
     .optional()
-    .describe("Required for get/resume/cancel/interrupt/fork/clean_background_terminals"),
+    .describe(
+      "Required for get/resume/cancel/interrupt/steer/fork/clean_background_terminals/terminate_background_terminal"
+    ),
   includeSensitive: z
     .boolean()
     .default(false)
@@ -261,7 +331,74 @@ const sessionToolInputShape = {
     .boolean()
     .optional()
     .describe("For clean only. Default: true. Also remove persisted session state."),
+  processId: z
+    .string()
+    .optional()
+    .describe(
+      "For terminate_background_terminal only. The processId clean_background_terminals reported for that terminal."
+    ),
+  prompt: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "For steer only. What to add to the turn already running — a correction, a constraint, an extra task."
+    ),
 };
+
+const backgroundTerminalOutcomeSchema = z.object({
+  processId: z.string(),
+  itemId: z.string().optional(),
+  command: z.string().optional(),
+  cwd: z.string().optional(),
+  osPid: z.number().int().nullable().optional(),
+  cpuPercent: z.number().nullable().optional(),
+  rssKb: z.number().int().nullable().optional(),
+  terminated: z
+    .boolean()
+    .optional()
+    .describe(
+      "What thread/backgroundTerminals/terminate answered for this process. Absent when that call failed, and `error` says why."
+    ),
+  error: z.string().optional().describe("Why the terminate call for this process failed."),
+  gone: z
+    .boolean()
+    .optional()
+    .describe(
+      "Absent from the listing taken after the pass. Absent itself when that listing failed, which leaves this terminal's fate unknown."
+    ),
+});
+
+const backgroundTerminalsSchema = z
+  .object({
+    threadId: z.string(),
+    terminals: z
+      .array(backgroundTerminalOutcomeSchema)
+      .describe("Every terminal the call acted on, with what happened to each."),
+    survivors: z
+      .array(backgroundTerminalOutcomeSchema)
+      .optional()
+      .describe(
+        "What thread/backgroundTerminals/list answered after the pass: the terminals still standing, including any that started during it. Absent when that listing failed."
+      ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe("The listing stopped at the page bound with a cursor still to follow."),
+    cleanCalled: z
+      .boolean()
+      .optional()
+      .describe(
+        "thread/backgroundTerminals/clean swept the thread because the listing failed. It answers an empty object, so what it left running is unknown."
+      ),
+    listError: z
+      .object({ stage: z.enum(["before", "after"]), message: z.string() })
+      .optional()
+      .describe(
+        "The listing failed at this stage, so the state it would have measured is unknown."
+      ),
+  })
+  .describe("What a background-terminal action measured.");
 
 const sessionToolOutputShape = {
   sessions: z.array(publicSessionInfoSchema).optional(),
@@ -274,6 +411,8 @@ const sessionToolOutputShape = {
   model: z.string().optional(),
   approvalPolicy: z.enum(APPROVAL_POLICIES).optional(),
   sandbox: z.enum(SANDBOX_MODES).optional(),
+  permissions: z.string().optional(),
+  approvalsReviewer: z.enum(APPROVALS_REVIEWERS).optional(),
   pendingRequestCount: z.number().int().optional(),
   activity: z.string().optional(),
   lastTurn: lastTurnSchema.optional(),
@@ -282,6 +421,7 @@ const sessionToolOutputShape = {
   cwd: z.string().optional(),
   profile: z.string().optional(),
   config: z.record(z.string(), z.unknown()).optional(),
+  effective: effectiveSettingsSchema.optional(),
   pollInterval: z
     .number()
     .int()
@@ -289,11 +429,18 @@ const sessionToolOutputShape = {
     .describe(
       "Recommended minimum delay before next poll (ms): running >=120000, waiting_approval ~=1000."
     ),
+  turnId: z
+    .string()
+    .optional()
+    .describe(
+      "For steer: the turn the steer joined. It is the turn that was already running, not a new one."
+    ),
   matchedSessionIds: z.array(z.string()).optional(),
   removedSessionIds: z.array(z.string()).optional(),
   removedCount: z.number().int().optional(),
   diskSessionsRemoved: z.number().int().optional(),
   dryRun: z.boolean().optional(),
+  backgroundTerminals: backgroundTerminalsSchema.optional(),
   success: z.boolean().optional(),
   message: z.string().optional(),
   ...errorOutputShape,
@@ -333,6 +480,18 @@ const checkToolOutputShape = {
     )
     .optional()
     .describe("What the caller must answer. Empty while the turn needs nothing."),
+  warnings: z
+    .array(
+      z.object({
+        method: z.string(),
+        message: z.string(),
+        at: z.string(),
+      })
+    )
+    .optional()
+    .describe(
+      "Why the turn is producing no output, newest last: a backend warning, a model buffering reason, or a hook that blocked it. Report these beside progress.activity — the activity line is what the turn is doing, a warning is what stands in its way."
+    ),
   result: z
     .object({
       turnId: z.string(),
@@ -582,22 +741,33 @@ function codexInputShape(sessionDefaults: SessionDefaults) {
             `Optional enum: untrusted/on-request/never (default: ${sessionDefaults.approvalPolicy}).`
           )
       : z.enum(APPROVAL_POLICIES).describe("Required enum: untrusted/on-request/never."),
-    sandbox: sessionDefaults.sandbox
-      ? z
-          .enum(SANDBOX_MODES)
-          .optional()
-          .describe(
-            `Optional enum: read-only/workspace-write/danger-full-access (default: ${sessionDefaults.sandbox}).`
-          )
-      : z
-          .enum(SANDBOX_MODES)
-          .describe("Required enum: read-only/workspace-write/danger-full-access."),
+    sandbox: z
+      .enum(SANDBOX_MODES)
+      .optional()
+      .describe(
+        sessionDefaults.sandbox
+          ? `Enum: read-only/workspace-write/danger-full-access (default: ${sessionDefaults.sandbox}). Name this or \`permissions\`, never both.`
+          : "Enum: read-only/workspace-write/danger-full-access. Name this or `permissions` — the call must carry one of the two."
+      ),
+    permissions: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Named permission profile id from a `[permissions.<id>]` table of the Codex config, such as `:read-only` or `:workspace`. It carries the sandbox, so name it instead of `sandbox` and never alongside it. `codex_setup` lists the ids this machine offers; an id it does not offer is refused here with that list."
+      ),
     effort: z
       .string()
       .min(1)
       .optional()
       .describe(
         `Reasoning effort (default: ${sessionDefaults.effort}). Codex 0.150.1 advertises ${ADVERTISED_EFFORT_LEVELS.join("/")}, and each model advertises its own set — Codex refuses one the chosen model does not.`
+      ),
+    approvalsReviewer: z
+      .enum(APPROVALS_REVIEWERS)
+      .optional()
+      .describe(
+        "Who decides an approval this turn raises. `user` (the default) routes it to you: `codex_check` reports it in `actions[]` and `respond_permission` answers it. `auto_review` hands it to a Codex subagent that gathers context and applies a risk-based decision framework, so an unattended run needs no answer from you — and a review that denies an action arrives as `progress.activity`."
       ),
     cwd: z.string().optional().describe("Working directory (default: server cwd)."),
     model: z
@@ -607,6 +777,50 @@ function codexInputShape(sessionDefaults: SessionDefaults) {
     profile: z.string().optional().describe("Profile name (default: CLI default profile)."),
     advanced: codexAdvancedSchema(sessionDefaults),
   };
+}
+
+/** What the permission refinements of `codex` and `codex_reply` read. */
+interface PermissionSurfaceInput {
+  sandbox?: string | undefined;
+  permissions?: string | undefined;
+}
+
+/**
+ * `sandbox` and `permissions` name the same thing two ways, so a call names one.
+ *
+ * The pair is refused here rather than by the backend, which answers
+ * `-32600 \`permissions\` cannot be combined with \`sandbox\`` after the child
+ * process is already up.
+ */
+function rejectSandboxWithPermissions(
+  value: PermissionSurfaceInput,
+  addIssue: (path: string, message: string) => void
+): void {
+  if (value.sandbox !== undefined && value.permissions !== undefined) {
+    addIssue(
+      "permissions",
+      'Name `sandbox` or `permissions`, not both: a named profile carries the sandbox, and Codex refuses the pair with "`permissions` cannot be combined with `sandbox`".'
+    );
+  }
+}
+
+function codexInputSchema(sessionDefaults: SessionDefaults) {
+  return z.object(codexInputShape(sessionDefaults)).superRefine((value, ctx) => {
+    const addIssue = (path: string, message: string) => {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+    };
+    rejectSandboxWithPermissions(value, addIssue);
+    if (
+      value.sandbox === undefined &&
+      value.permissions === undefined &&
+      !sessionDefaults.sandbox
+    ) {
+      addIssue(
+        "sandbox",
+        `Name a sandbox — ${SANDBOX_MODES.join("/")} — or a \`permissions\` profile id. The call named neither and ${SESSION_DEFAULT_ENV.sandbox} sets none.`
+      );
+    }
+  });
 }
 
 // ── Tool 1: codex — Start a new Codex agent session ──────────────
@@ -619,7 +833,7 @@ function registerCodexTool(ctx: ToolContext): void {
       title: "Start Codex Session",
       description:
         "Start a Codex session and return `{ sessionId, threadId, status, progress }` at once — the turn runs on. Follow it with `codex_check(action='poll', waitMs=300000)` in a loop until the status is terminal: that call answers the moment Codex says it is working on something new, so write its `progress.activity` out where the person waiting reads it, then call again. See `codex-mcp:///quickstart` for the loop, `codex-mcp:///config` for parameter guidance, and `codex-mcp:///delegation-guide` for approval/sandbox presets.",
-      inputSchema: codexInputShape(sessionDefaults),
+      inputSchema: codexInputSchema(sessionDefaults),
       outputSchema: sessionStartOutputShape,
       annotations: {
         title: "Start Codex Session",
@@ -633,6 +847,50 @@ function registerCodexTool(ctx: ToolContext): void {
   );
 }
 
+const codexReplyInputSchema = z
+  .object({
+    sessionId: z.string().describe("Session ID from codex tool"),
+    prompt: z.string().describe("Follow-up message"),
+    model: z.string().optional().describe("Override model."),
+    approvalPolicy: z.enum(APPROVAL_POLICIES).optional().describe("Override approval policy."),
+    approvalsReviewer: z
+      .enum(APPROVALS_REVIEWERS)
+      .optional()
+      .describe(
+        "Override who decides an approval this turn raises: `user` routes it to you, `auto_review` to a Codex subagent. The override sticks for later turns."
+      ),
+    effort: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        `Override effort. Codex 0.150.1 advertises ${ADVERTISED_EFFORT_LEVELS.join("/")}, and each model advertises its own set — Codex refuses one the chosen model does not.`
+      ),
+    summary: z.enum(SUMMARY_MODES).optional().describe("Override summary."),
+    personality: z.enum(PERSONALITIES).optional().describe("Override personality."),
+    sandbox: z
+      .enum(SANDBOX_MODES)
+      .optional()
+      .describe("Override sandbox. Name this or `permissions`, never both."),
+    permissions: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Override the permission profile of the turn by id, such as `:read-only`. It carries the sandbox, so name it instead of `sandbox` and never alongside it. The id is recorded on the session, so a resume and a fork restore it, and an id this machine does not offer is refused with the list of the ids it does."
+      ),
+    cwd: z.string().optional().describe("Override cwd."),
+    outputSchema: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe("Structured output schema override (top-level in codex_reply)."),
+  })
+  .superRefine((value, ctx) => {
+    rejectSandboxWithPermissions(value, (path, message) => {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+    });
+  });
+
 // ── Tool 2: codex_reply — Continue an existing session ───────────
 
 function registerCodexReplyTool(ctx: ToolContext): void {
@@ -643,27 +901,7 @@ function registerCodexReplyTool(ctx: ToolContext): void {
       title: "Continue Codex Session",
       description:
         "Continue existing session. Allowed in `idle`/`error`; otherwise `SESSION_BUSY`. Returns at once and the turn runs on; follow it with the same `codex_check(action='poll', waitMs=300000)` loop as `codex`.",
-      inputSchema: {
-        sessionId: z.string().describe("Session ID from codex tool"),
-        prompt: z.string().describe("Follow-up message"),
-        model: z.string().optional().describe("Override model."),
-        approvalPolicy: z.enum(APPROVAL_POLICIES).optional().describe("Override approval policy."),
-        effort: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(
-            `Override effort. Codex 0.150.1 advertises ${ADVERTISED_EFFORT_LEVELS.join("/")}, and each model advertises its own set — Codex refuses one the chosen model does not.`
-          ),
-        summary: z.enum(SUMMARY_MODES).optional().describe("Override summary."),
-        personality: z.enum(PERSONALITIES).optional().describe("Override personality."),
-        sandbox: z.enum(SANDBOX_MODES).optional().describe("Override sandbox."),
-        cwd: z.string().optional().describe("Override cwd."),
-        outputSchema: z
-          .record(z.string(), z.unknown())
-          .optional()
-          .describe("Structured output schema override (top-level in codex_reply)."),
-      },
+      inputSchema: codexReplyInputSchema,
       outputSchema: sessionStartOutputShape,
       annotations: {
         title: "Continue Codex Session",
@@ -684,7 +922,7 @@ function registerCodexSetupTool(ctx: ToolContext): void {
     {
       title: "Codex Setup",
       description:
-        "Run local readiness checks for codex-mcp: executable resolution, login status, Codex CLI version against the minimum this server drives, and project config. Use this before starting a session when setup is uncertain.",
+        "Run local readiness checks for codex-mcp: executable resolution, the account the app server answers with, Codex CLI version against the minimum this server drives, the Windows sandbox on Windows, project config, and the permission profile ids this machine offers as `permissions`. Use this before starting a session when setup is uncertain, or to learn which profile ids exist here.",
       inputSchema: {
         cwd: z
           .string()
@@ -700,7 +938,7 @@ function registerCodexSetupTool(ctx: ToolContext): void {
         openWorldHint: false,
       },
     },
-    (args) => toolEnvelope(executeCodexSetup(args, serverCwd), false)
+    (args) => runTool(() => executeCodexSetup(args, serverCwd))
   );
 }
 
@@ -712,16 +950,18 @@ function registerCodexSessionTool(ctx: ToolContext): void {
     "codex_session",
     {
       title: "Manage Sessions",
-      description: `Session actions: list, get, resume, cancel, interrupt, fork, clean, clean_background_terminals.
+      description: `Session actions: list, get, resume, cancel, interrupt, steer, fork, clean, clean_background_terminals, terminate_background_terminal.
 
 - list: every session of the state directory, this server's and every other server's. Each carries \`activity\` — what it last said it was doing — and \`owner\`, the process holding it. A session with status \`abandoned\` and no \`owner\` was cut off when its server went away and can be resumed.
 - get: details. includeSensitive defaults to false; true adds threadId/cwd/profile/config.
 - resume: pick an \`abandoned\` session back up and drive it from here. Codex restores the thread from its rollout log, including the turn it was interrupted in; continue with codex_reply. A session another running server holds is refused.
 - cancel: terminal.
-- interrupt: stop current turn.
+- interrupt: stop current turn, throwing away what it had done.
+- steer: add to the turn already running instead of stopping it. Takes prompt. No turn starts: turnId is the turn the steer joined, status stays running, and the turn's one result still comes at its end — carry on polling. Codex reads the added text at the turn's next model round trip, so a steer sent as a turn ends can miss it, and that answers SESSION_NOT_RUNNING naming the turn rather than reporting a steer that landed.
 - fork: clone current thread into a new session; source remains unchanged.
 - clean: batch-remove idle/error/cancelled sessions, optionally from disk too. Pass statuses:["abandoned"] to drop cut-off sessions instead of resuming them.
-- clean_background_terminals: ask app-server to clean stale background terminals for this thread.`,
+- clean_background_terminals: terminate every background terminal of this thread and answer what happened. backgroundTerminals.terminals lists what was there, each with terminated — what Codex answered for that process — and gone, measured by listing the thread again afterwards. backgroundTerminals.survivors is what was still standing at the end. A listing that failed leaves listError and no measurement, never a claim that the thread is clear.
+- terminate_background_terminal: terminate one of them. Takes processId, from a clean_background_terminals answer, and reports terminated; a process that stayed up answers false rather than raising.`,
       inputSchema: sessionToolInputShape,
       outputSchema: sessionToolOutputShape,
       annotations: {

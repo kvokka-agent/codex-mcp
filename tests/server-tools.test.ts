@@ -36,6 +36,7 @@ class MockClient extends EventEmitter {
     return { turn: { id: "turn_mock" } };
   });
   turnInterrupt = jest.fn(async () => {});
+  turnSteer = jest.fn(async () => ({ turnId: "turn_mock" }));
   respondToServer = jest.fn();
   respondErrorToServer = jest.fn();
   destroy = jest.fn(async () => {});
@@ -296,6 +297,30 @@ describe("server tool registration", () => {
       );
       expect(structured.threadId).toBe("thread_mock");
       expect(structured.cwd).toBe(process.cwd());
+    });
+
+    it("steers a running turn and answers within the published output schema", async () => {
+      const sessionId = await startSession();
+
+      const res = await callTool("codex_session", {
+        action: "steer",
+        sessionId,
+        prompt: "not that directory",
+      });
+
+      expect(res.isError).toBe(false);
+      const structured = present(
+        res.structuredContent,
+        "the codex_session steer structured content"
+      );
+      // The turn already running, which turn/start seeded as activeTurnId.
+      expect(structured.turnId).toBe("turn_mock");
+      expect(structured.status).toBe("running");
+      expect(client.turnSteer).toHaveBeenCalledWith({
+        threadId: "thread_mock",
+        expectedTurnId: "turn_mock",
+        input: [{ type: "text", text: "not that directory" }],
+      });
     });
 
     it("marks a tool result carrying isError as an error response", async () => {

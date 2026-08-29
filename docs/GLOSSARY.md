@@ -42,10 +42,22 @@ this server entirely.
 result, an error, a cancellation, or the death of the process driving it. Only
 one turn of a session runs at a time; different sessions run at once.
 
+**steer** — adding input to the turn that is already running, through
+`codex_session(action="steer")`. No turn starts and nothing already done is
+thrown away: Codex reads the added text at the turn's next model round trip and
+the turn answers once, at its end.
+
 **result** — what a finished turn answers with: the final assistant text,
 structured output when the caller asked for a schema, the turn's status and its
 outcome. Every `codex_check` of a terminal session carries it, so a caller that
 lost it reads it back.
+
+**effective settings** — what Codex answered the session's thread call with:
+the model, the model provider, the reasoning effort, the approval policy, the
+sandbox policy, the approvals reviewer, the permission profile the sandbox came
+from and the cwd the thread actually runs with. `codex_session` reports them as
+`effective`, beside the values the call asked for. A setting absent from the
+block is one the answer did not carry, which means unknown.
 
 **rollout log** — Codex's own transcript of a thread, written by the Codex CLI
 under `~/.codex/sessions/`. Every reasoning step, command and message of a turn
@@ -78,6 +90,18 @@ backend reported, and the activity.
 **activity** — one line in Codex's own words saying what it is doing right now,
 carried as `progress.activity`. It is a heading, not a percentage: the newest
 line overwrites the one before it, and nothing accumulates.
+
+**warning** — one thing the backend said about a turn that is producing no
+output, carried in `warnings[]`: a `warning` or `guardianWarning` message, a
+model whose output is being held back, or a hook that blocked the turn. The
+activity says what the turn is doing; a warning says what stands in its way. The
+five newest are kept.
+
+**hook** — a command, prompt or agent the user configured in their own `~/.codex`
+config to run at a point of a turn. Codex reports each run as `hook/started` and
+`hook/completed`; the line its author wrote for display stands in the activity
+while the turn has written no marker, and a run that blocked the turn becomes a
+warning.
 
 **progress notification** — `notifications/progress`, sent to a client that put
 `_meta.progressToken` on its call, while that call is still being held. It
@@ -120,7 +144,20 @@ file, when the approval policy asks for one. The caller answers it with
 caller states its own permission level rather than inheriting a default.
 
 **sandbox** — what Codex may touch: `read-only`, `workspace-write` or
-`danger-full-access`. Required on every `codex` call.
+`danger-full-access`. Every `codex` call names this or a `permissions` profile.
+
+**permissions profile** — a named `[permissions.<id>]` table of the user's Codex
+config, passed as `permissions`. It carries the sandbox, so it replaces
+`sandbox` rather than joining it, and `codex_setup` lists the ids a machine
+offers.
+
+**approvals reviewer** — who decides an approval, set with `approvalsReviewer`.
+`user` routes it to the caller; `auto_review` routes it to a Codex subagent, and
+the caller reads the decision rather than making it.
+
+**review** — one decision the `auto_review` reviewer made. Its status is
+`inProgress`, `approved`, `denied`, `timedOut` or `aborted`; anything but
+`approved` becomes the session's activity line.
 
 **approval timeout** — how long an unanswered approval waits before the server
 declines it for the caller, set per session with `advanced.approvalTimeoutMs`.

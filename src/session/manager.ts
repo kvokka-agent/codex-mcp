@@ -7,6 +7,10 @@ import { AppServerClient } from "../app-server/client.js";
 import type { ICodexClient } from "../app-server/client-interface.js";
 import type { AppServerSpawnOptions } from "../app-server/lifecycle.js";
 import {
+  ANSWERED_APPROVALS_REVIEWERS,
+  APPROVAL_POLICY_PRESETS,
+  type AskForApproval,
+  type AskForApprovalGranular,
   type CommandApprovalParams,
   type CommandApprovalResponse,
   type DynamicToolCallResponse,
@@ -14,7 +18,10 @@ import {
   type LegacyApprovalResponse,
   Methods,
   type RequestId,
+  SANDBOX_POLICY_TYPES,
+  type SandboxPolicy,
   type TurnStartParams,
+  type TurnSteerResult,
   toSandboxPolicy,
   type UserInput,
   type UserInputRequestResponse,
@@ -27,7 +34,12 @@ import {
   readOwner,
 } from "../persistence/index.js";
 import {
+  APPROVAL_POLICIES,
+  APPROVALS_REVIEWERS,
   type ApprovalPolicy,
+  type ApprovalsReviewer,
+  type BackgroundTerminalOutcome,
+  type BackgroundTerminalsReport,
   type CheckResult,
   CLEANUP_INTERVAL_MS,
   type CleanableStatus,
@@ -37,6 +49,8 @@ import {
   DEFAULT_POLL_INTERVAL,
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
+  type EffectivePermissionProfile,
+  type EffectiveSettings,
   type EffortLevel,
   ErrorCode,
   FILE_CHANGE_DECISIONS,
@@ -49,7 +63,9 @@ import {
   type ProgressInfo,
   type ProgressPhase,
   type ProgressTokens,
+  type PublicEffectiveSettings,
   type PublicSessionInfo,
+  SANDBOX_MODES,
   type SandboxMode,
   SESSION_STATUSES,
   type SensitiveSessionInfo,
@@ -59,6 +75,8 @@ import {
   type SessionSignal,
   type SessionStartResult,
   type SessionStatus,
+  type SessionWarning,
+  type SteerResult,
   type SummaryMode,
   type TurnResult,
   WAITING_APPROVAL_POLL_INTERVAL,
@@ -78,7 +96,22 @@ import {
   stripActivityMarkers,
   stripActivityMarkersFromTurn,
 } from "./activity-marker.js";
+import { assertPermissionProfileSelectable } from "./permission-profiles.js";
 import type { PidDetails } from "./persistence.js";
+import {
+  bufferingWarningMessage,
+  displayText,
+  hookActivityLine,
+  hookWarningMessage,
+  MAX_SESSION_WARNINGS,
+} from "./warnings.js";
+
+/**
+ * Pages of `thread/backgroundTerminals/list` one call reads. The cursor is
+ * followed to this bound and no further, and the report says `truncated: true`
+ * when a cursor was still standing there.
+ */
+const MAX_BACKGROUND_TERMINAL_PAGES = 20;
 
 const AUTH_REFRESH_UNSUPPORTED_CODE = -32000;
 const AUTH_REFRESH_UNSUPPORTED_MESSAGE =
@@ -136,10 +169,12 @@ export interface SessionManagerOptions {
   persistence?: import("./persistence.js").SessionPersistence;
 }
 
-/** What `createSession` may be given beyond the session's own spawn options. */
+/** What `createSession` may be given beyond its prompt and its spawn options. */
 interface CreateSessionAdvanced {
   baseInstructions?: string;
   developerInstructions?: string;
+  approvalsReviewer?: ApprovalsReviewer;
+  permissions?: string;
   personality?: Personality;
   ephemeral?: boolean;
   config?: Record<string, unknown>;
@@ -192,6 +227,8 @@ const PLAIN_PROGRESS_METHODS = new Set<string>([
   Methods.REASONING_SUMMARY_PART_ADDED,
   Methods.PLAN_DELTA,
   Methods.MCP_TOOL_PROGRESS,
+  Methods.AUTO_APPROVAL_REVIEW_STARTED,
+  Methods.AUTO_APPROVAL_REVIEW_STRICT_REQUIRED,
   Methods.TURN_DIFF_UPDATED,
   Methods.TURN_PLAN_UPDATED,
   Methods.MODEL_REROUTED,
@@ -246,6 +283,8 @@ export class SessionManager {
   private sessionNotifiers = new Map<string, Set<() => void>>();
   /** The signal each session last woke its waiters on — see `notifyWaiters`. */
   private lastNotifiedSignal = new Map<string, string>();
+  /** The model Codex answered a `thread/start` that named none with — see `getCodexDefaultModel`. */
+  private codexDefaultModel: string | null = null;
 
   constructor(options: SessionManagerOptions = {}) {
     this.createClient = options.createClient ?? (() => new AppServerClient());
@@ -509,6 +548,13 @@ export class SessionManager {
     // Start app-server subprocess
     await client.start(spawnOpts);
 
+    // An id Codex does not know fails `thread/start` with a message about a
+    // `[permissions]` TOML table the caller never wrote, so the id is held
+    // against the machine's own listing first.
+    if (session.permissions !== undefined) {
+      await assertPermissionProfileSelectable(client, session.permissions, session.cwd);
+    }
+
     // Start thread
     const threadStartResult = await client.threadStart({
       cwd: session.cwd,
@@ -520,30 +566,30 @@ export class SessionManager {
       baseInstructions: advanced?.baseInstructions,
       developerInstructions: session.developerInstructions,
       config: advanced?.config,
+      approvalsReviewer: session.approvalsReviewer,
+      permissions: session.permissions,
     });
     const threadId = extractThreadId(threadStartResult);
     session.threadId = threadId;
+    // Codex answers with the settings the thread runs with, and where they
+    // differ from what the call asked for its answer is the truth: a start
+    // naming no model is answered with the model `config.toml` picked.
+    this.recordEffectiveSettings(session, threadStartResult);
+    this.recordCodexDefaultModel(spawnOpts.model, session.effective?.model);
     // The first turn can run for minutes and a client can die inside it. The
     // thread id is what a resume needs, so it goes to disk on arrival rather
     // than with the next status change.
     this.persistSessionIfChanged(session);
 
-    // Build input array
-    const input: UserInput[] = [{ type: "text", text: prompt }];
-    if (resolvedImages) {
-      for (const imagePath of resolvedImages) {
-        input.push({ type: "localImage", path: imagePath });
-      }
-    }
-
     // Start first turn
     this.markTurnOutputSchema(sessionId, advanced?.outputSchema);
     const turnStart = await this.startTurnWithCompatibilityFallback(client, {
       threadId,
-      input,
+      input: buildUserInput(prompt, resolvedImages),
       effort: session.effort,
       summary: advanced?.summary,
       outputSchema: advanced?.outputSchema,
+      approvalsReviewer: session.approvalsReviewer,
     });
     const turnStartResult = turnStart.turnStartResult;
 
@@ -598,9 +644,18 @@ export class SessionManager {
 
     const client = this.getClientOrThrow(sessionId);
 
-    this.openReplyTurn(session);
-
     const resolvedCwd = resolveTurnCwd(session, sessionId, overrides);
+    // Held against the machine's listing before the session leaves `idle`, so a
+    // profile id nobody offers costs the caller an error and not a turn.
+    if (overrides?.permissions !== undefined) {
+      await assertPermissionProfileSelectable(
+        client,
+        overrides.permissions,
+        resolvedCwd ?? session.cwd
+      );
+    }
+
+    this.openReplyTurn(session);
 
     const turnParams = buildTurnParams(session, session.threadId, prompt, overrides, resolvedCwd);
 
@@ -720,26 +775,34 @@ export class SessionManager {
   }
 
   /**
-   * Best-effort effective default model observed from recent sessions.
-   * Returns null when no model can be inferred from in-memory state.
+   * The model Codex starts a thread on when the request names none.
+   *
+   * It is read off the answer to a `thread/start` this server sent with no
+   * model, so it is a model Codex reported running rather than one guessed from
+   * the sessions in memory. Null until such a start has been answered — where
+   * every start names a model, `CODEX_MCP_DEFAULT_MODEL` included, nothing here
+   * measures the default and it stays unknown.
    */
-  getObservedDefaultModel(): string | null {
-    let latestModel: string | null = null;
-    let latestTs = Number.NEGATIVE_INFINITY;
+  getCodexDefaultModel(): string | null {
+    return this.codexDefaultModel;
+  }
 
-    for (const session of this.sessions.values()) {
-      if (session.status === "cancelled") continue;
-      if (typeof session.model !== "string" || session.model.length === 0) continue;
+  /**
+   * Put the settings Codex just answered on the session.
+   *
+   * An answer carrying nothing readable leaves the last ones it gave in place:
+   * those are still settings Codex named, and a half of one answer merged into
+   * another would report a set that never ran together.
+   */
+  private recordEffectiveSettings(session: SessionInfo, answer: unknown): void {
+    session.effective = readEffectiveSettings(answer) ?? session.effective;
+  }
 
-      const ts = Date.parse(session.lastActiveAt);
-      const comparableTs = Number.isFinite(ts) ? ts : Number.NEGATIVE_INFINITY;
-      if (comparableTs >= latestTs) {
-        latestTs = comparableTs;
-        latestModel = session.model;
-      }
+  /** Keep the answer to a start that named no model: that answer is the default. */
+  private recordCodexDefaultModel(requestedModel: string | undefined, answered?: string): void {
+    if (requestedModel === undefined && answered !== undefined) {
+      this.codexDefaultModel = answered;
     }
-
-    return latestModel;
   }
 
   getSession(
@@ -880,60 +943,241 @@ export class SessionManager {
     }
   }
 
-  async interruptSession(sessionId: string): Promise<void> {
+  /**
+   * The session, its client and the turn it is running, or the error saying why not.
+   *
+   * `words` names the call in the errors the caller reads: `verb` as in "Cannot
+   * steer session in idle state", `done` as in "cannot be steered".
+   */
+  private runningTurnTarget(
+    sessionId: string,
+    words: { verb: string; done: string }
+  ): { session: SessionInfo; client: ICodexClient; threadId: string; turnId: string } {
     const session = this.getSessionOrThrow(sessionId);
 
     // Status first: cancelSession drops the client, so a client lookup ahead of this
     // reports a cancelled session as SESSION_NOT_FOUND.
     if (session.status === "cancelled") {
       throw new Error(
-        `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be interrupted`
+        `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be ${words.done}`
       );
     }
     if (session.status !== "running" && session.status !== "waiting_approval") {
       throw new Error(
-        `Error [${ErrorCode.SESSION_NOT_RUNNING}]: Cannot interrupt session in ${session.status} state`
+        `Error [${ErrorCode.SESSION_NOT_RUNNING}]: Cannot ${words.verb} session in ${session.status} state`
       );
     }
 
     if (!session.threadId || !session.activeTurnId) {
       throw new Error(
-        `Error [${ErrorCode.INTERNAL}]: Missing threadId or activeTurnId for interrupt`
+        `Error [${ErrorCode.INTERNAL}]: Missing threadId or activeTurnId for ${words.verb}`
       );
     }
 
-    const client = this.getClientOrThrow(sessionId);
-
-    await client.turnInterrupt({
+    return {
+      session,
+      client: this.getClientOrThrow(sessionId),
       threadId: session.threadId,
       turnId: session.activeTurnId,
-    });
+    };
   }
 
-  async cleanBackgroundTerminals(sessionId: string): Promise<void> {
+  async interruptSession(sessionId: string): Promise<void> {
+    const { client, threadId, turnId } = this.runningTurnTarget(sessionId, {
+      verb: "interrupt",
+      done: "interrupted",
+    });
+
+    await client.turnInterrupt({ threadId, turnId });
+  }
+
+  /**
+   * Add input to the turn already running, so a caller can correct it instead of
+   * throwing it away with `interruptSession`.
+   *
+   * Measured on codex-cli 0.150.1 against a stub holding the model response for
+   * 8s, steered at 2s: `turn/steer` answered the running turn's id, sent no
+   * `turn/started` and no `turn/completed`, delivered the steered text as a
+   * `userMessage` item at +8232ms — the first model round trip after the steer —
+   * and made a second upstream request inside the same turn carrying it. So
+   * `activeTurnId`, `status` and `signalOf` do not move, and the one
+   * `lastResult` of the turn is still written at its end.
+   */
+  async steerSession(sessionId: string, prompt: string): Promise<SteerResult> {
+    const { session, client, threadId, turnId } = this.runningTurnTarget(sessionId, {
+      verb: "steer",
+      done: "steered",
+    });
+
+    let answer: TurnSteerResult;
+    try {
+      answer = await client.turnSteer({
+        threadId,
+        expectedTurnId: turnId,
+        input: buildUserInput(prompt),
+      });
+    } catch (err) {
+      throw steerRefusal(sessionId, turnId, err) ?? err;
+    }
+
+    session.lastActiveAt = new Date().toISOString();
+    // Codex's rollout log holds the `userMessage` item and not who sent it, so
+    // `events.jsonl` is the only place recording that this server put text into a
+    // turn it did not start, and when.
+    recordEvent(session, "progress", {
+      method: Methods.TURN_STEER,
+      threadId,
+      turnId: answer.turnId,
+    });
+    // No `notifyWaiters`: a steer moves no field `signalOf` reads — the status,
+    // the open request ids, the result instant, the activity instant and the
+    // warning count all stand — so waking a long poll would hand it the state it
+    // already has and spend a round trip of the caller's budget. The steer's own
+    // answer is what says it landed.
+
+    return {
+      sessionId,
+      threadId,
+      turnId: answer.turnId,
+      status: session.status,
+      message:
+        `Steered turn ${answer.turnId}, which was already running: no turn started, and this is the id of the turn the steer joined. ` +
+        `Codex reads the added text at the turn's next model round trip, and the turn's one result still comes at its end — carry on polling.`,
+    };
+  }
+
+  /**
+   * Terminate every background terminal of a session's thread and report what
+   * happened to each.
+   *
+   * `thread/backgroundTerminals/clean` answers an empty object, so it cannot say
+   * which terminals it left running. The pass lists the thread, terminates each
+   * process by id — `thread/backgroundTerminals/terminate` answers `terminated`
+   * per process — and lists again, so `gone` is measured rather than assumed. A
+   * terminal that started during the pass is in the second listing and in no
+   * `terminals` entry: nothing tried to stop it, and the caller sees it standing.
+   */
+  async cleanBackgroundTerminals(sessionId: string): Promise<BackgroundTerminalsReport> {
+    const { session, client, threadId } = this.backgroundTerminalTarget(sessionId);
+
+    let listed: { terminals: BackgroundTerminalOutcome[]; truncated: boolean };
+    try {
+      listed = await this.listBackgroundTerminals(client, threadId);
+    } catch (err: unknown) {
+      // A CLI below 0.150.1 serves no thread/backgroundTerminals/list. The sweep
+      // still runs, and it reports nothing, so the caller is told exactly that.
+      await client.threadBackgroundTerminalsClean({ threadId });
+      const report: BackgroundTerminalsReport = {
+        threadId,
+        terminals: [],
+        cleanCalled: true,
+        listError: { stage: "before", message: messageOf(err) },
+      };
+      this.recordBackgroundTerminals(session, report);
+      return report;
+    }
+
+    for (const terminal of listed.terminals) {
+      try {
+        const answer = await client.threadBackgroundTerminalsTerminate({
+          threadId,
+          processId: terminal.processId,
+        });
+        terminal.terminated = answer.terminated;
+      } catch (err: unknown) {
+        terminal.error = messageOf(err);
+      }
+    }
+
+    const report: BackgroundTerminalsReport = {
+      threadId,
+      terminals: listed.terminals,
+      truncated: listed.truncated,
+    };
+    try {
+      const after = await this.listBackgroundTerminals(client, threadId);
+      report.survivors = after.terminals;
+      const standing = new Set(after.terminals.map((terminal) => terminal.processId));
+      for (const terminal of listed.terminals) terminal.gone = !standing.has(terminal.processId);
+    } catch (err: unknown) {
+      report.listError = { stage: "after", message: messageOf(err) };
+    }
+    this.recordBackgroundTerminals(session, report);
+    return report;
+  }
+
+  /**
+   * Terminate one background terminal. `terminated: false` is the answer, not an
+   * error: the call reached Codex and the process stayed up.
+   */
+  async terminateBackgroundTerminal(
+    sessionId: string,
+    processId: string
+  ): Promise<BackgroundTerminalsReport> {
+    const { session, client, threadId } = this.backgroundTerminalTarget(sessionId);
+
+    const answer = await client.threadBackgroundTerminalsTerminate({ threadId, processId });
+    const report: BackgroundTerminalsReport = {
+      threadId,
+      terminals: [{ processId, terminated: answer.terminated }],
+    };
+    this.recordBackgroundTerminals(session, report);
+    return report;
+  }
+
+  /** The session, its client and its thread id, or the error that says why not. */
+  private backgroundTerminalTarget(sessionId: string): {
+    session: SessionInfo;
+    client: ICodexClient;
+    threadId: string;
+  } {
     const session = this.getSessionOrThrow(sessionId);
 
     // Status first: cancelSession drops the client, so a client lookup ahead of this
     // reports a cancelled session as SESSION_NOT_FOUND.
     if (session.status === "cancelled") {
       throw new Error(
-        `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be cleaned`
+        `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and its background terminals cannot be reached`
       );
     }
     if (!session.threadId) {
       throw new Error(
-        `Error [${ErrorCode.INTERNAL}]: Session '${sessionId}' has no threadId, cannot clean background terminals`
+        `Error [${ErrorCode.INTERNAL}]: Session '${sessionId}' has no threadId, so it has no background terminals to reach`
       );
     }
 
-    const client = this.getClientOrThrow(sessionId);
+    return { session, client: this.getClientOrThrow(sessionId), threadId: session.threadId };
+  }
 
-    await client.threadBackgroundTerminalsClean({ threadId: session.threadId });
+  /** Read the thread's background terminals, following `nextCursor` to the page bound. */
+  private async listBackgroundTerminals(
+    client: ICodexClient,
+    threadId: string
+  ): Promise<{ terminals: BackgroundTerminalOutcome[]; truncated: boolean }> {
+    const terminals: BackgroundTerminalOutcome[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_BACKGROUND_TERMINAL_PAGES; page++) {
+      const answer = await client.threadBackgroundTerminalsList(
+        cursor === null ? { threadId } : { threadId, cursor }
+      );
+      for (const terminal of answer.data) terminals.push({ ...terminal });
+      cursor = answer.nextCursor ?? null;
+      if (cursor === null) return { terminals, truncated: false };
+    }
+    return { terminals, truncated: true };
+  }
+
+  private recordBackgroundTerminals(session: SessionInfo, report: BackgroundTerminalsReport): void {
     session.lastActiveAt = new Date().toISOString();
     recordEvent(session, "progress", {
-      method: Methods.THREAD_BACKGROUND_TERMINALS_CLEAN,
-      threadId: session.threadId,
-      status: "requested",
+      method: Methods.THREAD_BACKGROUND_TERMINALS_TERMINATE,
+      threadId: report.threadId,
+      terminals: report.terminals.length,
+      gone: report.terminals.filter((terminal) => terminal.gone === true).length,
+      surviving: report.survivors?.length,
+      truncated: report.truncated,
+      cleanCalled: report.cleanCalled,
+      listError: report.listError,
     });
   }
 
@@ -1054,12 +1298,18 @@ export class SessionManager {
         sandbox: session.sandbox,
         config: session.config,
       });
-      await client.threadResume({
+      const resumeResult = await client.threadResume({
         threadId,
         personality: session.personality,
         baseInstructions: session.baseInstructions,
         developerInstructions: session.developerInstructions,
+        approvalsReviewer: session.approvalsReviewer,
+        permissions: session.permissions,
       });
+      // A resume restores the thread from Codex's own rollout log, so the
+      // thread's persisted metadata decides what it runs with — not the
+      // `meta.json` of whichever server started it.
+      this.recordEffectiveSettings(session, resumeResult);
       session.threadId = threadId;
       session.status = "idle";
       session.lastActiveAt = new Date().toISOString();
@@ -1169,8 +1419,11 @@ export class SessionManager {
       threadId: session.threadId,
       baseInstructions: session.baseInstructions,
       developerInstructions: session.developerInstructions,
+      approvalsReviewer: session.approvalsReviewer,
+      permissions: session.permissions,
     });
     const forkedThreadId = extractThreadId(forkResult);
+    const forkedSettings = readEffectiveSettings(forkResult);
 
     // Create new session with its own app-server process
     const newSessionId = `sess_${randomUUID().slice(0, 12)}`;
@@ -1188,6 +1441,8 @@ export class SessionManager {
       profile: session.profile,
       approvalPolicy: session.approvalPolicy,
       sandbox: session.sandbox,
+      approvalsReviewer: session.approvalsReviewer,
+      permissions: session.permissions,
       personality: session.personality,
       effort: session.effort,
       summary: session.summary,
@@ -1195,6 +1450,7 @@ export class SessionManager {
       pendingRequests: new Map(),
       baseInstructions: session.baseInstructions,
       developerInstructions: session.developerInstructions,
+      effective: forkedSettings,
     };
 
     this.registerSession(newSession);
@@ -1217,12 +1473,17 @@ export class SessionManager {
       });
 
       // Resume the forked thread on the new process
-      await newClient.threadResume({
+      const resumeResult = await newClient.threadResume({
         threadId: forkedThreadId,
         personality: session.personality,
         baseInstructions: session.baseInstructions,
         developerInstructions: session.developerInstructions,
+        approvalsReviewer: session.approvalsReviewer,
+        permissions: session.permissions,
       });
+      // The fork answered for the thread and this resume answers for the
+      // process the new session is driven by, which is the one it runs on.
+      this.recordEffectiveSettings(newSession, resumeResult);
       newSession.threadId = forkedThreadId;
       this.persistSessionIfChanged(newSession);
 
@@ -1391,6 +1652,7 @@ export class SessionManager {
         Array.from(new Set(actions.map((action) => action.type)))
       ),
       actions,
+      warnings: warningsOf(session),
       result: this.terminalTurnResult(sessionId),
     };
   }
@@ -1829,10 +2091,116 @@ export class SessionManager {
         this.onThreadStatusChanged(session, method, p);
         break;
 
+      case Methods.WARNING:
+      case Methods.GUARDIAN_WARNING:
+        this.onWarningNotification(session, method, p);
+        break;
+
+      case Methods.MODEL_SAFETY_BUFFERING_UPDATED:
+        this.onSafetyBufferingUpdated(session, method, p);
+        break;
+
+      case Methods.HOOK_STARTED:
+      case Methods.HOOK_COMPLETED:
+        this.onHookNotification(session, method, p);
+        break;
+
+      case Methods.AUTO_APPROVAL_REVIEW_COMPLETED:
+        onAutoApprovalReviewCompleted(session, method, p);
+        break;
+
       default:
         // Ignore other notifications (account, config, etc.)
         break;
     }
+  }
+
+  /**
+   * `warning` and `guardianWarning` — free text the backend wrote for the person.
+   *
+   * There is no code and no structure on either notification to act on, so the
+   * message is the whole of it and it goes where a waiting caller reads it.
+   */
+  private onWarningNotification(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    recordEvent(session, "progress", { method, ...p });
+    this.recordWarning(session, method, displayText(p.message));
+  }
+
+  /**
+   * `model/safetyBuffering/updated` — a named reason the turn is answering nothing.
+   *
+   * `showBufferingUi` is the backend deciding whether the person is meant to be
+   * told, so a buffering it marks silent stays in the event log and out of the
+   * check answer.
+   */
+  private onSafetyBufferingUpdated(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    recordEvent(session, "progress", { method, ...p });
+    if (p.showBufferingUi !== true) return;
+    this.recordWarning(session, method, bufferingWarningMessage(p));
+  }
+
+  /**
+   * `hook/started` and `hook/completed` — the intervals a hook of the user's own
+   * codex config holds the turn for.
+   *
+   * Two things come off a run. A hook that blocked, failed or was stopped is a
+   * turn held with nothing else said about why, so it becomes a warning. The
+   * `statusMessage` its author wrote is a line for display, so it stands where
+   * `progress.activity` stands — but only while the turn has written no marker
+   * of its own, because a hook says nothing about what the model is doing.
+   */
+  private onHookNotification(
+    session: SessionInfo,
+    method: string,
+    p: Record<string, unknown>
+  ): void {
+    recordEvent(session, "progress", { method, ...p });
+    if (!isRecord(p.run)) return;
+    const run = p.run;
+    this.recordWarning(session, method, hookWarningMessage(run));
+
+    const line = hookActivityLine(run);
+    if (line === undefined || markerStands(session)) return;
+    if (session.progressState?.activity === line) return;
+    recordActivity(session, line, normalizeOptionalString(run.id), true);
+    this.notifyWaiters(session.sessionId);
+  }
+
+  /**
+   * Keep one thing the backend said about a quiet turn, and wake what is waiting.
+   *
+   * The backend repeating itself said nothing new: the standing entry keeps its
+   * place with a fresh instant, `warningSeq` does not move, and the poll holding
+   * this session sleeps on. Anything new moves `warningSeq`, which `signalOf`
+   * carries, so the poll answers with it — a warning is the only thing that will
+   * be said while a turn stalls, and a caller holding a long window would
+   * otherwise never learn why.
+   */
+  private recordWarning(session: SessionInfo, method: string, message?: string): void {
+    if (message === undefined) return;
+    const warnings = session.warnings ?? [];
+    const standing = warnings[warnings.length - 1];
+    const at = new Date().toISOString();
+    if (standing?.method === method && standing.message === message) {
+      standing.at = at;
+      return;
+    }
+    warnings.push({ method, message, at });
+    while (warnings.length > MAX_SESSION_WARNINGS) warnings.shift();
+    session.warnings = warnings;
+    session.warningSeq = (session.warningSeq ?? 0) + 1;
+    // The same listeners the activity line reaches: a held poll shows the person
+    // waiting why nothing is arriving, without waiting for the poll to return.
+    notifyActivityListeners(session, message);
+    this.notifyWaiters(session.sessionId);
   }
 
   /** `item/commandExecution/outputDelta` — the stream shell profile noise is cut from. */
@@ -2264,6 +2632,7 @@ function metaFingerprint(session: SessionInfo): string {
     session.cancelledAt,
     session.cancelledReason,
     session.config,
+    session.effective,
   ]);
 }
 
@@ -2309,6 +2678,8 @@ function newSessionRecord(fields: {
     profile: spawnOpts.profile,
     approvalPolicy: spawnOpts.approvalPolicy,
     sandbox: spawnOpts.sandbox,
+    approvalsReviewer: advanced?.approvalsReviewer,
+    permissions: advanced?.permissions,
     personality: advanced?.personality,
     effort,
     summary: advanced?.summary,
@@ -2345,14 +2716,17 @@ function sessionOfRecovered(
     cwd: normalizeOptionalString(rec.meta.cwd),
     model: normalizeOptionalString(rec.meta.model),
     profile: normalizeOptionalString(rec.meta.profile),
-    approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
-    sandbox: rec.meta.sandbox as SandboxMode | undefined,
+    approvalPolicy: readOneOf(APPROVAL_POLICIES, rec.meta.approvalPolicy),
+    sandbox: readOneOf(SANDBOX_MODES, rec.meta.sandbox),
+    approvalsReviewer: readOneOf(APPROVALS_REVIEWERS, rec.meta.approvalsReviewer),
+    permissions: normalizeOptionalString(rec.meta.permissions),
     personality: rec.meta.personality as Personality | undefined,
     effort: rec.meta.effort as EffortLevel | undefined,
     summary: rec.meta.summary as SummaryMode | undefined,
     config: isRecord(rec.meta.config) ? rec.meta.config : undefined,
     baseInstructions: normalizeOptionalString(rec.meta.baseInstructions),
     developerInstructions: normalizeOptionalString(rec.meta.developerInstructions),
+    effective: readEffectiveSettings(rec.meta.effective),
     approvalTimeoutMs:
       typeof rec.meta.approvalTimeoutMs === "number" ? rec.meta.approvalTimeoutMs : undefined,
     pendingRequests: new Map(),
@@ -2386,11 +2760,14 @@ function publicInfoOfRecovered(rec: RecoveredSession): PublicSessionInfo {
     cancelledAt: normalizeOptionalString(rec.meta.cancelledAt),
     cancelledReason: normalizeOptionalString(rec.meta.cancelledReason),
     model: normalizeOptionalString(rec.meta.model),
-    approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
-    sandbox: rec.meta.sandbox as SandboxMode | undefined,
+    approvalPolicy: readOneOf(APPROVAL_POLICIES, rec.meta.approvalPolicy),
+    sandbox: readOneOf(SANDBOX_MODES, rec.meta.sandbox),
+    permissions: normalizeOptionalString(rec.meta.permissions),
+    approvalsReviewer: readOneOf(APPROVALS_REVIEWERS, rec.meta.approvalsReviewer),
     pendingRequestCount: 0,
     activity: rec.lastActivity,
     owner: ownershipOf(rec.owner),
+    effective: publicEffectiveSettings(readEffectiveSettings(rec.meta.effective)),
   };
 }
 
@@ -2901,19 +3278,12 @@ function scannerOf(session: SessionInfo): ActivityMarkerScanner {
   return scanner;
 }
 
-/**
- * Record what Codex said it is doing: overwrite the one line a poll reports,
- * stamp when it arrived, and append one `activity` record to the session's
- * events.jsonl.
- *
- * The caller wakes the long-poll waiters after it — `signalOf` carries the line,
- * so a poll answers with each new heading and the person waiting reads the work
- * as it happens. One line per heading is what travels, not the turn's stream.
- */
 /** What a turn may override for the session it continues. */
 interface TurnOverrides {
   model?: string;
   approvalPolicy?: ApprovalPolicy;
+  approvalsReviewer?: ApprovalsReviewer;
+  permissions?: string;
   effort?: EffortLevel;
   summary?: SummaryMode;
   personality?: Personality;
@@ -2958,10 +3328,21 @@ function applyTurnOverrides(
   if (overrides?.approvalPolicy) {
     session.approvalPolicy = overrides.approvalPolicy as ApprovalPolicy;
   }
+  if (overrides?.approvalsReviewer) session.approvalsReviewer = overrides.approvalsReviewer;
+  // A session records one of the two, never both: `thread/resume` sends the
+  // profile and the spawn sends `-c sandbox_mode=`, and a session carrying both
+  // would put a profile and a sandbox on one restored thread.
+  if (overrides?.permissions) {
+    session.permissions = overrides.permissions;
+    session.sandbox = undefined;
+  }
   if (overrides?.effort) session.effort = overrides.effort;
   if (overrides?.summary) session.summary = overrides.summary;
   if (overrides?.personality) session.personality = overrides.personality;
-  if (overrides?.sandbox) session.sandbox = overrides.sandbox as SandboxMode;
+  if (overrides?.sandbox) {
+    session.sandbox = overrides.sandbox as SandboxMode;
+    session.permissions = undefined;
+  }
 }
 
 /** The cwd a reply's override asks the turn to run in, or nothing when it names none. */
@@ -2982,6 +3363,41 @@ function resolveTurnCwd(
     : undefined;
 }
 
+/**
+ * The `input` of a turn: the prompt, then one entry per image the caller named.
+ *
+ * `turn/start` and `turn/steer` both take `UserInput[]`, so a steer that carries
+ * an image is built here too.
+ */
+function buildUserInput(prompt: string, images?: string[]): UserInput[] {
+  const input: UserInput[] = [{ type: "text", text: prompt }];
+  for (const path of images ?? []) input.push({ type: "localImage", path });
+  return input;
+}
+
+/**
+ * The backend's refusal of a steer, as the error the caller acts on.
+ *
+ * Measured on codex-cli 0.150.1: a steer whose `expectedTurnId` is not the
+ * running turn answers ``-32600 expected active turn id `X` but found `Y` ``,
+ * and one that arrives with no turn running answers `-32600 no active turn to
+ * steer`. The steered text lands at the turn's next model round trip rather than
+ * on arrival, so a steer sent late in a turn reaches a turn that has ended.
+ *
+ * Both say the same thing about the session — the turn the steer named is not
+ * running — which is `SESSION_NOT_RUNNING`; the backend's own sentence is
+ * carried through, so the caller can still tell the turn that moved on from the
+ * turn that ended. Any other failure is left as it was raised: a timed-out
+ * request or a dead child is not a turn that finished.
+ */
+function steerRefusal(sessionId: string, turnId: string, err: unknown): Error | undefined {
+  const message = messageOf(err);
+  if (!/no active turn to steer|expected active turn id/.test(message)) return undefined;
+  return new Error(
+    `Error [${ErrorCode.SESSION_NOT_RUNNING}]: Session '${sessionId}' is no longer running turn '${turnId}', so the steer reached no turn: ${message}`
+  );
+}
+
 /** The `turn/start` parameters of a reply: the overrides it names, over what the session runs with. */
 function buildTurnParams(
   session: SessionInfo,
@@ -2990,10 +3406,9 @@ function buildTurnParams(
   overrides: TurnOverrides | undefined,
   resolvedCwd: string | undefined
 ): TurnStartParams {
-  const input: UserInput[] = [{ type: "text", text: prompt }];
   const turnParams: TurnStartParams = {
     threadId,
-    input,
+    input: buildUserInput(prompt),
     model: overrides?.model,
     approvalPolicy: overrides?.approvalPolicy,
     // `turn/start` carries these on every turn; the thread holds none of them, so a
@@ -3002,6 +3417,11 @@ function buildTurnParams(
     effort: overrides?.effort ?? session.effort,
     summary: overrides?.summary ?? session.summary,
     personality: overrides?.personality ?? session.personality,
+    approvalsReviewer: overrides?.approvalsReviewer ?? session.approvalsReviewer,
+    // Only what this turn named. The thread already carries the session's own
+    // profile, and re-sending it beside a `sandboxPolicy` the same reply asked
+    // for is the pair `turn/start` refuses.
+    permissions: overrides?.permissions,
     cwd: resolvedCwd,
     outputSchema: overrides?.outputSchema,
   };
@@ -3040,6 +3460,7 @@ function onTurnStarted(session: SessionInfo, method: string, p: Record<string, u
   if (session.progressState) {
     session.progressState.activity = undefined;
     session.progressState.activityAt = undefined;
+    session.progressState.activityFromHook = undefined;
   }
   recordEvent(session, "progress", {
     method,
@@ -3087,15 +3508,95 @@ function onItemNotification(
   });
 }
 
-function recordActivity(session: SessionInfo, activity: string, itemId?: string): void {
+/**
+ * The line a poll reports for a review that did not approve, keyed by status.
+ *
+ * `approved` is absent: the action went through, and overwriting the turn's own
+ * activity line to say so would bury what the work is on.
+ */
+const AUTO_REVIEW_ACTIVITY: Record<string, string> = {
+  denied: "Approval auto-review denied an action of this turn",
+  timedOut: "Approval auto-review timed out on an action of this turn",
+  aborted: "Approval auto-review was aborted on an action of this turn",
+};
+
+/**
+ * `item/autoApprovalReview/completed` — the auto_review subagent decided an
+ * approval this server never saw.
+ *
+ * Only `review.status` is read. The schema marks `GuardianApprovalReview`
+ * `[UNSTABLE]`, "This shape is expected to change soon", so `rationale`,
+ * `riskLevel` and `userAuthorization` reach `events.jsonl` with the rest of the
+ * raw params and no branch here depends on them.
+ *
+ * A status other than `approved` is why the turn did what it did, so it becomes
+ * the activity line a poll answers with as well as an `approval_result` record.
+ */
+function onAutoApprovalReviewCompleted(
+  session: SessionInfo,
+  method: string,
+  p: Record<string, unknown>
+): void {
+  const review = p.review as Record<string, unknown> | undefined;
+  const status = normalizeOptionalString(review?.status);
+  recordEvent(session, "approval_result", {
+    method,
+    ...p,
+    reviewer: "auto_review",
+    status,
+  });
+  const line = status === undefined ? undefined : AUTO_REVIEW_ACTIVITY[status];
+  if (line) recordActivity(session, line);
+}
+
+/**
+ * Record what the session is doing: overwrite the one line a poll reports, stamp
+ * when it arrived, and append one `activity` record to the session's
+ * events.jsonl.
+ *
+ * The caller wakes the long-poll waiters after it — `signalOf` carries the line,
+ * so a poll answers with each new heading and the person waiting reads the work
+ * as it happens. One line per heading is what travels, not the turn's stream.
+ *
+ * `fromHook` marks a line a hook wrote rather than one Codex wrote, which is
+ * what `markerStands` reads to keep a hook off a marker's place.
+ */
+function recordActivity(
+  session: SessionInfo,
+  activity: string,
+  itemId?: string,
+  fromHook = false
+): void {
   const next = session.progressState ?? { lastEventAt: new Date().toISOString() };
   next.activity = activity;
   next.activityAt = new Date().toISOString();
+  next.activityFromHook = fromHook;
   session.progressState = next;
-  recordEvent(session, "activity", { activity, turnId: session.activeTurnId, itemId });
+  recordEvent(session, "activity", { activity, turnId: session.activeTurnId, itemId, fromHook });
+  notifyActivityListeners(session, activity);
+}
+
+/**
+ * The turn has written a marker and the line standing is that marker.
+ *
+ * A hook line fills the silence before the turn says anything of its own; once
+ * the turn has spoken, its own words are the standing line for the rest of it.
+ */
+function markerStands(session: SessionInfo): boolean {
+  const state = session.progressState;
+  return state?.activity !== undefined && state.activityFromHook !== true;
+}
+
+/** A copy of what the backend said about this session, oldest first. */
+function warningsOf(session: SessionInfo): SessionWarning[] {
+  return (session.warnings ?? []).map((warning) => ({ ...warning }));
+}
+
+/** Tell everyone holding a call open on this session one line about it. */
+function notifyActivityListeners(session: SessionInfo, line: string): void {
   for (const listener of activityListeners.get(session) ?? []) {
     try {
-      listener(activity);
+      listener(line);
     } catch (err: unknown) {
       // A listener writes to a client this server does not own. Its failure is
       // the caller's to survive, and the turn goes on either way.
@@ -3109,6 +3610,11 @@ function recordActivity(session: SessionInfo, activity: string, itemId?: string)
 
 function setEventSink(session: SessionInfo, sink: EventSink): void {
   eventSinks.set(session, sink);
+}
+
+/** An error as one redacted line, for a report field rather than for a throw. */
+function messageOf(err: unknown): string {
+  return redactPaths(err instanceof Error ? err.message : String(err));
 }
 
 /**
@@ -3154,6 +3660,8 @@ function signalOf(session: SessionInfo): string {
     openRequests,
     session.lastResult?.completedAt ?? "",
     session.progressState?.activityAt ?? "",
+    // Each new warning moves this; the backend repeating one does not.
+    String(session.warningSeq ?? 0),
   ].join("|");
 }
 
@@ -3168,11 +3676,14 @@ function toPublicInfo(session: SessionInfo, owner?: SessionOwnership): PublicSes
     model: session.model,
     approvalPolicy: session.approvalPolicy,
     sandbox: session.sandbox,
+    permissions: session.permissions,
+    approvalsReviewer: session.approvalsReviewer,
     pendingRequestCount: Array.from(session.pendingRequests.values()).filter((r) => !r.resolved)
       .length,
     activity: session.progressState?.activity,
     lastTurn: lastTurnInfo(session),
     owner,
+    effective: publicEffectiveSettings(session.effective),
   };
 }
 
@@ -3201,6 +3712,7 @@ function toSensitiveInfo(session: SessionInfo, owner?: SessionOwnership): Sensit
     cwd: session.cwd,
     profile: session.profile,
     config: session.config,
+    effective: session.effective,
   };
 }
 
@@ -3403,12 +3915,108 @@ function extractThreadId(result: unknown): string {
 }
 
 /**
+ * The settings Codex answered a thread call with.
+ *
+ * `thread/start`, `thread/fork` and `thread/resume` all report what the thread
+ * runs with rather than what the call asked for, and a `thread/resume` reads
+ * them out of Codex's own rollout log, so they can name settings this server
+ * never recorded. `meta.json` carries the block back under the same names, so a
+ * recovered session reads through this same function.
+ *
+ * Each field is read in the shape `codex-schema/v2/ThreadStartResponse.json`
+ * gives it and left out otherwise. Unlike the thread id, none of it is worth
+ * failing the call over — a session runs perfectly well without knowing its
+ * effective model — and a field left out is a setting the session reports as
+ * unknown, never one filled in from the argument the call sent.
+ */
+function readEffectiveSettings(source: unknown): EffectiveSettings | undefined {
+  if (!isRecord(source)) return undefined;
+  const settings: EffectiveSettings = {
+    model: readNonEmptyString(source.model),
+    modelProvider: readNonEmptyString(source.modelProvider),
+    // Optional on the response, and null for a model advertising no effort.
+    reasoningEffort: readNonEmptyString(source.reasoningEffort),
+    approvalPolicy: readAskForApproval(source.approvalPolicy),
+    sandbox: readSandboxPolicy(source.sandbox),
+    cwd: readNonEmptyString(source.cwd),
+    // Required by the schema, and a session that does not know its reviewer
+    // still runs, so an answer without one reports it unknown like the rest.
+    approvalsReviewer: readOneOf(ANSWERED_APPROVALS_REVIEWERS, source.approvalsReviewer),
+    activePermissionProfile: readActivePermissionProfile(source.activePermissionProfile),
+  };
+  return Object.values(settings).some((value) => value !== undefined) ? settings : undefined;
+}
+
+function readNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * One of `values`, or nothing where the value is not one of them.
+ *
+ * `meta.json` is JSON another process wrote — an older release, a hand edit, a
+ * write cut in half — so a field of it is held against the set `codex_session`
+ * publishes rather than cast to it. `approvalPolicy` no longer takes
+ * `on-failure`, and a directory the previous release left behind carries it.
+ *
+ * The narrowing sits here, where a record becomes a session, and not in
+ * `src/persistence/recovery-scanner.ts`: the scanner reads JSON off disk and
+ * types everything past `sessionId` and the timestamps as `unknown` because the
+ * vocabulary of these fields belongs to the session, and these same values are
+ * what a resume hands back to `thread/resume`. A value outside the set is left
+ * out, which reports the field as unknown — the whole session still lists, and
+ * so does every other session of the directory.
+ */
+function readOneOf<T extends string>(values: readonly T[], value: unknown): T | undefined {
+  return typeof value === "string" && (values as readonly string[]).includes(value)
+    ? (value as T)
+    : undefined;
+}
+
+/** A policy preset the schema lists, or its `granular` object. */
+function readAskForApproval(value: unknown): AskForApproval | undefined {
+  if (typeof value === "string") return readOneOf(APPROVAL_POLICY_PRESETS, value);
+  if (!isRecord(value) || !isRecord(value.granular)) return undefined;
+  return value as unknown as AskForApprovalGranular;
+}
+
+/**
+ * The profile of the active permissions, which the answer identifies by `id`.
+ * `extends` is null for a profile naming no parent, and absent then here too.
+ */
+function readActivePermissionProfile(value: unknown): EffectivePermissionProfile | undefined {
+  if (!isRecord(value)) return undefined;
+  const id = readNonEmptyString(value.id);
+  if (id === undefined) return undefined;
+  const parent = readNonEmptyString(value.extends);
+  return parent === undefined ? { id } : { id, extends: parent };
+}
+
+/** One of the four policy objects the schema's `SandboxPolicy` union carries. */
+function readSandboxPolicy(value: unknown): SandboxPolicy | undefined {
+  if (!isRecord(value) || typeof value.type !== "string") return undefined;
+  return SANDBOX_POLICY_TYPES.includes(value.type as SandboxPolicy["type"])
+    ? (value as SandboxPolicy)
+    : undefined;
+}
+
+/** The effective settings a redacted view carries: `cwd` is a path and stays out. */
+function publicEffectiveSettings(
+  effective: EffectiveSettings | undefined
+): PublicEffectiveSettings | undefined {
+  if (!effective) return undefined;
+  const { cwd: _cwd, ...redacted } = effective;
+  return Object.values(redacted).some((value) => value !== undefined) ? redacted : undefined;
+}
+
+/**
  * Read the turn id of a `turn/start` response, which answers `{turn: Turn}`
  * (codex-schema/v2/TurnStartResponse.json).
  *
  * Optional: the id is a seed for `activeTurnId` and the `turn/started`
  * notification is what settles it. The one response of the bundle carrying a
- * bare `turnId` answers `turn/steer`, which this server never sends.
+ * bare `turnId` answers `turn/steer`, which `steerSession` reads on its own —
+ * that id is the running turn's, not a new one's.
  */
 function extractTurnId(result: unknown): string | undefined {
   if (!isRecord(result)) return undefined;

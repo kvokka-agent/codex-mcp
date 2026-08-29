@@ -96,6 +96,8 @@ describe("tools/list metadata", () => {
     expect(codexSession).toContain("includeSensitive defaults to false");
     expect(codexSession).toContain("source remains unchanged");
     expect(codexSession).toContain("clean_background_terminals");
+    expect(codexSession).toContain("terminate_background_terminal");
+    expect(codexSession).toContain("add to the turn already running");
 
     const codexCheck = tool(tools, "codex_check").description ?? "";
     expect(codexCheck).toContain("waitMs");
@@ -135,6 +137,54 @@ describe("tools/list metadata", () => {
     expect(waitMsSchema).not.toHaveProperty("default");
   });
 
+  it("publishes the steer action of codex_session with the prompt it takes", async () => {
+    const tools = await listTools();
+    const session = tool(tools, "codex_session");
+    const props = propertiesOf(session.inputSchema, "codex_session");
+
+    const actionEnum = present(
+      (props.action as { enum?: unknown[] }).enum,
+      "the codex_session action enum"
+    );
+    expect(actionEnum).toContain("steer");
+    expect(props).toHaveProperty("prompt");
+    // The turn id a steer answers with is the running turn's, and the schema says so.
+    const turnId = present(
+      session.outputSchema?.properties?.turnId as { description?: string } | undefined,
+      "codex_session.turnId"
+    );
+    expect(turnId.description).toContain("already running");
+  });
+
+  it("publishes the background-terminal surface of codex_session", async () => {
+    const tools = await listTools();
+    const session = tool(tools, "codex_session");
+
+    const actionEnum = present(
+      (propertiesOf(session.inputSchema, "codex_session").action as { enum?: unknown[] }).enum,
+      "the codex_session action enum"
+    );
+    expect(actionEnum).toContain("clean_background_terminals");
+    expect(actionEnum).toContain("terminate_background_terminal");
+    expect(propertiesOf(session.inputSchema, "codex_session")).toHaveProperty("processId");
+
+    const report = present(
+      session.outputSchema?.properties?.backgroundTerminals as
+        | { properties?: Record<string, unknown>; required?: string[] }
+        | undefined,
+      "codex_session.backgroundTerminals"
+    );
+    expect(Object.keys(present(report.properties, "backgroundTerminals properties"))).toEqual([
+      "threadId",
+      "terminals",
+      "survivors",
+      "truncated",
+      "cleanCalled",
+      "listError",
+    ]);
+    expect(report.required).toEqual(["threadId", "terminals"]);
+  });
+
   it("reports the registered tool count in the compat report resource", async () => {
     const tools = await listTools();
 
@@ -169,14 +219,21 @@ describe("what the codex schema asks for, given the environment", () => {
     await server.close();
   });
 
-  it("requires the permission level of the turn where the environment sets none", async () => {
+  it("requires the approval policy of the turn where the environment sets none", async () => {
     for (const key of KEYS) delete process.env[key];
     server = createServer(process.cwd()).server;
 
     const codex = tool(await listTools(), "codex");
+    const properties = propertiesOf(codex.inputSchema, "codex");
 
     expect(codex.inputSchema?.required).toContain("approvalPolicy");
-    expect(codex.inputSchema?.required).toContain("sandbox");
+    // `sandbox` and `permissions` are one choice, which `required` cannot say:
+    // the schema publishes both as optional and the refinement asks for one.
+    expect(codex.inputSchema?.required ?? []).not.toContain("sandbox");
+    expect(codex.inputSchema?.required ?? []).not.toContain("permissions");
+    expect((properties.sandbox as { description: string }).description).toContain(
+      "the call must carry one of the two"
+    );
   });
 
   it("publishes it as optional, naming the value in force, where the environment sets it", async () => {

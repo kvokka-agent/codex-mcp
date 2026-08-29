@@ -85,6 +85,23 @@ These decide which wrapper designs are possible at all. Read at
 - **`approval_policy = "never"` is not auto-approval.** A command needing
   approval is refused with "approval required by policy, but AskForApproval is
   set to Never" (`core/src/exec_policy.rs:216-224`).
+- **`turn/start` on a thread that is already running answers success and drops
+  the prompt.** No error: it returns `{"turn":{"id": <the running turn's id>}}`
+  and produces no `item/started` for the new text. *Measurement on `codex-cli
+  0.150.1`, against a stub model endpoint: a second `turn/start` two seconds
+  into an eight-second turn answered the running turn's id and the text never
+  reached the model.* A wrapper that forwards a second prompt to a busy thread
+  therefore loses it silently and hands its caller a turn id back as if it were
+  accepted. `turn/steer` is the call that reaches a running turn.
+- **The input queue drains itself, and keeps draining through a failed turn.**
+  `thread/queue/add` on an **idle** thread does not queue — it starts a turn
+  (measured: `turn/started` 4 ms after the add, and the queue read empty three
+  seconds later). On a running thread it queues, and `turn/completed` starts the
+  next item on its own, 4 to 10 ms later, without `thread/queue/start`; that
+  method exists for the explicit case and answers `-32600 "queue is empty"`
+  otherwise. A queued turn that ends in `systemError` does not stop the queue:
+  the next item started 5 ms after the failure. `turn/interrupt` leaves the rest
+  of the queue queued and never started.
 - **The rollout log is the durable copy.**
   `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl`
   (`rollout/src/recorder.rs:1624-1646`), one `TurnContext` per turn carrying
@@ -586,6 +603,26 @@ The tool surface is in [TOOLS.md](TOOLS.md) and the mechanism in
   ownership handover, `abandoned` and resume carry evidence from a stand-in
   binary on Linux and macOS. What a live `codex app-server` restores from a
   rollout log is stated from the schema, not observed.
+- **One turn at a time per session, and a second prompt waits rather than
+  queues.** `codex_reply` to a session that is not `idle` or `error` answers
+  `SESSION_BUSY`; `thread/queue/*` is not used. The queue was measured and
+  refused: it keeps draining through a failed turn — a queued turn that ended in
+  `systemError` was followed 5 ms later by the next one — while
+  `sessionStatusForThreadStatus` latches the session on `error` and never leaves
+  it, and `turn/start` on the still-running thread then swallows the caller's
+  next prompt. `turn/interrupt` also strands whatever is queued behind it.
+  Reading turn N's answer before writing turn N+1's prompt is what the
+  delegation loop is for, so the wait is the honest answer and
+  `codex_session(action="steer")` is what reaches a turn already running.
+- **Every notification the app server sends is read.**
+  `initialize`'s `capabilities.optOutNotificationMethods` suppresses methods per
+  connection and this server names none. *Measurement over one completing turn
+  on this machine: 22,810 bytes of notifications, of which 19,199 were
+  opt-out-able — and 96% of those were the nine `sessionStart` hooks this
+  install configures, so a codex with no hooks configured has 516 opt-out-able
+  bytes per turn, 0.15% of the stream.* Suppression also accepts a method name
+  that does not exist, silently, so a renamed method would stop being suppressed
+  with nothing failing anywhere.
 - **Coverage is measured and nothing gates on it.** `bun run check` runs
   `lint:fallow`, which is `bun run coverage && fallow`, so every check writes
   `coverage/coverage-final.json` and hands it to `fallow`. `.fallowrc.jsonc`

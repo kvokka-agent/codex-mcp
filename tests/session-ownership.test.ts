@@ -8,6 +8,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ownStartedAt } from "../src/persistence/process-identity.js";
+import { createServer } from "../src/server.js";
 import { SessionManager } from "../src/session/manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
 import { ErrorCode } from "../src/types.js";
@@ -166,6 +167,60 @@ describe("listing", () => {
     expect(found.owner).toBeUndefined();
   });
 
+  it("carries the profile and the reviewer a disk record asked for", () => {
+    writeAbandonedOnDisk("sess_perm", {
+      permissions: ":read-only",
+      approvalsReviewer: "auto_review",
+      effective: { activePermissionProfile: { id: ":read-only" } },
+    });
+
+    const found = present(
+      manager.listAllSessions().find((s) => s.sessionId === "sess_perm"),
+      "the sess_perm session in the listing"
+    );
+    expect(found.permissions).toBe(":read-only");
+    expect(found.approvalsReviewer).toBe("auto_review");
+    expect(found.effective?.activePermissionProfile).toEqual({ id: ":read-only" });
+  });
+
+  it("leaves out a field of meta.json the schema does not describe and keeps the rest", () => {
+    writeAbandonedOnDisk("sess_stale", {
+      // What this release dropped from `approvalPolicy`, so a directory the
+      // previous one wrote carries it.
+      approvalPolicy: "on-failure",
+      sandbox: "read-only",
+      approvalsReviewer: "auto_review",
+      permissions: ":read-only",
+    });
+
+    const found = present(
+      manager.listAllSessions().find((s) => s.sessionId === "sess_stale"),
+      "the sess_stale session in the listing"
+    );
+    expect(found.approvalPolicy).toBeUndefined();
+    expect(found.sandbox).toBe("read-only");
+    expect(found.approvalsReviewer).toBe("auto_review");
+    expect(found.permissions).toBe(":read-only");
+    expect(found.model).toBe("gpt-5");
+    expect(found.status).toBe("abandoned");
+  });
+
+  it("leaves out a sandbox and a reviewer it cannot read, each on its own", () => {
+    writeAbandonedOnDisk("sess_odd", {
+      approvalPolicy: "never",
+      sandbox: "read-write",
+      approvalsReviewer: 7,
+    });
+
+    const found = present(
+      manager.listAllSessions().find((s) => s.sessionId === "sess_odd"),
+      "the sess_odd session in the listing"
+    );
+    expect(found.approvalPolicy).toBe("never");
+    expect(found.sandbox).toBeUndefined();
+    expect(found.approvalsReviewer).toBeUndefined();
+  });
+
   it("names this server as the owner of the sessions it drives", async () => {
     await manager.createSession("hello", process.cwd(), {}, "low");
     const [sessionId] = manager.listSessions().map((s) => s.sessionId);
@@ -206,6 +261,71 @@ describe("resume", () => {
     expect(client.turnStart).toHaveBeenCalledWith(
       expect.objectContaining({ threadId: "thr_on_disk" })
     );
+  });
+
+  it("takes the settings back from Codex, including ones this server never recorded", async () => {
+    // The directory records `model: "gpt-5"` and nothing about what the thread
+    // ran with. A resume reads the thread out of Codex's own rollout log, so
+    // its answer is what the session runs with from here.
+    writeAbandonedOnDisk("sess_disk");
+    const answered = {
+      thread: { id: "thr_on_disk" },
+      model: "gpt-5.6-luna",
+      modelProvider: "myproxy",
+      cwd: "/srv/work",
+      approvalPolicy: "on-request",
+      sandbox: { type: "readOnly", networkAccess: false },
+      reasoningEffort: "xhigh",
+      approvalsReviewer: "auto_review",
+      activePermissionProfile: { id: ":read-only", extends: null },
+    };
+    manager = new SessionManager({
+      disableCleanup: true,
+      persistence,
+      createClient: () => {
+        const client = new MockClient();
+        client.threadResume = jest.fn(async () => answered);
+        clients.push(client);
+        return client as never;
+      },
+    });
+
+    await manager.resumeSession("sess_disk");
+
+    const session = manager.getSession("sess_disk", true);
+    expect(session.effective).toEqual({
+      model: "gpt-5.6-luna",
+      modelProvider: "myproxy",
+      reasoningEffort: "xhigh",
+      approvalPolicy: "on-request",
+      sandbox: { type: "readOnly", networkAccess: false },
+      cwd: "/srv/work",
+      approvalsReviewer: "auto_review",
+      activePermissionProfile: { id: ":read-only" },
+    });
+    expect(session.model).toBe("gpt-5");
+    // The reviewer and the profile are the thread's, not this server's record:
+    // nothing on disk named either.
+    expect(session.approvalsReviewer).toBeUndefined();
+    expect(session.permissions).toBeUndefined();
+    expect(readMeta("sess_disk").effective).toMatchObject({
+      model: "gpt-5.6-luna",
+      approvalsReviewer: "auto_review",
+      activePermissionProfile: { id: ":read-only" },
+    });
+  });
+
+  it("keeps the settings it holds when the resume answers none", async () => {
+    writeAbandonedOnDisk("sess_kept", {
+      effective: { model: "gpt-5.6-luna", reasoningEffort: "high" },
+    });
+
+    await manager.resumeSession("sess_kept");
+
+    expect(manager.getSession("sess_kept", true).effective).toEqual({
+      model: "gpt-5.6-luna",
+      reasoningEffort: "high",
+    });
   });
 
   it("refuses a session a running server holds", async () => {
@@ -270,5 +390,56 @@ describe("resume", () => {
     await expect(manager.resumeSession("sess_nowhere")).rejects.toThrow(
       ErrorCode.SESSION_NOT_FOUND
     );
+  });
+});
+
+/**
+ * The answer `codex_session(action="list")` hands a client, which the MCP SDK
+ * holds against the tool's output schema before it leaves the server: a field
+ * outside an enum of that schema fails the whole call, not the field.
+ */
+describe("the listing a client receives", () => {
+  interface ToolCallResult {
+    content: Array<{ type: string; text: string }>;
+    structuredContent?: { sessions?: Array<Record<string, unknown>> };
+    isError?: boolean;
+  }
+
+  it("carries a good session directory beside one whose approvalPolicy it cannot read", async () => {
+    writeAbandonedOnDisk("sess_stale", { approvalPolicy: "on-failure" });
+    writeAbandonedOnDisk("sess_good", { approvalPolicy: "never", sandbox: "read-only" });
+
+    const ctx = createServer(process.cwd(), {
+      disableCleanup: true,
+      persistence,
+      createClient: () => new MockClient() as never,
+    });
+    const internal = ctx.server as unknown as {
+      server: {
+        _requestHandlers: Map<string, (req: unknown, extra: unknown) => Promise<unknown>>;
+      };
+    };
+    const handler = present(
+      internal.server._requestHandlers.get("tools/call"),
+      "the tools/call request handler"
+    );
+
+    const res = (await handler(
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "codex_session", arguments: { action: "list" } },
+      },
+      { signal: new AbortController().signal }
+    )) as ToolCallResult;
+    await ctx.server.close();
+
+    expect(res.isError).toBeFalsy();
+    const sessions = present(res.structuredContent?.sessions, "the listed sessions");
+    const byId = new Map(sessions.map((session) => [session.sessionId, session]));
+    expect(byId.get("sess_stale")?.approvalPolicy).toBeUndefined();
+    expect(byId.get("sess_good")?.approvalPolicy).toBe("never");
+    expect(byId.get("sess_good")?.sandbox).toBe("read-only");
   });
 });

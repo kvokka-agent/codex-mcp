@@ -20,7 +20,9 @@ Starts a session and returns as soon as the thread does. Poll it with
 | --- | --- | --- | --- |
 | `prompt` | string | yes | — |
 | `approvalPolicy` | `untrusted` \| `on-request` \| `never` | unless `CODEX_MCP_DEFAULT_APPROVAL_POLICY` is set | that variable |
-| `sandbox` | `read-only` \| `workspace-write` \| `danger-full-access` | unless `CODEX_MCP_DEFAULT_SANDBOX` is set | that variable |
+| `sandbox` | `read-only` \| `workspace-write` \| `danger-full-access` | unless `permissions` names a profile or `CODEX_MCP_DEFAULT_SANDBOX` is set | that variable |
+| `permissions` | string, a profile id | no | — |
+| `approvalsReviewer` | `user` \| `auto_review` | no | `user` |
 | `effort` | any non-empty string; Codex 0.150.1 advertises `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | no | `CODEX_MCP_DEFAULT_EFFORT`, else `low` |
 | `cwd` | string | no | the server's cwd |
 | `model` | string | no | `CODEX_MCP_DEFAULT_MODEL`, else config.toml |
@@ -37,6 +39,37 @@ server never picks one on its own: where its variable is unset the parameter
 stays required, and where it is set the schema publishes it as optional with
 that value as its default. The tool description a client reads carries the
 values in force, so `tools/list` says what a session will actually start on.
+
+A call names `sandbox` or `permissions`, never both: a profile carries the
+sandbox its `[permissions.<id>]` table sets, and `thread/start` refuses the pair
+with `-32600 \`permissions\` cannot be combined with \`sandbox\``. The zod schema
+refuses it first, and it refuses a call that names neither where
+`CODEX_MCP_DEFAULT_SANDBOX` is unset. A call that names a profile takes no
+sandbox at all — the environment default included — and the spawn sends no
+`-c sandbox_mode=` with it.
+
+`permissions` is a profile id such as `:read-only`, `:workspace` or one of the
+`[permissions.<id>]` tables of the user's own `~/.codex/config.toml`. The id is
+held against `permissionProfile/list` before the thread starts, so an id this
+machine does not offer is refused with the ids it does, rather than reaching
+Codex as `failed to load configuration: default_permissions requires a
+\`[permissions]\` table` — a message about a TOML table the caller never wrote. A
+profile the listing marks `allowed: false` is reported as that, apart from one
+that does not exist, and a listing that itself failed is reported as a failure
+rather than taken for a pass. `codex_setup` names the ids this machine offers.
+The id is recorded on the session, so a fork and a resume restore it, and it
+replaces whatever `sandbox` the session ran under.
+
+`approvalsReviewer` says who decides an approval the turn raises. `user`, the
+default, routes it to the caller: `codex_check` reports it in `actions[]` and
+`respond_permission` answers it. `auto_review` routes it to a Codex subagent
+that gathers context and applies a risk-based decision framework, so a run
+nobody watches can step outside its sandbox where the review approves — which
+`approvalPolicy: "never"` refuses rather than grants. The reviewer travels on
+`thread/start` and on every `turn/start`, and a fork or a resume carries it, so
+a session keeps the reviewer it ran under. A review that does not approve
+becomes `progress.activity` and an `approval_result` record in the session's
+event log; see [SESSIONS.md](SESSIONS.md#approvals-and-questions).
 
 `advanced`:
 
@@ -69,7 +102,7 @@ Allowed while the session is `idle` or `error`. Anything else answers
 | --- | --- | --- |
 | `sessionId` | string | yes |
 | `prompt` | string | yes |
-| `model`, `approvalPolicy`, `effort`, `summary`, `personality`, `sandbox`, `cwd` | as in `codex` | no |
+| `model`, `approvalPolicy`, `approvalsReviewer`, `effort`, `summary`, `personality`, `sandbox` or `permissions`, `cwd` | as in `codex` | no |
 | `outputSchema` | object | no |
 
 Returns what `codex` returns.
@@ -91,7 +124,8 @@ Every action answers with the same payload:
   "progress": { "phase": "acting", "lastEventAt": "…", "activeTurnId": "…", "pendingActionCount": 0, "tokens": {}, "activity": "Fixing the failing session-manager test" },
   "interactionState": "working",
   "recommendedNextAction": "poll",
-  "actions": []
+  "actions": [],
+  "warnings": []
 }
 ```
 
@@ -134,6 +168,16 @@ The payload's parts:
 - `actions[]` — what the caller must answer, each with its `requestId`, `kind`
   (`command`, `fileChange`, `user_input`), the backend's raw `params`, and the
   amendment context a command approval offers.
+- `warnings[]` — why the turn is producing no output, oldest first, each
+  `{ method, message, at }`. `method` is the app-server notification that carried
+  it: `warning` and `guardianWarning` for free text the backend wrote,
+  `model/safetyBuffering/updated` for a model whose output is being held back and
+  the reasons named for it, and `hook/completed` for a hook of the user's own
+  codex config that blocked, failed or was stopped. Report these beside
+  `progress.activity`: the activity line is what the turn is doing, a warning is
+  what stands in its way. The five newest are kept, each cut to 400 characters,
+  and a backend repeating the standing one refreshes its `at` rather than adding
+  an entry.
 - `result` — the finished turn's answer, carried by every check that sees a
   terminal status. `result.outcome` says how the turn ended — `completed`,
   `error` or `cancelled` — as the server saw it end. A caller that lost the
@@ -145,8 +189,9 @@ The payload's parts:
   absent otherwise.
 
 `waitMs` long-polls: the call returns when the status changes, an action
-arrives, the turn ends, or Codex says it is working on something new. Reasoning,
-command output, message deltas and token counters do not end the wait.
+arrives, the turn ends, a new warning arrives, or Codex says it is working on
+something new. Reasoning, command output, message deltas, token counters and a
+warning the backend has already sent do not end the wait.
 
 A round of `300000` is what the driver is written for: the caller writes
 `progress.activity` out after each round and calls again, so the person waiting
@@ -154,9 +199,9 @@ reads the work as it happens. `3600000` is this server's own maximum, and a
 round that long says nothing for an hour when the turn stays on one line.
 
 A poll that carries `_meta.progressToken` also gets `notifications/progress`
-while it is held — the standing line, each new line, and the standing line again
-every 30 s (`CODEX_MCP_PROGRESS_HEARTBEAT_MS`) with how long it has stood. Those
-reach the client that made the call and nobody else.
+while it is held — the standing line, each new line, each new warning, and the
+standing line again every 30 s (`CODEX_MCP_PROGRESS_HEARTBEAT_MS`) with how long
+it has stood. Those reach the client that made the call and nobody else.
 
 What ends an otherwise silent wait is the MCP client, which cuts a tool call
 that runs too long. The server returns 5 seconds inside that ceiling with the
@@ -179,22 +224,38 @@ single read.
 | Action | Needs | Answers |
 | --- | --- | --- |
 | `list` | — | `{ sessions[] }` — every session of the state directory, this server's and every other server's |
-| `get` | `sessionId` | one session; `includeSensitive: true` adds `threadId`, `cwd`, `profile`, `config` |
+| `get` | `sessionId` | one session; `includeSensitive: true` adds `threadId`, `cwd`, `profile`, `config` and `effective.cwd` |
 | `resume` | `sessionId` | `{ sessionId, threadId, status: "idle", pollInterval, progress }` |
 | `cancel` | `sessionId` | `{ success, message }` — terminal |
 | `interrupt` | `sessionId` | `{ success, message }` — stops the current turn, session stays usable |
+| `steer` | `sessionId`, `prompt` | `{ sessionId, threadId, turnId, status, message }` — adds to the turn already running |
 | `fork` | `sessionId` | `{ sessionId, threadId, status: "idle", pollInterval }` for the copy; the source is untouched |
 | `clean` | — | `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }` |
-| `clean_background_terminals` | `sessionId` | `{ success, message }` |
+| `clean_background_terminals` | `sessionId` | `{ sessionId, backgroundTerminals }` |
+| `terminate_background_terminal` | `sessionId`, `processId` | `{ sessionId, backgroundTerminals }` |
 
 `clean` takes `statuses` (default `idle`, `error`, `cancelled` — `abandoned`
 only when asked for), `olderThanMs`, `dryRun`, and `includeDisk` (default
 `true`).
 
 Each listed session carries `status`, `createdAt`, `lastActiveAt`,
-`pendingRequestCount`, the `model`, `approvalPolicy` and `sandbox` it runs with,
-`activity`, `lastTurn`, and `owner` — `{ pid, state: "self" | "other" }` for a
-session a running server holds, and nothing at all for a free one.
+`pendingRequestCount`, the `model`, `approvalPolicy`, `sandbox`, `permissions`
+and `approvalsReviewer` it was asked to run with, `effective`, `activity`,
+`lastTurn`, and `owner` — `{ pid, state: "self" | "other" }` for a session a
+running server holds, and nothing at all for a free one.
+
+`effective` is what Codex answered the thread call with: `model`,
+`modelProvider`, `reasoningEffort`, `approvalPolicy` and `sandbox` — the policy
+object, not the mode string the call takes — `approvalsReviewer`,
+`activePermissionProfile` as `{ id, extends }`, plus `cwd` with
+`includeSensitive: true`. Those are the settings the session runs with, so a
+`codex` call naming no model reads its model there and nowhere else, and one
+started on `permissions` reads its permission level in
+`effective.activePermissionProfile`. A field the answer did not carry is absent,
+which says unknown; the whole block is absent when the answer carried none of
+them. `model`, `approvalPolicy`, `sandbox`, `permissions` and
+`approvalsReviewer` beside it stay what the call asked for, so the two together
+say what was asked and what is.
 
 `lastTurn` is `{ turnId, outcome, status, completedAt, error }` for the last turn
 that ended, absent until one does. `status` says what the session is now and
@@ -202,20 +263,97 @@ that ended, absent until one does. `status` says what the session is now and
 it alone, so a session closed after it answered reads `status: "cancelled"` with
 `lastTurn.outcome: "completed"`.
 
+### Steering the turn that is running
+
+`steer` sends `turn/steer` with the running turn's id as `expectedTurnId`. It
+starts no turn: `turnId` is the turn the steer joined, `status` is the status the
+session was already on, and the turn writes its one result at its end, so the
+caller carries on polling.
+
+Codex reads the added text at the turn's next model round trip rather than on
+arrival — measured on `codex-cli 0.150.1`, a steer sent 2 s into an 8 s turn
+reached the model at +8232 ms as a `userMessage` item, and the app server made a
+second upstream request inside the same turn carrying it. A steer sent as a turn
+ends therefore reaches a turn that is over, which answers `SESSION_NOT_RUNNING`
+naming the turn, with the backend's own sentence: `no active turn to steer` when
+the turn had ended, `expected active turn id X but found Y` when the session had
+moved on to another turn.
+
+### The background terminals of a thread
+
+`clean_background_terminals` and `terminate_background_terminal` both answer
+`backgroundTerminals`:
+
+| Field | What it carries |
+| --- | --- |
+| `threadId` | The thread the call worked on |
+| `terminals[]` | Every terminal the call acted on: `processId`, the `itemId`, `command`, `cwd`, `osPid`, `cpuPercent` and `rssKb` the listing gave it, `terminated` — what Codex answered for that process — `error` when the terminate call itself failed, and `gone` |
+| `survivors[]` | The listing taken after the pass: what is still running, including a terminal that started during it |
+| `truncated` | The listing stopped at 20 pages with a cursor still to follow |
+| `cleanCalled` | `thread/backgroundTerminals/clean` swept the thread because the listing failed |
+| `listError` | `{ stage: "before" \| "after", message }` — the listing failed there, so what stands now is unknown |
+
+`terminated: false` is an answer, not a failure: the call reached Codex and the
+process stayed up. `gone` is measured against the second listing, so a terminal
+whose terminate answered `true` and which is still listed reads
+`terminated: true, gone: false`.
+
+`terminate_background_terminal` takes the `processId` from a
+`clean_background_terminals` answer, calls `thread/backgroundTerminals/terminate`
+once, and lists nothing: its `terminals` entry carries `processId` and
+`terminated` and no other field.
+
+A Codex CLI below 0.150.1 serves neither `thread/backgroundTerminals/list` nor
+`…/terminate`. `clean_background_terminals` there falls back to
+`thread/backgroundTerminals/clean` and answers `cleanCalled: true` with
+`listError.stage: "before"` — the sweep ran and what it left is unknown.
+`terminate_background_terminal` has nothing to fall back to and raises the error
+the CLI answered.
+
 ## `codex_setup` — is this machine ready
 
 Takes an optional `cwd` and answers `ready`, the resolved `executable`, the
-`auth` state (`authenticated`, `unauthenticated` or `unknown`, from
-`codex login status`), the `backend` (the Codex CLI version `codex --version`
-printed, the minimum this server drives, and whether the one found clears it),
-the `runtime` (state directory), `projectContext` (whether a user and a project
-`config.toml` exist), and `warnings` with `nextSteps`.
+`auth` state (`authenticated`, `unauthenticated`, `not_required` or `unknown`,
+from what `account/read` answered), the `backend` (the Codex CLI version
+`codex --version` printed, the minimum this server drives, and whether the one
+found clears it), the `runtime` (state directory), `projectContext` (whether a
+user and a project `config.toml` exist), `permissionProfiles`, and `warnings`
+with `nextSteps`. On Windows it also answers `windowsSandbox`.
 
-`ready` is true only when all three clear: the executable resolves, the login
-probe answered `authenticated`, and the CLI is at or above `minimumCliVersion`.
+`permissionProfiles` is `{ ok, profiles?, detail }` — the ids a `codex` call may
+pass as `permissions`, each with its `allowed` flag and its description. This is
+where they live because they are read out of the user's `config.toml` and the
+project layers under `cwd`: only a call to the local Codex can name them, and
+`codex-mcp:///config` and `codex-mcp:///delegation-guide` are static text built
+from the server's own defaults. The listing rides the one `codex app-server`
+this tool stands up, so it costs a request rather than a second process.
+`profiles` is absent where the listing failed or was never run, which is
+not a machine that offers none; `detail` says which of the two it was, and a
+failure also reaches `warnings` and `nextSteps`.
 
-A binary named `codex-internal` skips the login probe and reports
-`auth.state: "unknown"`.
+`auth` is what `account/read` answered, on that same connection: the tool asks
+right after `initialize` — the call needs no thread and no login — and shuts the
+app server down once it has its answers. A question that failed is reported on
+its own, so a listing that failed leaves the auth state as `account/read`
+answered it; a connection that never started stops all of them and is reported
+once.
+
+| `auth.state` | What the app server answered |
+| --- | --- |
+| `not_required` | `requiresOpenaiAuth: false`: the configured model provider carries its own credentials, so no Codex login is needed |
+| `authenticated` | an account, named by `auth.accountType` — `apiKey`, `chatgpt` or `amazonBedrock` |
+| `unauthenticated` | `requiresOpenaiAuth: true` with no account |
+| `unknown` | nothing answered: the app server did not start, or `account/read` failed. `auth.detail` carries the failure |
+
+`windowsSandbox: { status }` is what `windowsSandbox/readiness` answered:
+`ready`, `notConfigured` or `updateRequired`. It is asked for on Windows only —
+the backend gates the method on no platform and a Linux or macOS app server
+answers `notConfigured`, which is what a Windows machine with no sandbox
+answers too.
+
+`ready` is true when the executable resolves, `auth.state` is `authenticated`
+or `not_required`, the CLI is at or above `minimumCliVersion`, and — on Windows
+— `windowsSandbox.status` is not `notConfigured` or `updateRequired`.
 
 ## Errors
 
@@ -244,7 +382,7 @@ A client that reads MCP resources gets seven, all read-only:
 
 | URI | Type | What it holds |
 | --- | --- | --- |
-| `codex-mcp:///server-info` | JSON | Version, detected Codex CLI version and the minimum this server drives, platform, stdio mode, the supported enums, active session count |
+| `codex-mcp:///server-info` | JSON | Version, detected Codex CLI version and the minimum this server drives, platform, stdio mode, the supported enums, active session count, and `defaultModel` — the model Codex answered a `thread/start` that named none with, null until one has |
 | `codex-mcp:///compat-report` | JSON | Which features this build carries, for a client adapting to it |
 | `codex-mcp:///config` | Markdown | Parameter guide and the `config.toml` mapping |
 | `codex-mcp:///gotchas` | Markdown | The practical limits and the traps |
