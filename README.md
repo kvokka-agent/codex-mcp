@@ -1,8 +1,11 @@
 # codex-mcp
 
-[![npm version](https://img.shields.io/npm/v/@kvokka/codex-mcp.svg)](https://www.npmjs.com/package/@kvokka/codex-mcp)
+[![version](https://img.shields.io/npm/v/@kvokka/codex-mcp.svg)](https://www.npmjs.com/package/@kvokka/codex-mcp)
+![Bun](https://img.shields.io/badge/Bun-%23000000.svg?style=for-the-badge&logo=bun&logoColor=white)
+[![downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fomo.dev%2Fapi%2Fnpm-downloads&style=flat-square)](https://www.npmjs.com/package/@kvokka/codex-mcp)
+![CI Status](https://github.com/kvokka/codex-mcp/actions/workflows/ci.yml/badge.svg)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/kvokka/codex-mcp)
 [![license](https://img.shields.io/npm/l/@kvokka/codex-mcp.svg)](https://github.com/kvokka/codex-mcp/blob/master/LICENSE)
-[![node](https://img.shields.io/node/v/@kvokka/codex-mcp.svg)](https://nodejs.org)
 
 Use [OpenAI Codex](https://github.com/openai/codex) as a native Claude agent with
 your subscription.
