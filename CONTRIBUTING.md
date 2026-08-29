@@ -7,9 +7,9 @@ bun install --frozen-lockfile
 bun run check
 ```
 
-`bun run check` is what CI runs: lint, format, types, tests, build, the two
-runtime scripts, and the markdown lint. A pull request passes it before it is
-opened.
+`bun run check` is what CI runs: lint, format, types, build, the tests under
+coverage with the fallow static analysis over them, the two runtime scripts, and
+the markdown lint. A pull request passes it before it is opened.
 
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) sets up the loop that command does
 not cover: running your build inside a real Claude Code session, restarting the

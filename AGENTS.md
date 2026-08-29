@@ -47,9 +47,9 @@ PATH that answers `codex --version`.
 
 ## Commands
 
-`bun run check` is the gate — lint, format, types, tests, build, the two runtime
-scripts and the markdown lint. Run it before opening a pull request. `bun run`
-lists the rest.
+`bun run check` is the gate — lint, format, types, build, the tests under
+coverage with `fallow` reading that coverage, the two runtime scripts and the
+markdown lint. Run it before opening a pull request. `bun run` lists the rest.
 
 ## Layout
 

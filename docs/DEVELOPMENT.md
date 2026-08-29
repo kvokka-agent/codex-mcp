@@ -109,8 +109,8 @@ processes the old one left behind.
 bun run check
 ```
 
-That is the CI gate in one command: `lint`, `format:check`, `typecheck`, `test`,
-`build`, then `check:stdio`, `smoke:mcp` and `lint:md`. `check:stdio` proves
+That is the CI gate in one command: `lint`, `format:check`, `typecheck`,
+`build`, `lint:fallow`, then `check:stdio`, `smoke:mcp` and `lint:md`. `check:stdio` proves
 stdout carries nothing but JSON-RPC before the handshake, and `smoke:mcp` drives
 a real MCP client against the built server and asserts the five tools and the
 resources are there. Both accept `--bunx` to run the published package instead of
@@ -120,7 +120,7 @@ Both start a real server, and both put its state directory in a fresh temporary
 one unless `CODEX_MCP_STATE_DIR` says otherwise, so a check run never disturbs
 the sessions of an installed server.
 
-The end-to-end suite inside `bun test` — `tests/server-lifecycle.e2e.test.ts` —
+The end-to-end suite the run covers — `tests/server-lifecycle.e2e.test.ts` —
 spawns the built server and hands it `tests/helpers/fake-codex.mjs` as the codex
 binary. It skips itself on Windows, which spawns an executable by its extension
 and does not run a `.mjs`. What it measures — a startup that serves MCP while an
@@ -140,9 +140,13 @@ bun run lint:fallow
 
 Runs the tests with coverage, converts the lcov bun writes into the Istanbul
 report fallow reads, then runs fallow against it. Handed no report fallow
-estimates coverage instead, and every CRAP score comes out inflated. The CI
-`check` job runs this command in place of a bare `bun test`, so the suite runs
-once.
+estimates coverage instead, and every CRAP score comes out inflated.
+
+`bun run check` calls this in place of a bare `bun test`, so the suite runs once
+and the analysis reads what it measured. fallow exits non-zero on any finding,
+so an unused export, a circular import, a function past the complexity threshold
+or fresh duplication fails the gate. `bunx fallow explain <issue-type>` says what
+a rule means, and `.fallowrc.json` holds the configuration.
 
 ## The plugin from the working tree
 
