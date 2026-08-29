@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { AppServerClient } from "../app-server/client.js";
-import type { Account, GetAccountResult } from "../app-server/protocol.js";
+import type { Account, GetAccountResult, WindowsSandboxReadiness } from "../app-server/protocol.js";
 import {
   type CodexExecutableInfo,
   resolveDefaultCodexExecutable,
@@ -50,6 +50,10 @@ export interface CodexSetupResult {
     minimumCliVersion: string;
     detail: string;
   };
+  /** Present for a caller on Windows whose app server answered the readiness call. */
+  windowsSandbox?: {
+    status: WindowsSandboxReadiness;
+  };
   runtime: {
     sameMachineRequired: true;
     stateDir: string;
@@ -70,6 +74,9 @@ function resolveCodexStateDir(): string {
 /** What the app server answered, or what went wrong asking it. */
 interface AppServerProbe {
   auth: CodexSetupResult["auth"];
+  windowsSandbox?: CodexSetupResult["windowsSandbox"];
+  /** A call that failed, in the words of the failure. */
+  warnings: string[];
 }
 
 function accountDetail(account: Account): string {
@@ -137,6 +144,7 @@ async function probeAppServer(): Promise<AppServerProbe> {
         auth: unreadAuth(
           `\`codex app-server\` did not start, so the auth state was not read: ${messageOf(err)}`
         ),
+        warnings: [],
       };
     }
 
@@ -148,12 +156,37 @@ async function probeAppServer(): Promise<AppServerProbe> {
         auth: unreadAuth(
           `\`account/read\` failed, so the auth state was not read: ${messageOf(err)}`
         ),
+        warnings: [],
       };
     }
 
-    return { auth: readAuth(answer) };
+    return { auth: readAuth(answer), ...(await probeWindowsSandbox(client)) };
   } finally {
     await client.destroy();
+  }
+}
+
+/**
+ * The Windows sandbox state, asked for on Windows only.
+ *
+ * The backend gates the method on no platform: a Linux 0.150.1 answers
+ * `{"status":"notConfigured"}`, which is what a Windows machine with no sandbox
+ * answers too, so reading it anywhere else would report a sandbox that install
+ * never needed as missing.
+ */
+async function probeWindowsSandbox(
+  client: AppServerClient
+): Promise<Pick<AppServerProbe, "windowsSandbox" | "warnings">> {
+  if (process.platform !== "win32") return { warnings: [] };
+  try {
+    const readiness = await client.windowsSandboxReadiness();
+    return { windowsSandbox: { status: readiness.status }, warnings: [] };
+  } catch (err: unknown) {
+    return {
+      warnings: [
+        `\`windowsSandbox/readiness\` failed, so the Windows sandbox state was not read: ${messageOf(err)}`,
+      ],
+    };
   }
 }
 
@@ -162,6 +195,8 @@ interface CodexProbe {
   executable: CodexSetupResult["executable"];
   auth: CodexSetupResult["auth"];
   backend: CodexSetupResult["backend"];
+  windowsSandbox?: CodexSetupResult["windowsSandbox"];
+  warnings: string[];
 }
 
 /** What the CLI answered about its own version, and whether that clears the floor. */
@@ -211,6 +246,7 @@ async function probeCodexEnvironment(): Promise<CodexProbe> {
       executable: { ok: false, source: "error", detail: messageOf(err) },
       auth: unreadAuth("Auth state not read because executable resolution failed."),
       backend: unprobedBackend("executable resolution failed"),
+      warnings: [],
     };
   }
 
@@ -230,17 +266,25 @@ async function probeCodexEnvironment(): Promise<CodexProbe> {
       executable,
       auth: unreadAuth("Auth state not read because no codex executable was detected."),
       backend: unprobedBackend("no codex executable was detected"),
+      warnings: [],
     };
   }
 
   return { executable, backend: probeCodexBackend(), ...(await probeAppServer()) };
 }
 
+/** Whether the Windows sandbox stands between this caller and a `workspace-write` turn. */
+function windowsSandboxBlocks(probe: CodexProbe): boolean {
+  if (process.platform !== "win32") return false;
+  const status = probe.windowsSandbox?.status;
+  return status === "notConfigured" || status === "updateRequired";
+}
+
 function collectSetupAdvice(
   probe: CodexProbe,
   projectContext: CodexSetupResult["projectContext"]
 ): Pick<CodexSetupResult, "warnings" | "nextSteps"> {
-  const warnings: string[] = [];
+  const warnings: string[] = [...probe.warnings];
   const nextSteps: string[] = [];
 
   if (!probe.executable.ok) {
@@ -262,6 +306,17 @@ function collectSetupAdvice(
     warnings.push(probe.backend.detail);
     nextSteps.push(`Upgrade the Codex CLI to ${MIN_CODEX_CLI_VERSION} or newer.`);
   }
+  if (windowsSandboxBlocks(probe)) {
+    warnings.push(
+      probe.windowsSandbox?.status === "updateRequired"
+        ? 'The Windows sandbox needs an update; a turn started with `sandbox: "workspace-write"` fails until it has one.'
+        : 'The Windows sandbox is not configured; a turn started with `sandbox: "workspace-write"` fails.'
+    );
+    nextSteps.push(
+      'Complete the Windows sandbox setup in the Codex CLI, or start sessions with `sandbox: "read-only"`.'
+    );
+  }
+
   return { warnings, nextSteps };
 }
 
@@ -280,11 +335,12 @@ export async function executeCodexSetup(
   const { warnings, nextSteps } = collectSetupAdvice(probe, projectContext);
 
   return {
-    ready: probe.executable.ok && probe.auth.ok && probe.backend.ok,
+    ready: probe.executable.ok && probe.auth.ok && probe.backend.ok && !windowsSandboxBlocks(probe),
     cwd,
     executable: probe.executable,
     auth: probe.auth,
     backend: probe.backend,
+    ...(probe.windowsSandbox ? { windowsSandbox: probe.windowsSandbox } : {}),
     runtime: {
       sameMachineRequired: true,
       stateDir: resolveCodexStateDir(),

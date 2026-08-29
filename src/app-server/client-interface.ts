@@ -26,6 +26,7 @@ import type {
   TurnInterruptParams,
   TurnStartParams,
   TurnStartResult,
+  WindowsSandboxReadinessResult,
 } from "./protocol.js";
 
 export interface ICodexClient {
@@ -69,6 +70,9 @@ export interface ICodexClient {
    * an OpenAI login at all. Answered right after `initialize`, with no thread.
    */
   accountRead(params?: GetAccountParams): Promise<GetAccountResult>;
+
+  /** Whether the Windows sandbox is set up. Only a `win32` answer means anything. */
+  windowsSandboxReadiness(): Promise<WindowsSandboxReadinessResult>;
 
   /** Start a new agent turn within a thread. */
   turnStart(params: TurnStartParams, timeout?: number): Promise<TurnStartResult>;

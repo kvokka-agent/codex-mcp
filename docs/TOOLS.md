@@ -252,7 +252,8 @@ Takes an optional `cwd` and answers `ready`, the resolved `executable`, the
 `auth` state, the `backend` (the Codex CLI version `codex --version` printed,
 the minimum this server drives, and whether the one found clears it), the
 `runtime` (state directory), `projectContext` (whether a user and a project
-`config.toml` exist), and `warnings` with `nextSteps`.
+`config.toml` exist), and `warnings` with `nextSteps`. On Windows it also
+answers `windowsSandbox`.
 
 `auth` is what `account/read` answered. The tool starts an app server of its
 own for it, asks right after `initialize` — the call needs no thread and no
@@ -265,8 +266,15 @@ login — and shuts it down again.
 | `unauthenticated` | `requiresOpenaiAuth: true` with no account |
 | `unknown` | nothing answered: the app server did not start, or `account/read` failed. `auth.detail` carries the failure |
 
+`windowsSandbox: { status }` is what `windowsSandbox/readiness` answered:
+`ready`, `notConfigured` or `updateRequired`. It is asked for on Windows only —
+the backend gates the method on no platform and a Linux or macOS app server
+answers `notConfigured`, which is what a Windows machine with no sandbox
+answers too.
+
 `ready` is true when the executable resolves, `auth.state` is `authenticated`
-or `not_required`, and the CLI is at or above `minimumCliVersion`.
+or `not_required`, the CLI is at or above `minimumCliVersion`, and — on Windows
+— `windowsSandbox.status` is not `notConfigured` or `updateRequired`.
 
 ## Errors
 

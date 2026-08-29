@@ -206,6 +206,10 @@ const setupResultShape = {
     minimumCliVersion: z.string(),
     detail: z.string(),
   }),
+  windowsSandbox: z
+    .object({ status: z.enum(["ready", "notConfigured", "updateRequired"]) })
+    .optional()
+    .describe("Windows only: what `windowsSandbox/readiness` answered."),
   runtime: z.object({
     sameMachineRequired: z.boolean(),
     stateDir: z.string(),
@@ -760,7 +764,7 @@ function registerCodexSetupTool(ctx: ToolContext): void {
     {
       title: "Codex Setup",
       description:
-        "Run local readiness checks for codex-mcp: executable resolution, the account the app server answers with, Codex CLI version against the minimum this server drives, and project config. Use this before starting a session when setup is uncertain.",
+        "Run local readiness checks for codex-mcp: executable resolution, the account the app server answers with, Codex CLI version against the minimum this server drives, the Windows sandbox on Windows, and project config. Use this before starting a session when setup is uncertain.",
       inputSchema: {
         cwd: z
           .string()

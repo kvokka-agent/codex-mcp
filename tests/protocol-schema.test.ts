@@ -316,6 +316,7 @@ const MODELLED_RESULTS: Record<string, string> = {
   ThreadBackgroundTerminalsListResult: "v2/ThreadBackgroundTerminalsListResponse.json",
   ThreadBackgroundTerminalsTerminateResult: "v2/ThreadBackgroundTerminalsTerminateResponse.json",
   GetAccountResult: "v2/GetAccountResponse.json",
+  WindowsSandboxReadinessResult: "v2/WindowsSandboxReadinessResponse.json",
 };
 
 /**

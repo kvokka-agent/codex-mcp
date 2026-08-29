@@ -597,6 +597,13 @@ model provider carries its own credentials, and the null account beside it is
 not a missing login. A connection that fails, or an `account/read` that does,
 leaves `auth.state: "unknown"` carrying the failure.
 
+On Windows the same connection also asks `windowsSandbox/readiness`. The backend
+gates that method on no platform — a Linux 0.150.1 answers
+`{"status":"notConfigured"}`, which is what a Windows machine with no sandbox
+answers — so `process.platform === "win32"` decides whether it is asked at all.
+The MCP server and the app server run on the same machine, so that value is the
+one that counts.
+
 ### Reading ids out of responses
 
 `thread/start`, `thread/fork` and `thread/resume` answer `{ thread: Thread }`,

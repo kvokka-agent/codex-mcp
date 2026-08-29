@@ -126,5 +126,6 @@ default instead of the configured one is shaped exactly like the configured one.
 
 Call `codex_setup` from the client. It reports the resolved executable, what
 `account/read` answered about this install's account, the Codex CLI version
-against the minimum above, the state directory, and whether a user or project
-`config.toml` is visible from the target directory — with a `nextSteps` line for anything that is not ready.
+against the minimum above, the Windows sandbox on Windows, the state directory,
+and whether a user or project `config.toml` is visible from the target
+directory — with a `nextSteps` line for anything that is not ready.

@@ -440,6 +440,23 @@ export interface GetAccountResult {
   account?: Account | null;
 }
 
+// ── Windows sandbox ────────────────────────────────────────────────
+
+/** schema definition `WindowsSandboxReadiness`. */
+export type WindowsSandboxReadiness = "ready" | "notConfigured" | "updateRequired";
+
+/**
+ * windowsSandbox/readiness response — schema
+ * v2/WindowsSandboxReadinessResponse.json. The method takes null params.
+ *
+ * The backend answers on every platform and gates nothing on the operating
+ * system: a Linux 0.150.1 answers `{"status":"notConfigured"}`, the same value a
+ * Windows machine with no sandbox gives, so only a `win32` caller may read it.
+ */
+export interface WindowsSandboxReadinessResult {
+  status: WindowsSandboxReadiness;
+}
+
 // ── SandboxPolicy ──────────────────────────────────────────────────
 
 export type SandboxPolicy =
@@ -912,6 +929,7 @@ export const Methods = {
   THREAD_BACKGROUND_TERMINALS_TERMINATE: "thread/backgroundTerminals/terminate",
   THREAD_DELETE: "thread/delete",
   ACCOUNT_READ: "account/read",
+  WINDOWS_SANDBOX_READINESS: "windowsSandbox/readiness",
   TURN_START: "turn/start",
   TURN_INTERRUPT: "turn/interrupt",
   TURN_STEER: "turn/steer",

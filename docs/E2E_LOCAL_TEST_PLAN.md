@@ -109,7 +109,7 @@ Expected tool names:
 4. `codex_session`
 5. `codex_check`
 
-Call `codex_setup` first. It reports executable resolution, the account `account/read` answered with, the Codex CLI version against the minimum this server drives, the state directory, and whether user/project `config.toml` files are visible. Fix anything in `nextSteps` before TC1; `ready: false` means later tests will fail for environment reasons, not server reasons.
+Call `codex_setup` first. It reports executable resolution, the account `account/read` answered with, the Codex CLI version against the minimum this server drives, the Windows sandbox on Windows, the state directory, and whether user/project `config.toml` files are visible. Fix anything in `nextSteps` before TC1; `ready: false` means later tests will fail for environment reasons, not server reasons.
 
 ## 3.2 Resource Discovery
 

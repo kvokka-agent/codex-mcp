@@ -31,6 +31,12 @@ let root: string;
 let home: string;
 let serverCwd: string;
 const envBackup = { ...process.env };
+const realPlatform = process.platform;
+
+function setPlatform(platform: string): void {
+  Object.defineProperty(process, "platform", { value: platform, configurable: true });
+}
+
 function makeExecutable(dir: string, name: string): string {
   mkdirSync(dir, { recursive: true });
   const file = path.join(dir, name);
@@ -165,6 +171,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPlatform(realPlatform);
   _resetForTesting();
   rmSync(root, { recursive: true, force: true });
   for (const key of Object.keys(process.env)) {
@@ -447,6 +454,82 @@ describe("executeCodexSetup", () => {
     process.env.CODEX_MCP_STATE_DIR = "   ";
     const blank = await executeCodexSetup(undefined, serverCwd);
     expect(blank.runtime.stateDir).toBe(path.join(home, ".codex-mcp", "state"));
+  });
+});
+
+/**
+ * What these prove and what they do not: they drive `process.platform`, which is
+ * the value the code branches on, and a stand-in app server whose readiness
+ * answers are written here. No Windows machine ran them, so the Windows sandbox
+ * of a real install — whether Codex reports it `ready` where a `workspace-write`
+ * turn then works — is not what is measured; the branch and the report are.
+ */
+describe("executeCodexSetup on Windows", () => {
+  beforeEach(() => {
+    writeConfig(home);
+    replies["windowsSandbox/readiness"] = { result: { status: "ready" } };
+  });
+
+  it("asks for the readiness of the sandbox and reports it", async () => {
+    setPlatform("win32");
+    const result = await executeCodexSetup(undefined, serverCwd);
+
+    expect(requested).toEqual(["initialize", "account/read", "windowsSandbox/readiness"]);
+    expect(result.windowsSandbox).toEqual({ status: "ready" });
+    expect(result.ready).toBe(true);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("refuses readiness for a sandbox that is not configured", async () => {
+    setPlatform("win32");
+    replies["windowsSandbox/readiness"] = { result: { status: "notConfigured" } };
+
+    const result = await executeCodexSetup(undefined, serverCwd);
+    expect(result.windowsSandbox).toEqual({ status: "notConfigured" });
+    expect(result.ready).toBe(false);
+    expect(result.warnings).toContain(
+      'The Windows sandbox is not configured; a turn started with `sandbox: "workspace-write"` fails.'
+    );
+    expect(result.nextSteps).toContain(
+      'Complete the Windows sandbox setup in the Codex CLI, or start sessions with `sandbox: "read-only"`.'
+    );
+  });
+
+  it("refuses readiness for a sandbox that needs an update", async () => {
+    setPlatform("win32");
+    replies["windowsSandbox/readiness"] = { result: { status: "updateRequired" } };
+
+    const result = await executeCodexSetup(undefined, serverCwd);
+    expect(result.windowsSandbox).toEqual({ status: "updateRequired" });
+    expect(result.ready).toBe(false);
+    expect(result.warnings).toContain(
+      'The Windows sandbox needs an update; a turn started with `sandbox: "workspace-write"` fails until it has one.'
+    );
+  });
+
+  it("reports a readiness call that failed and holds the rest of the report", async () => {
+    setPlatform("win32");
+    replies["windowsSandbox/readiness"] = { error: { code: -32601, message: "Method not found" } };
+
+    const result = await executeCodexSetup(undefined, serverCwd);
+    expect(result.windowsSandbox).toBeUndefined();
+    expect(result.warnings).toEqual([
+      "`windowsSandbox/readiness` failed, so the Windows sandbox state was not read: RPC error -32601: Method not found",
+    ]);
+    expect(result.auth.state).toBe("not_required");
+    expect(result.ready).toBe(true);
+  });
+
+  it("asks nothing about the sandbox off Windows, where the answer would be the same", async () => {
+    // The backend answers `notConfigured` on Linux too, so an unconditional call
+    // would report a missing Windows sandbox on every machine that has no Windows.
+    setPlatform("linux");
+    replies["windowsSandbox/readiness"] = { result: { status: "notConfigured" } };
+
+    const result = await executeCodexSetup(undefined, serverCwd);
+    expect(requested).toEqual(["initialize", "account/read"]);
+    expect(result.windowsSandbox).toBeUndefined();
+    expect(result.ready).toBe(true);
   });
 });
 

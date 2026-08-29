@@ -40,6 +40,7 @@ import {
   type TurnInterruptParams,
   type TurnStartParams,
   type TurnStartResult,
+  type WindowsSandboxReadinessResult,
 } from "./protocol.js";
 
 declare const __PKG_VERSION__: string;
@@ -255,6 +256,11 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
 
   async accountRead(params: GetAccountParams = {}): Promise<GetAccountResult> {
     return this.request<GetAccountResult>(Methods.ACCOUNT_READ, params);
+  }
+
+  async windowsSandboxReadiness(): Promise<WindowsSandboxReadinessResult> {
+    // The schema types this method's params as null, not as an object.
+    return this.request<WindowsSandboxReadinessResult>(Methods.WINDOWS_SANDBOX_READINESS, null);
   }
 
   async turnStart(
