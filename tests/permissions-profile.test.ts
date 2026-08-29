@@ -296,31 +296,6 @@ describe("a permissions profile reaching the backend", () => {
     expect(client.listedParams).toHaveLength(20);
   });
 
-  it("lists the profiles of a machine on a codex process of its own", async () => {
-    const profiles = await manager.listPermissionProfiles(workspace);
-
-    expect(profiles).toEqual(THREE_PROFILES);
-    expect(client.start).toHaveBeenCalledWith({});
-    expect(client.destroy).toHaveBeenCalled();
-  });
-
-  it("reports a destroy that failed and still answers the listing", async () => {
-    const errors = jest.spyOn(console, "error").mockImplementation(() => {});
-    client.destroy = jest.fn(async () => {
-      throw new Error("destroy failed");
-    });
-
-    const profiles = await manager.listPermissionProfiles(workspace);
-
-    expect(profiles).toEqual(THREE_PROFILES);
-    expect(
-      errors.mock.calls.some((call) =>
-        String(call[0]).includes("client of a permission-profile listing")
-      )
-    ).toBe(true);
-    errors.mockRestore();
-  });
-
   it("follows the cursor before deciding a profile is missing", async () => {
     client.pages = [
       { data: [THREE_PROFILES[0]], nextCursor: "page2" },

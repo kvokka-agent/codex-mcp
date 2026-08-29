@@ -325,15 +325,18 @@ pass as `permissions`, each with its `allowed` flag and its description. This is
 where they live because they are read out of the user's `config.toml` and the
 project layers under `cwd`: only a call to the local Codex can name them, and
 `codex-mcp:///config` and `codex-mcp:///delegation-guide` are static text built
-from the server's own defaults. Reading them stands up a `codex app-server`, a
-second one beside the connection `account/read` uses, which is what makes this
-tool the slowest of the five. `profiles` is absent where the listing failed or was never run, which is
+from the server's own defaults. The listing rides the one `codex app-server`
+this tool stands up, so it costs a request rather than a second process.
+`profiles` is absent where the listing failed or was never run, which is
 not a machine that offers none; `detail` says which of the two it was, and a
 failure also reaches `warnings` and `nextSteps`.
 
-`auth` is what `account/read` answered. The tool starts an app server of its
-own for it, asks right after `initialize` — the call needs no thread and no
-login — and shuts it down again.
+`auth` is what `account/read` answered, on that same connection: the tool asks
+right after `initialize` — the call needs no thread and no login — and shuts the
+app server down once it has its answers. A question that failed is reported on
+its own, so a listing that failed leaves the auth state as `account/read`
+answered it; a connection that never started stops all of them and is reported
+once.
 
 | `auth.state` | What the app server answered |
 | --- | --- |

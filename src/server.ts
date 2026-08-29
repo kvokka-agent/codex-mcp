@@ -916,7 +916,7 @@ function registerCodexReplyTool(ctx: ToolContext): void {
 }
 
 function registerCodexSetupTool(ctx: ToolContext): void {
-  const { server, serverCwd, sessionManager } = ctx;
+  const { server, serverCwd } = ctx;
   server.registerTool(
     "codex_setup",
     {
@@ -938,10 +938,7 @@ function registerCodexSetupTool(ctx: ToolContext): void {
         openWorldHint: false,
       },
     },
-    (args) =>
-      runTool(() =>
-        executeCodexSetup(args, serverCwd, (cwd) => sessionManager.listPermissionProfiles(cwd))
-      )
+    (args) => runTool(() => executeCodexSetup(args, serverCwd))
   );
 }
 

@@ -8,6 +8,7 @@ import type {
   PermissionProfileSummary,
   WindowsSandboxReadiness,
 } from "../app-server/protocol.js";
+import { listPermissionProfiles } from "../session/permission-profiles.js";
 import {
   type CodexExecutableInfo,
   resolveDefaultCodexExecutable,
@@ -22,15 +23,6 @@ import {
 export interface CodexSetupInput {
   cwd?: string;
 }
-
-/**
- * Reads the permission profiles of a working directory.
- *
- * The ids come from the user's own `config.toml` and from the project layers
- * under that directory, so only the local Codex can name them; every caller
- * hands one in, and the one that ships stands up a `codex app-server` for it.
- */
-export type PermissionProfileLister = (cwd: string) => Promise<PermissionProfileSummary[]>;
 
 /**
  * What the app server answered about authentication.
@@ -102,6 +94,9 @@ function resolveCodexStateDir(): string {
 interface AppServerProbe {
   auth: CodexSetupResult["auth"];
   windowsSandbox?: CodexSetupResult["windowsSandbox"];
+  permissionProfiles: CodexSetupResult["permissionProfiles"];
+  /** Set where the connection never came up, so every answer is unread for that one reason. */
+  connectionFailed?: true;
   /** A call that failed, in the words of the failure. */
   warnings: string[];
 }
@@ -153,12 +148,16 @@ function messageOf(err: unknown): string {
 }
 
 /**
- * Ask the running app server what the login scrape used to guess at.
+ * Ask one app server everything `codex_setup` reports from the backend.
  *
  * The connection costs one spawn plus `initialize` plus one request — measured
- * at 52, 37 and 41 ms on Codex CLI 0.150.1 — and needs no thread.
+ * at 52, 37 and 41 ms on Codex CLI 0.150.1 — and needs no thread, so the three
+ * questions ride it in turn rather than each paying for a process of its own.
+ * Each is asked and answered on its own: an `account/read` that failed leaves
+ * the profile listing to answer, and a listing that failed leaves the auth
+ * state as `account/read` reported it.
  */
-async function probeAppServer(): Promise<AppServerProbe> {
+async function probeAppServer(cwd: string): Promise<AppServerProbe> {
   const client = new AppServerClient();
   // An `error` event with no listener is thrown, and the spawn of a missing
   // executable emits one, so the listener goes on before `start`.
@@ -171,26 +170,35 @@ async function probeAppServer(): Promise<AppServerProbe> {
         auth: unreadAuth(
           `\`codex app-server\` did not start, so the auth state was not read: ${messageOf(err)}`
         ),
+        permissionProfiles: unlistedProfiles("`codex app-server` did not start"),
+        connectionFailed: true,
         warnings: [],
       };
     }
 
-    let answer: GetAccountResult;
-    try {
-      answer = await client.accountRead();
-    } catch (err: unknown) {
-      return {
-        auth: unreadAuth(
-          `\`account/read\` failed, so the auth state was not read: ${messageOf(err)}`
-        ),
-        warnings: [],
-      };
-    }
-
-    return { auth: readAuth(answer), ...(await probeWindowsSandbox(client)) };
+    const auth = await probeAuth(client);
+    const sandbox = await probeWindowsSandbox(client);
+    return {
+      auth,
+      ...sandbox,
+      permissionProfiles: await probePermissionProfiles(client, cwd),
+    };
   } finally {
+    // `destroy` reports a signal it could not send itself and resolves, so the
+    // gathered report is never lost to the shutdown of the probe's own client.
     await client.destroy();
   }
+}
+
+/** What `account/read` answered, or the failure that stopped the question. */
+async function probeAuth(client: AppServerClient): Promise<CodexSetupResult["auth"]> {
+  let answer: GetAccountResult;
+  try {
+    answer = await client.accountRead();
+  } catch (err: unknown) {
+    return unreadAuth(`\`account/read\` failed, so the auth state was not read: ${messageOf(err)}`);
+  }
+  return readAuth(answer);
 }
 
 /**
@@ -223,6 +231,8 @@ interface CodexProbe {
   auth: CodexSetupResult["auth"];
   backend: CodexSetupResult["backend"];
   windowsSandbox?: CodexSetupResult["windowsSandbox"];
+  permissionProfiles: CodexSetupResult["permissionProfiles"];
+  connectionFailed?: true;
   warnings: string[];
 }
 
@@ -264,7 +274,7 @@ function unprobedBackend(reason: string): CodexSetupResult["backend"] {
   };
 }
 
-async function probeCodexEnvironment(): Promise<CodexProbe> {
+async function probeCodexEnvironment(cwd: string): Promise<CodexProbe> {
   let info: CodexExecutableInfo;
   try {
     info = resolveDefaultCodexExecutable();
@@ -273,6 +283,7 @@ async function probeCodexEnvironment(): Promise<CodexProbe> {
       executable: { ok: false, source: "error", detail: messageOf(err) },
       auth: unreadAuth("Auth state not read because executable resolution failed."),
       backend: unprobedBackend("executable resolution failed"),
+      permissionProfiles: unlistedProfiles("executable resolution failed"),
       warnings: [],
     };
   }
@@ -293,11 +304,12 @@ async function probeCodexEnvironment(): Promise<CodexProbe> {
       executable,
       auth: unreadAuth("Auth state not read because no codex executable was detected."),
       backend: unprobedBackend("no codex executable was detected"),
+      permissionProfiles: unlistedProfiles("no codex executable was detected"),
       warnings: [],
     };
   }
 
-  return { executable, backend: probeCodexBackend(), ...(await probeAppServer()) };
+  return { executable, backend: probeCodexBackend(), ...(await probeAppServer(cwd)) };
 }
 
 /** Whether the Windows sandbox stands between this caller and a `workspace-write` turn. */
@@ -309,8 +321,7 @@ function windowsSandboxBlocks(probe: CodexProbe): boolean {
 
 function collectSetupAdvice(
   probe: CodexProbe,
-  projectContext: CodexSetupResult["projectContext"],
-  permissionProfiles: CodexSetupResult["permissionProfiles"]
+  projectContext: CodexSetupResult["projectContext"]
 ): Pick<CodexSetupResult, "warnings" | "nextSteps"> {
   const warnings: string[] = [...probe.warnings];
   const nextSteps: string[] = [];
@@ -334,8 +345,10 @@ function collectSetupAdvice(
     warnings.push(probe.backend.detail);
     nextSteps.push(`Upgrade the Codex CLI to ${MIN_CODEX_CLI_VERSION} or newer.`);
   }
-  if (!permissionProfiles.ok && probe.executable.ok) {
-    warnings.push(permissionProfiles.detail);
+  // A connection that never came up is one failure, and the auth line above
+  // already carries it: the listing it also stopped adds no second warning.
+  if (!probe.permissionProfiles.ok && probe.executable.ok && !probe.connectionFailed) {
+    warnings.push(probe.permissionProfiles.detail);
     nextSteps.push(
       "Start a session with `sandbox` rather than `permissions` until the profile listing answers."
     );
@@ -354,20 +367,24 @@ function collectSetupAdvice(
   return { warnings, nextSteps };
 }
 
-/** What the machine answered about its permission profiles, or what went wrong asking. */
+/** A listing nothing ran, naming what stopped it. */
+function unlistedProfiles(reason: string): CodexSetupResult["permissionProfiles"] {
+  return { ok: false, detail: `Permission profiles not listed because ${reason}.` };
+}
+
+/**
+ * What the machine answered about its permission profiles, or what went wrong asking.
+ *
+ * The ids come from the user's own `config.toml` and from the project layers
+ * under `cwd`, so the listing is asked for the directory this report answers
+ * for, and only the local Codex can name them.
+ */
 async function probePermissionProfiles(
-  probe: CodexProbe,
-  cwd: string,
-  listProfiles: PermissionProfileLister
+  client: AppServerClient,
+  cwd: string
 ): Promise<CodexSetupResult["permissionProfiles"]> {
-  if (!probe.executable.ok) {
-    return {
-      ok: false,
-      detail: "Permission profiles not listed because no codex executable was detected.",
-    };
-  }
   try {
-    const profiles = await listProfiles(cwd);
+    const profiles = await listPermissionProfiles(client, cwd);
     return {
       ok: true,
       profiles,
@@ -391,19 +408,17 @@ async function probePermissionProfiles(
 
 export async function executeCodexSetup(
   input: CodexSetupInput | undefined,
-  serverCwd: string,
-  listProfiles: PermissionProfileLister
+  serverCwd: string
 ): Promise<CodexSetupResult> {
   const cwd = input?.cwd && input.cwd.trim() !== "" ? input.cwd : serverCwd;
-  const probe = await probeCodexEnvironment();
-  const permissionProfiles = await probePermissionProfiles(probe, cwd, listProfiles);
+  const probe = await probeCodexEnvironment(cwd);
 
   const projectContext = {
     hasUserConfig: existsSync(path.join(homedir(), ".codex", "config.toml")),
     hasProjectConfig: existsSync(path.join(cwd, ".codex", "config.toml")),
   };
 
-  const { warnings, nextSteps } = collectSetupAdvice(probe, projectContext, permissionProfiles);
+  const { warnings, nextSteps } = collectSetupAdvice(probe, projectContext);
 
   return {
     ready: probe.executable.ok && probe.auth.ok && probe.backend.ok && !windowsSandboxBlocks(probe),
@@ -417,7 +432,7 @@ export async function executeCodexSetup(
       stateDir: resolveCodexStateDir(),
     },
     projectContext,
-    permissionProfiles,
+    permissionProfiles: probe.permissionProfiles,
     warnings,
     nextSteps,
   };

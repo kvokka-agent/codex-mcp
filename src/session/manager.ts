@@ -18,7 +18,6 @@ import {
   type FileChangeApprovalResponse,
   type LegacyApprovalResponse,
   Methods,
-  type PermissionProfileSummary,
   type RequestId,
   SANDBOX_POLICY_TYPES,
   type SandboxPolicy,
@@ -95,10 +94,7 @@ import {
   stripActivityMarkers,
   stripActivityMarkersFromTurn,
 } from "./activity-marker.js";
-import {
-  assertPermissionProfileSelectable,
-  listPermissionProfiles,
-} from "./permission-profiles.js";
+import { assertPermissionProfileSelectable } from "./permission-profiles.js";
 import type { PidDetails } from "./persistence.js";
 import {
   bufferingWarningMessage,
@@ -704,30 +700,6 @@ export class SessionManager {
   }
 
   // ── Session Management ───────────────────────────────────────────
-
-  /**
-   * The permission profiles this machine offers for `cwd`.
-   *
-   * It stands up a codex process of its own: the listing depends on the user's
-   * `config.toml` and on the project layers under `cwd`, so no session's client
-   * answers for another cwd, and `codex_setup` runs before any session exists.
-   * A failure is carried to the caller rather than answered as an empty list.
-   */
-  async listPermissionProfiles(cwd?: string): Promise<PermissionProfileSummary[]> {
-    const client = this.createClient();
-    try {
-      await client.start({});
-      return await listPermissionProfiles(client, cwd);
-    } finally {
-      try {
-        await client.destroy();
-      } catch (err) {
-        console.error(
-          `[codex-mcp] Failed to destroy the client of a permission-profile listing: ${describeError(err)}`
-        );
-      }
-    }
-  }
 
   /** The sessions this server holds in memory. */
   listSessions(): PublicSessionInfo[] {

@@ -643,20 +643,26 @@ below 0.150.1, which serves neither `list` nor `terminate`, takes that path.
 
 ### The setup probe
 
-`codex_setup` starts an app server of its own, asks it `account/read`, and shuts
-it down: what account this install signs with, and whether it needs an OpenAI
-login at all, is data the backend answers right after `initialize`, with no
-thread and no auth. `requiresOpenaiAuth: false` is an install whose configured
-model provider carries its own credentials, and the null account beside it is
-not a missing login. A connection that fails, or an `account/read` that does,
-leaves `auth.state: "unknown"` carrying the failure.
+`codex_setup` starts one app server, asks it everything it reports from the
+backend, and shuts it down: `account/read`, then `windowsSandbox/readiness` on
+Windows, then `permissionProfile/list` for the `cwd` the call named. Each answer
+is data the backend gives right after `initialize`, with no thread and no auth,
+and the connection costs one spawn plus `initialize` plus a request — 52, 37 and
+41 ms on Codex CLI 0.150.1 — which is what the tool waits on.
 
-On Windows the same connection also asks `windowsSandbox/readiness`. The backend
-gates that method on no platform — a Linux 0.150.1 answers
-`{"status":"notConfigured"}`, which is what a Windows machine with no sandbox
-answers — so `process.platform === "win32"` decides whether it is asked at all.
-The MCP server and the app server run on the same machine, so that value is the
-one that counts.
+`requiresOpenaiAuth: false` is an install whose configured model provider carries
+its own credentials, and the null account beside it is not a missing login. An
+`account/read` that fails leaves `auth.state: "unknown"` carrying the failure and
+leaves the other two questions to answer for themselves; a listing that fails
+reports `permissionProfiles.ok: false` beside the auth state that was read. A
+connection that never came up stops all three, and the report names that one
+failure once.
+
+The backend gates `windowsSandbox/readiness` on no platform — a Linux 0.150.1
+answers `{"status":"notConfigured"}`, which is what a Windows machine with no
+sandbox answers — so `process.platform === "win32"` decides whether it is asked
+at all. The MCP server and the app server run on the same machine, so that value
+is the one that counts.
 
 ### Checking a permissions profile before the thread starts
 
@@ -676,9 +682,9 @@ cursor, is a listing that says nothing about which profiles exist — it surface
 as `INTERNAL` naming the reason, and the id is not sent on the guess that it is
 fine.
 
-`codex_setup` runs the same listing over a `codex app-server` of its own,
-because it answers before any session exists and the ids depend on the `cwd` it
-was given.
+`codex_setup` runs the same listing on the connection it opened for
+`account/read`, for the `cwd` it was given: it answers before any session
+exists, so no session's client answers for that directory.
 
 ### Reading ids out of responses
 

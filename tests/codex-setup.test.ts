@@ -4,8 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import type { PermissionProfileSummary } from "../src/app-server/protocol.js";
-import { executeCodexSetup, type PermissionProfileLister } from "../src/tools/codex-setup.js";
+import { executeCodexSetup } from "../src/tools/codex-setup.js";
 import { _resetForTesting } from "../src/utils/codex-executable.js";
 import { isCodexCliBelowMinimum } from "../src/utils/codex-version.js";
 import { mockModule } from "./helpers/mock.js";
@@ -38,14 +37,6 @@ function setPlatform(platform: string): void {
   Object.defineProperty(process, "platform", { value: platform, configurable: true });
 }
 
-/** What the stubbed `permissionProfile/list` answers, or the failure it raises. */
-let profilesResult: (() => Promise<PermissionProfileSummary[]>) | null = null;
-const listProfiles: PermissionProfileLister = (cwd) => {
-  listedCwds.push(cwd);
-  return (profilesResult ?? (async () => []))();
-};
-const listedCwds: string[] = [];
-
 function makeExecutable(dir: string, name: string): string {
   mkdirSync(dir, { recursive: true });
   const file = path.join(dir, name);
@@ -73,11 +64,14 @@ function installSpawnSyncStub(): void {
 /** One answer of the stand-in, either a JSON-RPC result or a JSON-RPC error. */
 type Reply = { result: unknown } | { error: { code: number; message: string } };
 
-/** Method → what the stand-in app server answers it with. */
-let replies: Record<string, Reply>;
+/** Method → what the stand-in app server answers it with, one entry of a list per call. */
+let replies: Record<string, Reply | Reply[]>;
 
 /** Every method the client asked the stand-in for, in order. */
 let requested: string[];
+
+/** The `cwd` of every `permissionProfile/list` the client sent. */
+let listedCwds: unknown[];
 
 /** When set, the stand-in reports this failure instead of completing `initialize`. */
 let startFailure: Error | null;
@@ -133,16 +127,18 @@ function createAppServerStub() {
 
 function answer(
   stdout: PassThrough,
-  msg: { id: number; method: string },
+  msg: { id: number; method: string; params?: { cwd?: unknown } },
   proc: { emit: EventEmitter["emit"] }
 ): void {
   requested.push(msg.method);
+  if (msg.method === "permissionProfile/list") listedCwds.push(msg.params?.cwd);
   if (startFailure) {
     const failure = startFailure;
     queueMicrotask(() => proc.emit("error", failure));
     return;
   }
-  const reply: Reply = replies[msg.method] ?? {
+  const configured = replies[msg.method];
+  const reply: Reply = (Array.isArray(configured) ? configured.shift() : configured) ?? {
     error: { code: -32601, message: `Method not found: ${msg.method}` },
   };
   stdout.write(
@@ -167,10 +163,10 @@ beforeEach(() => {
   replies = {
     initialize: { result: { userAgent: "codex-mcp/0.0.0" } },
     "account/read": { result: { account: null, requiresOpenaiAuth: false } },
+    "permissionProfile/list": { result: { data: [], nextCursor: null } },
   };
   requested = [];
-  profilesResult = null;
-  listedCwds.length = 0;
+  listedCwds = [];
   startFailure = null;
   spawnMock.mockImplementation(() => createAppServerStub());
 
@@ -195,7 +191,7 @@ afterEach(() => {
 describe("executeCodexSetup", () => {
   it("reports a ready environment", async () => {
     writeConfig(home);
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
 
     expect(result.ready).toBe(true);
     expect(result.cwd).toBe(serverCwd);
@@ -228,20 +224,21 @@ describe("executeCodexSetup", () => {
     expect(result.nextSteps).toEqual([]);
   });
 
-  it("asks the app server it spawned from the resolved executable, and nothing else", async () => {
-    await executeCodexSetup(undefined, serverCwd, listProfiles);
+  it("asks its three questions on one app server, spawned from the resolved executable", async () => {
+    await executeCodexSetup(undefined, serverCwd);
 
     const [cmd, args] = spawnMock.mock.calls[0] as [string, string[]];
     expect(cmd).toBe(process.env.CODEX_MCP_PATH);
     expect(args).toEqual(["app-server"]);
-    expect(requested).toEqual(["initialize", "account/read"]);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(requested).toEqual(["initialize", "account/read", "permissionProfile/list"]);
     // The one subprocess this tool still scrapes a string out of.
     expect(spawnSyncMock.mock.calls.map(([, callArgs]) => callArgs)).toEqual([["--version"]]);
   });
 
   it("reads an install whose provider carries its own credentials as ready", async () => {
     writeConfig(home);
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
 
     expect(result.auth.state).toBe("not_required");
     expect(result.auth.ok).toBe(true);
@@ -252,7 +249,7 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     replies["account/read"] = { result: { account: null, requiresOpenaiAuth: true } };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.auth).toEqual({
       ok: false,
       state: "unauthenticated",
@@ -269,7 +266,7 @@ describe("executeCodexSetup", () => {
       result: { account: { type: "apiKey" }, requiresOpenaiAuth: true },
     };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.auth).toEqual({
       ok: true,
       state: "authenticated",
@@ -288,7 +285,7 @@ describe("executeCodexSetup", () => {
       },
     };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.auth).toEqual({
       ok: true,
       state: "authenticated",
@@ -309,7 +306,7 @@ describe("executeCodexSetup", () => {
       },
     };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.auth).toEqual({
       ok: true,
       state: "authenticated",
@@ -323,14 +320,20 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     startFailure = new Error("spawn ENOENT");
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.auth).toEqual({
       ok: false,
       state: "unknown",
       detail: "`codex app-server` did not start, so the auth state was not read: spawn ENOENT",
     });
     expect(result.ready).toBe(false);
-    expect(result.warnings).toContain(result.auth.detail);
+    // One connection carried all three questions, so the failure that stopped
+    // it is reported once rather than per question.
+    expect(result.warnings).toEqual([result.auth.detail]);
+    expect(result.permissionProfiles).toEqual({
+      ok: false,
+      detail: "Permission profiles not listed because `codex app-server` did not start.",
+    });
     // Nothing here tells the caller to log in: no answer said they are logged out.
     expect(result.nextSteps).toEqual([]);
   });
@@ -339,7 +342,7 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     replies["account/read"] = { error: { code: -32601, message: "Method not found" } };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.auth).toEqual({
       ok: false,
       state: "unknown",
@@ -354,19 +357,19 @@ describe("executeCodexSetup", () => {
     mkdirSync(projectCwd, { recursive: true });
     writeConfig(projectCwd);
 
-    const result = await executeCodexSetup({ cwd: projectCwd }, serverCwd, listProfiles);
+    const result = await executeCodexSetup({ cwd: projectCwd }, serverCwd);
     expect(result.cwd).toBe(projectCwd);
     expect(result.projectContext).toEqual({ hasUserConfig: false, hasProjectConfig: true });
     expect(result.warnings).toEqual([]);
   });
 
   it("falls back to the server cwd for a blank input cwd", async () => {
-    const result = await executeCodexSetup({ cwd: "   " }, serverCwd, listProfiles);
+    const result = await executeCodexSetup({ cwd: "   " }, serverCwd);
     expect(result.cwd).toBe(serverCwd);
   });
 
   it("warns when no Codex config is present anywhere", async () => {
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.warnings).toContain(
       "No Codex config.toml was found in ~/.codex or this project."
     );
@@ -378,7 +381,7 @@ describe("executeCodexSetup", () => {
     process.env.PATH = "";
     _resetForTesting();
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.executable.ok).toBe(false);
     expect(result.executable.source).toBe("default");
     expect(result.executable.detail).toContain("No codex executable was auto-detected");
@@ -407,7 +410,7 @@ describe("executeCodexSetup", () => {
     process.env.CODEX_MCP_COMMAND = "codex";
     _resetForTesting();
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.executable.source).toBe("error");
     expect(result.executable.ok).toBe(false);
     expect(result.executable.command).toBeUndefined();
@@ -422,7 +425,7 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     versionResult = { status: 0, stdout: "codex-cli 0.100.0", stderr: "" };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.backend.ok).toBe(false);
     expect(result.backend.cliVersion).toBe("0.100.0");
     expect(result.warnings).toContain(
@@ -437,7 +440,7 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     versionResult = { status: 1, stdout: "", stderr: "error: unrecognized argument '--version'\n" };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.backend).toEqual({
       ok: false,
       cliVersion: null,
@@ -452,18 +455,18 @@ describe("executeCodexSetup", () => {
     writeConfig(home);
     versionResult = { status: 0, stdout: "codex-cli 0.101.0", stderr: "" };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.backend.ok).toBe(true);
     expect(result.ready).toBe(true);
   });
 
   it("defaults the state dir under the home directory", async () => {
     delete process.env.CODEX_MCP_STATE_DIR;
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.runtime.stateDir).toBe(path.join(home, ".codex-mcp", "state"));
 
     process.env.CODEX_MCP_STATE_DIR = "   ";
-    const blank = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const blank = await executeCodexSetup(undefined, serverCwd);
     expect(blank.runtime.stateDir).toBe(path.join(home, ".codex-mcp", "state"));
   });
 });
@@ -483,9 +486,14 @@ describe("executeCodexSetup on Windows", () => {
 
   it("asks for the readiness of the sandbox and reports it", async () => {
     setPlatform("win32");
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
 
-    expect(requested).toEqual(["initialize", "account/read", "windowsSandbox/readiness"]);
+    expect(requested).toEqual([
+      "initialize",
+      "account/read",
+      "windowsSandbox/readiness",
+      "permissionProfile/list",
+    ]);
     expect(result.windowsSandbox).toEqual({ status: "ready" });
     expect(result.ready).toBe(true);
     expect(result.warnings).toEqual([]);
@@ -495,7 +503,7 @@ describe("executeCodexSetup on Windows", () => {
     setPlatform("win32");
     replies["windowsSandbox/readiness"] = { result: { status: "notConfigured" } };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.windowsSandbox).toEqual({ status: "notConfigured" });
     expect(result.ready).toBe(false);
     expect(result.warnings).toContain(
@@ -510,7 +518,7 @@ describe("executeCodexSetup on Windows", () => {
     setPlatform("win32");
     replies["windowsSandbox/readiness"] = { result: { status: "updateRequired" } };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.windowsSandbox).toEqual({ status: "updateRequired" });
     expect(result.ready).toBe(false);
     expect(result.warnings).toContain(
@@ -522,7 +530,7 @@ describe("executeCodexSetup on Windows", () => {
     setPlatform("win32");
     replies["windowsSandbox/readiness"] = { error: { code: -32601, message: "Method not found" } };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.windowsSandbox).toBeUndefined();
     expect(result.warnings).toEqual([
       "`windowsSandbox/readiness` failed, so the Windows sandbox state was not read: RPC error -32601: Method not found",
@@ -537,8 +545,8 @@ describe("executeCodexSetup on Windows", () => {
     setPlatform("linux");
     replies["windowsSandbox/readiness"] = { result: { status: "notConfigured" } };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
-    expect(requested).toEqual(["initialize", "account/read"]);
+    const result = await executeCodexSetup(undefined, serverCwd);
+    expect(requested).toEqual(["initialize", "account/read", "permissionProfile/list"]);
     expect(result.windowsSandbox).toBeUndefined();
     expect(result.ready).toBe(true);
   });
@@ -567,13 +575,18 @@ describe("isCodexCliBelowMinimum", () => {
 
 describe("executeCodexSetup permission profiles", () => {
   it("names the ids a codex call may pass as permissions", async () => {
-    profilesResult = async () => [
-      { id: ":read-only", allowed: true, description: "Reads only" },
-      { id: ":workspace", allowed: true },
-      { id: ":danger-full-access", allowed: false },
-    ];
+    replies["permissionProfile/list"] = {
+      result: {
+        data: [
+          { id: ":read-only", allowed: true, description: "Reads only" },
+          { id: ":workspace", allowed: true },
+          { id: ":danger-full-access", allowed: false },
+        ],
+        nextCursor: null,
+      },
+    };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
 
     expect(listedCwds).toEqual([serverCwd]);
     expect(result.permissionProfiles.ok).toBe(true);
@@ -590,12 +603,26 @@ describe("executeCodexSetup permission profiles", () => {
     expect(result.warnings).not.toContain(result.permissionProfiles.detail);
   });
 
+  it("follows the cursor of a listing that answered in pages", async () => {
+    replies["permissionProfile/list"] = [
+      { result: { data: [{ id: ":read-only", allowed: true }], nextCursor: "page2" } },
+      { result: { data: [{ id: ":workspace", allowed: true }], nextCursor: null } },
+    ];
+
+    const result = await executeCodexSetup(undefined, serverCwd);
+
+    expect(requested.filter((method) => method === "permissionProfile/list")).toHaveLength(2);
+    expect(result.permissionProfiles.profiles?.map((profile) => profile.id)).toEqual([
+      ":read-only",
+      ":workspace",
+    ]);
+  });
+
   it("resolves the profiles of the cwd the call named", async () => {
-    profilesResult = async () => [];
     const projectCwd = path.join(root, "project");
     mkdirSync(projectCwd, { recursive: true });
 
-    const result = await executeCodexSetup({ cwd: projectCwd }, serverCwd, listProfiles);
+    const result = await executeCodexSetup({ cwd: projectCwd }, serverCwd);
 
     expect(listedCwds).toEqual([projectCwd]);
     expect(result.permissionProfiles).toEqual({
@@ -605,32 +632,45 @@ describe("executeCodexSetup permission profiles", () => {
     });
   });
 
-  it("carries a listing that failed through instead of answering with no profiles", async () => {
-    profilesResult = async () => {
-      throw new Error("permissionProfile/list timed out after 30000ms");
+  it("carries a listing that failed through beside an auth probe that answered", async () => {
+    replies["permissionProfile/list"] = {
+      error: { code: -32603, message: "permissionProfile/list timed out after 30000ms" },
     };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
 
     expect(result.permissionProfiles.ok).toBe(false);
     expect(result.permissionProfiles.profiles).toBeUndefined();
     expect(result.permissionProfiles.detail).toBe(
-      "Failed to list permission profiles: permissionProfile/list timed out after 30000ms"
+      "Failed to list permission profiles: RPC error -32603: permissionProfile/list timed out after 30000ms"
     );
     expect(result.warnings).toContain(result.permissionProfiles.detail);
     expect(result.nextSteps).toContain(
       "Start a session with `sandbox` rather than `permissions` until the profile listing answers."
     );
+    // The listing failed and the account call did not: one question of the
+    // connection says nothing about the other.
+    expect(result.auth.state).toBe("not_required");
+  });
+
+  it("reads the auth state off a connection whose listing was refused", async () => {
+    replies["account/read"] = { error: { code: -32601, message: "Method not found" } };
+
+    const result = await executeCodexSetup(undefined, serverCwd);
+
+    expect(result.auth.state).toBe("unknown");
+    expect(result.permissionProfiles).toEqual({
+      ok: true,
+      profiles: [],
+      detail: "This machine offers no permission profile; `permissions` has no id to name here.",
+    });
   });
 
   it("does not list profiles when no codex executable resolved", async () => {
     delete process.env.CODEX_MCP_PATH;
     process.env.PATH = "";
-    profilesResult = async () => {
-      throw new Error("this lister must not run");
-    };
 
-    const result = await executeCodexSetup(undefined, serverCwd, listProfiles);
+    const result = await executeCodexSetup(undefined, serverCwd);
 
     expect(listedCwds).toEqual([]);
     expect(result.permissionProfiles).toEqual({
