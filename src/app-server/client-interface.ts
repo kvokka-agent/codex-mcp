@@ -8,6 +8,8 @@
 import type { AppServerSpawnOptions } from "./lifecycle.js";
 import type {
   InitializeResult,
+  PermissionProfileListParams,
+  PermissionProfileListResult,
   RequestId,
   ThreadBackgroundTerminalsCleanParams,
   ThreadBackgroundTerminalsListParams,
@@ -61,6 +63,9 @@ export interface ICodexClient {
 
   /** Delete a thread and the history Codex keeps for it. */
   threadDelete(params: ThreadDeleteParams): Promise<Record<string, never>>;
+
+  /** The permission profiles this machine offers, one page per call. */
+  permissionProfileList(params: PermissionProfileListParams): Promise<PermissionProfileListResult>;
 
   /** Start a new agent turn within a thread. */
   turnStart(params: TurnStartParams, timeout?: number): Promise<TurnStartResult>;

@@ -146,7 +146,8 @@ export type DynamicToolSpec =
 /**
  * Where approval requests are routed for review. Absent means the schema
  * default `user`. `auto_review` hands the decision to a subagent;
- * `guardian_subagent` is the legacy spelling of it.
+ * `guardian_subagent` is the legacy spelling of it, which this server never
+ * sends.
  */
 export type ApprovalsReviewer = "user" | "auto_review" | "guardian_subagent";
 
@@ -406,6 +407,34 @@ export interface ThreadBackgroundTerminalsTerminateParams {
  */
 export interface ThreadBackgroundTerminalsTerminateResult {
   terminated: boolean;
+}
+
+// ── Permission profiles ────────────────────────────────────────────
+
+/** permissionProfile/list — schema v2/PermissionProfileListParams.json. */
+export interface PermissionProfileListParams {
+  /** Working directory whose project config layers are resolved. */
+  cwd?: string | null;
+  /** Opaque cursor from a previous call. */
+  cursor?: string | null;
+  /** Page size. Omitted answers the full result set. */
+  limit?: number | null;
+}
+
+/** One profile of a `permissionProfile/list` page. */
+export interface PermissionProfileSummary {
+  /** Available permission profile identifier, such as `:read-only`. */
+  id: string;
+  /** Whether the effective requirements allow selecting this profile. */
+  allowed: boolean;
+  description?: string | null;
+}
+
+/** permissionProfile/list response — schema v2/PermissionProfileListResponse.json. */
+export interface PermissionProfileListResult {
+  data: PermissionProfileSummary[];
+  /** Cursor for the next page. Null means the listing is exhausted. */
+  nextCursor?: string | null;
 }
 
 /** thread/delete — schema v2/ThreadDeleteParams.json. The response is empty. */
@@ -756,6 +785,72 @@ export interface TextRange {
   end: TextPosition;
 }
 
+// ── Approval auto-review (approvalsReviewer: auto_review) ──────────
+
+/**
+ * Lifecycle state of one approval auto-review.
+ *
+ * `inProgress` opens the review; the other four end it, and only `approved`
+ * lets the action through.
+ */
+export type GuardianApprovalReviewStatus =
+  | "inProgress"
+  | "approved"
+  | "denied"
+  | "timedOut"
+  | "aborted";
+
+/**
+ * The review object of an `item/autoApprovalReview/*` notification.
+ *
+ * The schema marks `GuardianApprovalReview` `[UNSTABLE]` — "This shape is
+ * expected to change soon" — so only `status` is declared here and nothing in
+ * this server reads deeper. `rationale`, `riskLevel` and `userAuthorization`
+ * are on the wire and are not to be depended on.
+ */
+export interface GuardianApprovalReview {
+  status: GuardianApprovalReviewStatus;
+}
+
+/** item/autoApprovalReview/started — schema ItemGuardianApprovalReviewStartedNotification. */
+export interface AutoApprovalReviewStartedParams {
+  /** `GuardianApprovalReviewAction`, left unread: it is `[UNSTABLE]` too. */
+  action: unknown;
+  review: GuardianApprovalReview;
+  /** Stable identifier for this review. */
+  reviewId: string;
+  /** Unix milliseconds when the review started. */
+  startedAtMs: number;
+  /** The reviewed item, absent for a network-policy review, which targets no item. */
+  targetItemId?: string | null;
+  threadId: string;
+  turnId: string;
+}
+
+/** item/autoApprovalReview/completed — schema ItemGuardianApprovalReviewCompletedNotification. */
+export interface AutoApprovalReviewCompletedParams {
+  /** `GuardianApprovalReviewAction`, left unread: it is `[UNSTABLE]` too. */
+  action: unknown;
+  /** Unix milliseconds when the review completed. */
+  completedAtMs: number;
+  /** What produced the terminal decision; the schema gives one value, `agent`. */
+  decisionSource: "agent";
+  review: GuardianApprovalReview;
+  reviewId: string;
+  startedAtMs: number;
+  targetItemId?: string | null;
+  threadId: string;
+  turnId: string;
+}
+
+/** autoApprovalReview/strictReviewRequired — schema StrictReviewRequiredNotification. */
+export interface StrictReviewRequiredParams {
+  /** Unix milliseconds when the review started. */
+  startedAtMs: number;
+  threadId: string;
+  turnId: string;
+}
+
 export interface DeprecationNoticeNotificationParams {
   summary: string;
   details?: string | null;
@@ -892,6 +987,7 @@ export const Methods = {
   THREAD_BACKGROUND_TERMINALS_LIST: "thread/backgroundTerminals/list",
   THREAD_BACKGROUND_TERMINALS_TERMINATE: "thread/backgroundTerminals/terminate",
   THREAD_DELETE: "thread/delete",
+  PERMISSION_PROFILE_LIST: "permissionProfile/list",
   TURN_START: "turn/start",
   TURN_INTERRUPT: "turn/interrupt",
   TURN_STEER: "turn/steer",
@@ -930,6 +1026,9 @@ export const Methods = {
   REASONING_SUMMARY_PART_ADDED: "item/reasoning/summaryPartAdded",
   PLAN_DELTA: "item/plan/delta",
   MCP_TOOL_PROGRESS: "item/mcpToolCall/progress",
+  AUTO_APPROVAL_REVIEW_STARTED: "item/autoApprovalReview/started",
+  AUTO_APPROVAL_REVIEW_COMPLETED: "item/autoApprovalReview/completed",
+  AUTO_APPROVAL_REVIEW_STRICT_REQUIRED: "autoApprovalReview/strictReviewRequired",
   MODEL_REROUTED: "model/rerouted",
   FUZZY_FILE_SEARCH_SESSION_UPDATED: "fuzzyFileSearch/sessionUpdated",
   FUZZY_FILE_SEARCH_SESSION_COMPLETED: "fuzzyFileSearch/sessionCompleted",

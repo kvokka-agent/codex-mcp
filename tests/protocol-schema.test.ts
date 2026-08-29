@@ -152,14 +152,6 @@ const UNMODELED_SERVER_METHODS: Record<string, string> = {
   "serverRequest/resolved":
     "tells one client that another answered a shared server request; codex-mcp is the only client of the app-server it spawned",
 
-  // The auto_review approvals reviewer, which codex-mcp never selects.
-  "item/autoApprovalReview/started":
-    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
-  "item/autoApprovalReview/completed":
-    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
-  "autoApprovalReview/strictReviewRequired":
-    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
-
   // Advisory payloads with no field in this server's tool output.
   "model/verification": "model-side verification metadata; codex-mcp reports the turn's answer",
   "turn/moderationMetadata": "moderation metadata for a UI; codex-mcp reports the turn's answer",
@@ -264,6 +256,10 @@ const MODELLED_TYPES: Record<string, string> = {
   HookCompletedNotification: "HookNotificationParams",
   HookRunSummary: "HookRunSummary",
   HookOutputEntry: "HookOutputEntry",
+  PermissionProfileListParams: "PermissionProfileListParams",
+  ItemGuardianApprovalReviewStartedNotification: "AutoApprovalReviewStartedParams",
+  ItemGuardianApprovalReviewCompletedNotification: "AutoApprovalReviewCompletedParams",
+  StrictReviewRequiredNotification: "StrictReviewRequiredParams",
 };
 
 /**
@@ -320,6 +316,7 @@ const MODELLED_RESULTS: Record<string, string> = {
   TurnStartResult: "v2/TurnStartResponse.json",
   ThreadBackgroundTerminalsListResult: "v2/ThreadBackgroundTerminalsListResponse.json",
   ThreadBackgroundTerminalsTerminateResult: "v2/ThreadBackgroundTerminalsTerminateResponse.json",
+  PermissionProfileListResult: "v2/PermissionProfileListResponse.json",
 };
 
 /**

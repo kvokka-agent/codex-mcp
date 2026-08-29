@@ -31,7 +31,7 @@ complete.
 | --- | --- | --- |
 | `codex` | start a session | waits for the thread only |
 | `codex_reply` | continue a session | returns at once |
-| `codex_setup` | report executable, auth and Codex CLI version readiness | sync |
+| `codex_setup` | report executable, auth, Codex CLI version and permission-profile readiness | spawns one app-server for the profile listing |
 | `codex_session` | list, get, resume, cancel, interrupt, fork, clean, clean background terminals, terminate one of them | sync |
 | `codex_check` | report status and answer what the session waits for | sync, or long-poll on `waitMs` |
 
@@ -93,7 +93,9 @@ src/
 - Tool responses stay MCP-safe: `{ content, structuredContent?, isError }`.
 - Diagnostics go to `console.error`. stdout is the MCP channel and carries
   nothing but JSON-RPC.
-- `approvalPolicy` and `sandbox` stay required on `codex`.
+- `approvalPolicy` stays required on `codex`, and a `codex` call names exactly
+  one of `sandbox` and `permissions`. The zod schema of `src/server.ts` refuses
+  both together and refuses neither, so the pair never reaches the backend.
 - Sensitive fields stay redacted unless the caller passes
   `includeSensitive: true`.
 

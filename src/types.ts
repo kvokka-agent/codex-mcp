@@ -19,6 +19,18 @@ export const PERSONALITIES = ["none", "friendly", "pragmatic"] as const;
 export type Personality = (typeof PERSONALITIES)[number];
 
 /**
+ * Who decides an approval request the turn raises.
+ *
+ * `user` routes it to the caller, which answers through `codex_check`.
+ * `auto_review` hands it to a Codex subagent that gathers context and applies a
+ * risk-based decision framework. The schema also accepts `guardian_subagent`,
+ * the legacy spelling of `auto_review`; this server neither publishes nor sends
+ * it.
+ */
+export const APPROVALS_REVIEWERS = ["user", "auto_review"] as const;
+export type ApprovalsReviewer = (typeof APPROVALS_REVIEWERS)[number];
+
+/**
  * The reasoning efforts every model of Codex CLI 0.150.1 answered `model/list`
  * with, least to most. The set belongs to the model, not to this server, so it
  * feeds the `effort` description and `codex-mcp:///server-info` and gates
@@ -257,6 +269,18 @@ export interface SessionInfo {
   profile?: string;
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
+  /**
+   * Named permission profile of this thread, from a `[permissions.<id>]` table
+   * of the user's Codex config. It replaces `sandbox`, which cannot be combined
+   * with it, and the same profile is restored on a fork and on a resume.
+   */
+  permissions?: string;
+  /**
+   * Who reviews the approval requests of this thread. Thread state: `thread/start`
+   * sets it, and `thread/fork` and `thread/resume` carry it so a forked or
+   * resumed session keeps the reviewer it ran under.
+   */
+  approvalsReviewer?: ApprovalsReviewer;
   personality?: Personality;
   /** Reasoning effort of the session's turns: `turn/start` carries it on every turn, and a turn that omits it falls back to config.toml. */
   effort?: EffortLevel;

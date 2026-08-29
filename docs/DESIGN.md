@@ -42,6 +42,10 @@ codex app-server
   -p <profile>                    ← profile
 ```
 
+`permissions` takes no flag: it is a `thread/start` parameter, and a call that
+names it sends no `-c sandbox_mode=` at all — the environment default included —
+because a profile and a sandbox mode would each decide the same thing.
+
 `advanced.config` values serialize by type: a primitive through `String()`, an
 object or array through `JSON.stringify()`. The CLI then loads
 `~/.codex/config.toml`, applies the profile, and applies the `-c` overrides on
@@ -220,6 +224,8 @@ log at `data.method`.
 | `item/reasoning/textDelta`, `…/summaryTextDelta`, `…/summaryPartAdded` | progress | |
 | `item/plan/delta` | progress | Experimental |
 | `item/mcpToolCall/progress` | progress | |
+| `item/autoApprovalReview/started`, `autoApprovalReview/strictReviewRequired` | progress | The `auto_review` reviewer opening a decision |
+| `item/autoApprovalReview/completed` | approval_result | The decision, with the `review.status` it carried; a status other than `approved` also becomes the activity line |
 | `turn/started` | progress | The source of `activeTurnId` |
 | `turn/completed` | result | |
 | `turn/diff/updated`, `turn/plan/updated` | progress | |
@@ -316,6 +322,28 @@ them: a call that blocks for an hour reports nothing while it blocks, which is
 the failure the poll loop exists to fix.
 
 ## Approval arbitration
+
+`approvalsReviewer` decides who arbitrates. Under `user`, the schema default,
+the flow below runs. Under `auto_review` a Codex subagent decides instead, and
+this server reports the outcome rather than answering it — `thread/start`,
+`thread/fork`, `thread/resume` and every `turn/start` carry the field, and
+`meta.json` records it so a resume restores it.
+
+The two are not exclusive on the wire: whether a command that would raise
+`item/commandExecution/requestApproval` under `user` still reaches this server
+under `auto_review` is not settled here. Both paths hold — the request is
+answered exactly as it is below where one arrives, and the review notifications
+are reported whether or not one does.
+
+`item/autoApprovalReview/completed` carries `review.status`, one of
+`inProgress`, `approved`, `denied`, `timedOut` and `aborted`. That field is the
+only one read: the schema marks `GuardianApprovalReview` `[UNSTABLE]` — "This
+shape is expected to change soon" — so `rationale`, `riskLevel` and
+`userAuthorization` reach `events.jsonl` with the rest of the raw params and
+nothing branches on them. A status other than `approved` becomes the session's
+activity line, so the next poll says why the turn did what it did.
+
+Under `user`:
 
 1. app-server sends a server-initiated request:
    `item/commandExecution/requestApproval`,
@@ -588,6 +616,28 @@ further; a cursor still standing there is reported as `truncated: true`.
 runs and the answer carries `cleanCalled: true` with the listing's error, so the
 caller is told the state is unknown rather than that the thread is clear. A CLI
 below 0.150.1, which serves neither `list` nor `terminate`, takes that path.
+
+### Checking a permissions profile before the thread starts
+
+`thread/start` answers an id Codex does not know with
+`-32600 failed to load configuration: default_permissions requires a
+\`[permissions]\` table`, which names a TOML table the caller never wrote. So
+`permissionProfile/list` runs first, on the client that is already up, for the
+cwd of the session: the id is either in the listing and `allowed`, or the caller
+is told which ids exist. `codex_reply` runs the same check before the session
+leaves `idle`, so a bad id costs an error and not a turn.
+
+Three answers are told apart. An id no entry carries does not exist here. An
+entry carrying `allowed: false` exists and cannot be selected. A listing that
+raised, answered no `data` array, carried an entry without a string `id` and a
+boolean `allowed`, or handed back more than twenty pages without exhausting its
+cursor, is a listing that says nothing about which profiles exist — it surfaces
+as `INTERNAL` naming the reason, and the id is not sent on the guess that it is
+fine.
+
+`codex_setup` runs the same listing over a `codex app-server` of its own,
+because it answers before any session exists and the ids depend on the `cwd` it
+was given.
 
 ### Reading ids out of responses
 

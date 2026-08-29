@@ -22,6 +22,8 @@ import {
   type JsonRpcRequest,
   type JsonRpcResponse,
   Methods,
+  type PermissionProfileListParams,
+  type PermissionProfileListResult,
   type RequestId,
   type ThreadBackgroundTerminalsCleanParams,
   type ThreadBackgroundTerminalsListParams,
@@ -249,6 +251,12 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
 
   async threadDelete(params: ThreadDeleteParams): Promise<Record<string, never>> {
     return this.request<Record<string, never>>(Methods.THREAD_DELETE, params);
+  }
+
+  async permissionProfileList(
+    params: PermissionProfileListParams
+  ): Promise<PermissionProfileListResult> {
+    return this.request<PermissionProfileListResult>(Methods.PERMISSION_PROFILE_LIST, params);
   }
 
   async turnStart(

@@ -199,14 +199,21 @@ describe("what the codex schema asks for, given the environment", () => {
     await server.close();
   });
 
-  it("requires the permission level of the turn where the environment sets none", async () => {
+  it("requires the approval policy of the turn where the environment sets none", async () => {
     for (const key of KEYS) delete process.env[key];
     server = createServer(process.cwd()).server;
 
     const codex = tool(await listTools(), "codex");
+    const properties = propertiesOf(codex.inputSchema, "codex");
 
     expect(codex.inputSchema?.required).toContain("approvalPolicy");
-    expect(codex.inputSchema?.required).toContain("sandbox");
+    // `sandbox` and `permissions` are one choice, which `required` cannot say:
+    // the schema publishes both as optional and the refinement asks for one.
+    expect(codex.inputSchema?.required ?? []).not.toContain("sandbox");
+    expect(codex.inputSchema?.required ?? []).not.toContain("permissions");
+    expect((properties.sandbox as { description: string }).description).toContain(
+      "the call must carry one of the two"
+    );
   });
 
   it("publishes it as optional, naming the value in force, where the environment sets it", async () => {

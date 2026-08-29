@@ -23,23 +23,29 @@ export async function executeCodex(
 ): Promise<SessionStartResult> {
   const cwd = resolveAndValidateCwd(args.cwd, serverCwd);
   const spawnOpts = extractSpawnOptions(args, defaults);
-  // The permission level of a turn is stated, never inferred: the tool schema
-  // requires both where the environment sets neither, and this is what a caller
-  // reaching the function directly hits.
-  for (const [name, value] of [
-    ["approvalPolicy", spawnOpts.approvalPolicy],
-    ["sandbox", spawnOpts.sandbox],
-  ] as const) {
-    if (value === undefined) {
-      throw new Error(
-        `Error [${ErrorCode.INVALID_ARGUMENT}]: ${name} is required — the call named none and ${SESSION_DEFAULT_ENV[name]} sets none.`
-      );
-    }
+  // The permission level of a turn is stated, never inferred. The tool schema
+  // says the same; this is what a caller reaching the function directly hits.
+  if (args.sandbox !== undefined && args.permissions !== undefined) {
+    throw new Error(
+      `Error [${ErrorCode.INVALID_ARGUMENT}]: name sandbox or permissions, not both — a named profile carries the sandbox.`
+    );
+  }
+  if (spawnOpts.approvalPolicy === undefined) {
+    throw new Error(
+      `Error [${ErrorCode.INVALID_ARGUMENT}]: approvalPolicy is required — the call named none and ${SESSION_DEFAULT_ENV.approvalPolicy} sets none.`
+    );
+  }
+  if (spawnOpts.sandbox === undefined && args.permissions === undefined) {
+    throw new Error(
+      `Error [${ErrorCode.INVALID_ARGUMENT}]: name a sandbox or a permissions profile — the call named neither and ${SESSION_DEFAULT_ENV.sandbox} sets none.`
+    );
   }
   const effort = args.effort ?? defaults.effort;
   const advanced = {
     ...args.advanced,
     approvalTimeoutMs: args.advanced?.approvalTimeoutMs ?? defaults.approvalTimeoutMs,
+    approvalsReviewer: args.approvalsReviewer,
+    permissions: args.permissions,
   };
 
   const startResult = await sessionManager.createSession(

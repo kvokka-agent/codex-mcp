@@ -161,9 +161,16 @@ function configTopLevelLines(defaults: SessionDefaults): string[] {
   return [
     "## Top-level parameters (`codex`)",
     "",
-    `- Required: ${["`prompt`", defaults.approvalPolicy ? "" : "`approvalPolicy`", defaults.sandbox ? "" : "`sandbox`"].filter(Boolean).join(", ")}.`,
-    `- Optional: ${defaults.approvalPolicy ? `\`approvalPolicy\` (default \`${defaults.approvalPolicy}\`), ` : ""}${defaults.sandbox ? `\`sandbox\` (default \`${defaults.sandbox}\`), ` : ""}\`effort\` (default \`${defaults.effort}\`), \`cwd\` (default server cwd), \`model\` (default ${defaults.model ? `\`${defaults.model}\`` : "config.toml"}), \`profile\` (default CLI profile), \`advanced\`.`,
+    `- Required: ${["`prompt`", defaults.approvalPolicy ? "" : "`approvalPolicy`"].filter(Boolean).join(", ")}.`,
+    `- Optional: ${defaults.approvalPolicy ? `\`approvalPolicy\` (default \`${defaults.approvalPolicy}\`), ` : ""}\`sandbox\`${defaults.sandbox ? ` (default \`${defaults.sandbox}\`)` : ""}, \`permissions\`, \`approvalsReviewer\` (default \`user\`), \`effort\` (default \`${defaults.effort}\`), \`cwd\` (default server cwd), \`model\` (default ${defaults.model ? `\`${defaults.model}\`` : "config.toml"}), \`profile\` (default CLI profile), \`advanced\`.`,
+    defaults.sandbox
+      ? "- Name `sandbox` or `permissions`, never both. A call that names neither starts on the sandbox `" +
+        defaults.sandbox +
+        "`."
+      : "- Name `sandbox` or `permissions`: the call carries one of the two, and never both.",
+    "- `permissions`: a named profile id such as `:read-only` or `:workspace`, from a `[permissions.<id>]` table of the Codex config. It carries the sandbox and the approval policy the profile sets, and `codex_setup` lists the ids this machine offers. An id it does not offer is refused before the thread starts, with the list of the ids it does.",
     "- Prefer passing `cwd` explicitly to avoid accidental server-cwd execution.",
+    `- \`approvalsReviewer\`: who decides an approval the turn raises. \`user\` reports it in \`codex_check.actions[]\` for you to answer; \`auto_review\` hands it to a Codex subagent that decides it inside Codex, and a review that denies an action arrives as \`progress.activity\` and as an \`approval_result\` record in the session's event log.`,
     "",
     "## `advanced.*` guide",
     "",
@@ -191,19 +198,20 @@ function configMappingLines(): string[] {
     "- `codex.model` -> `-c model=...`",
     "- `codex.approvalPolicy` -> `-c approval_policy=...`",
     "- `codex.sandbox` -> `-c sandbox_mode=...`",
+    "- `codex.permissions` -> `thread/start.permissions`; no `-c` flag, and no `-c sandbox_mode=` is sent with it",
     "- `codex.effort` -> turn-level reasoning effort (do not encode in `advanced.config`)",
     "- `codex.profile` -> `-p ...`",
     "",
     "## `codex_reply` differences",
     "",
     "- `codex_reply.outputSchema` is top-level; `codex` takes the same schema as `advanced.outputSchema`.",
-    "- `codex_reply` can override `model`, `approvalPolicy`, `sandbox`, `effort`, `summary`, `personality`, and `cwd`.",
+    "- `codex_reply` can override `model`, `approvalPolicy`, `approvalsReviewer`, `sandbox` or `permissions`, `effort`, `summary`, `personality`, and `cwd`.",
     "- `codex_reply` only works when session state is `idle` or `error`; otherwise returns `SESSION_BUSY`.",
     "- All `codex_reply` override fields default to no override when omitted.",
     "",
     "## Override persistence (`codex_reply`)",
     "",
-    "- `model`, `approvalPolicy`, `sandbox`, and `cwd` update in-memory session defaults for later turns.",
+    "- `model`, `approvalPolicy`, `approvalsReviewer`, `sandbox`, `permissions`, and `cwd` update in-memory session defaults for later turns.",
     "- `effort`, `summary`, `personality`, and `outputSchema` apply to the submitted turn payload.",
     "",
   ];
@@ -484,6 +492,8 @@ function delegationTaskLines(): string[] {
     "",
     "**Key rule:** `read-only` sandbox already prevents writes, so `approvalPolicy: 'never'` is safe with it. Avoid `untrusted` + `read-only` — every read command triggers approval for no safety gain.",
     "",
+    "A `permissions` profile id replaces the `sandbox` column: it carries the sandbox and the approval policy its `[permissions.<id>]` table sets. Name one or the other, never both. `codex_setup` lists the ids this machine offers.",
+    "",
   ];
 }
 
@@ -504,6 +514,12 @@ function delegationPolicyLines(defaults: SessionDefaults): string[] {
     "- `never`: no interactive prompts, and no escalation either — a command that needs approval is refused with `approval required by policy, but AskForApproval is set to Never`. Pair it with a sandbox that already permits the work: `read-only` for review, `danger-full-access` for an unattended run.",
     "- `on-request`: Codex works inside the sandbox and asks when it wants to step outside it. The pragmatic choice for implementation work, and it needs a human or outer agent polling to answer.",
     "- `untrusted`: strictest interactive mode; expect frequent prompts and higher timeout sensitivity.",
+    "",
+    "## Who answers an approval (`approvalsReviewer`)",
+    "",
+    "- `user` (the default) routes every approval to you: `codex_check` reports it in `actions[]` and `respond_permission` answers it. It needs a caller polling, and an unanswered request auto-declines.",
+    "- `auto_review` routes it to a Codex subagent that gathers context and applies a risk-based decision framework. Pair it with `on-request` for a run nobody watches: the turn can step outside its sandbox where the review approves, instead of being refused the way `never` refuses it.",
+    '- A review that denies an action becomes `progress.activity` — "Approval auto-review denied an action of this turn" — so the next poll says why the turn did what it did.',
     `- Default approval timeout is ${defaults.approvalTimeoutMs}ms. If interactive approvals are possible, raise \`advanced.approvalTimeoutMs\` to at least 300000 so requests do not expire between normal running-session polls.`,
     "",
     "## The loop",

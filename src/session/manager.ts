@@ -16,6 +16,7 @@ import {
   type FileChangeApprovalResponse,
   type LegacyApprovalResponse,
   Methods,
+  type PermissionProfileSummary,
   type RequestId,
   SANDBOX_POLICY_TYPES,
   type SandboxPolicy,
@@ -33,6 +34,7 @@ import {
 } from "../persistence/index.js";
 import {
   type ApprovalPolicy,
+  type ApprovalsReviewer,
   type BackgroundTerminalOutcome,
   type BackgroundTerminalsReport,
   type CheckResult,
@@ -88,6 +90,10 @@ import {
   stripActivityMarkers,
   stripActivityMarkersFromTurn,
 } from "./activity-marker.js";
+import {
+  assertPermissionProfileSelectable,
+  listPermissionProfiles,
+} from "./permission-profiles.js";
 import type { PidDetails } from "./persistence.js";
 import {
   bufferingWarningMessage,
@@ -160,10 +166,12 @@ export interface SessionManagerOptions {
   persistence?: import("./persistence.js").SessionPersistence;
 }
 
-/** What `createSession` may be given beyond the session's own spawn options. */
+/** What `createSession` may be given beyond its prompt and its spawn options. */
 interface CreateSessionAdvanced {
   baseInstructions?: string;
   developerInstructions?: string;
+  approvalsReviewer?: ApprovalsReviewer;
+  permissions?: string;
   personality?: Personality;
   ephemeral?: boolean;
   config?: Record<string, unknown>;
@@ -216,6 +224,8 @@ const PLAIN_PROGRESS_METHODS = new Set<string>([
   Methods.REASONING_SUMMARY_PART_ADDED,
   Methods.PLAN_DELTA,
   Methods.MCP_TOOL_PROGRESS,
+  Methods.AUTO_APPROVAL_REVIEW_STARTED,
+  Methods.AUTO_APPROVAL_REVIEW_STRICT_REQUIRED,
   Methods.TURN_DIFF_UPDATED,
   Methods.TURN_PLAN_UPDATED,
   Methods.MODEL_REROUTED,
@@ -535,6 +545,13 @@ export class SessionManager {
     // Start app-server subprocess
     await client.start(spawnOpts);
 
+    // An id Codex does not know fails `thread/start` with a message about a
+    // `[permissions]` TOML table the caller never wrote, so the id is held
+    // against the machine's own listing first.
+    if (session.permissions !== undefined) {
+      await assertPermissionProfileSelectable(client, session.permissions, session.cwd);
+    }
+
     // Start thread
     const threadStartResult = await client.threadStart({
       cwd: session.cwd,
@@ -546,6 +563,8 @@ export class SessionManager {
       baseInstructions: advanced?.baseInstructions,
       developerInstructions: session.developerInstructions,
       config: advanced?.config,
+      approvalsReviewer: session.approvalsReviewer,
+      permissions: session.permissions,
     });
     const threadId = extractThreadId(threadStartResult);
     session.threadId = threadId;
@@ -575,6 +594,7 @@ export class SessionManager {
       effort: session.effort,
       summary: advanced?.summary,
       outputSchema: advanced?.outputSchema,
+      approvalsReviewer: session.approvalsReviewer,
     });
     const turnStartResult = turnStart.turnStartResult;
 
@@ -629,9 +649,18 @@ export class SessionManager {
 
     const client = this.getClientOrThrow(sessionId);
 
-    this.openReplyTurn(session);
-
     const resolvedCwd = resolveTurnCwd(session, sessionId, overrides);
+    // Held against the machine's listing before the session leaves `idle`, so a
+    // profile id nobody offers costs the caller an error and not a turn.
+    if (overrides?.permissions !== undefined) {
+      await assertPermissionProfileSelectable(
+        client,
+        overrides.permissions,
+        resolvedCwd ?? session.cwd
+      );
+    }
+
+    this.openReplyTurn(session);
 
     const turnParams = buildTurnParams(session, session.threadId, prompt, overrides, resolvedCwd);
 
@@ -678,6 +707,30 @@ export class SessionManager {
   }
 
   // ── Session Management ───────────────────────────────────────────
+
+  /**
+   * The permission profiles this machine offers for `cwd`.
+   *
+   * It stands up a codex process of its own: the listing depends on the user's
+   * `config.toml` and on the project layers under `cwd`, so no session's client
+   * answers for another cwd, and `codex_setup` runs before any session exists.
+   * A failure is carried to the caller rather than answered as an empty list.
+   */
+  async listPermissionProfiles(cwd?: string): Promise<PermissionProfileSummary[]> {
+    const client = this.createClient();
+    try {
+      await client.start({});
+      return await listPermissionProfiles(client, cwd);
+    } finally {
+      try {
+        await client.destroy();
+      } catch (err) {
+        console.error(
+          `[codex-mcp] Failed to destroy the client of a permission-profile listing: ${describeError(err)}`
+        );
+      }
+    }
+  }
 
   /** The sessions this server holds in memory. */
   listSessions(): PublicSessionInfo[] {
@@ -1206,6 +1259,8 @@ export class SessionManager {
         personality: session.personality,
         baseInstructions: session.baseInstructions,
         developerInstructions: session.developerInstructions,
+        approvalsReviewer: session.approvalsReviewer,
+        permissions: session.permissions,
       });
       // A resume restores the thread from Codex's own rollout log, so the
       // thread's persisted metadata decides what it runs with — not the
@@ -1320,6 +1375,8 @@ export class SessionManager {
       threadId: session.threadId,
       baseInstructions: session.baseInstructions,
       developerInstructions: session.developerInstructions,
+      approvalsReviewer: session.approvalsReviewer,
+      permissions: session.permissions,
     });
     const forkedThreadId = extractThreadId(forkResult);
     const forkedSettings = readEffectiveSettings(forkResult);
@@ -1340,6 +1397,8 @@ export class SessionManager {
       profile: session.profile,
       approvalPolicy: session.approvalPolicy,
       sandbox: session.sandbox,
+      approvalsReviewer: session.approvalsReviewer,
+      permissions: session.permissions,
       personality: session.personality,
       effort: session.effort,
       summary: session.summary,
@@ -1375,6 +1434,8 @@ export class SessionManager {
         personality: session.personality,
         baseInstructions: session.baseInstructions,
         developerInstructions: session.developerInstructions,
+        approvalsReviewer: session.approvalsReviewer,
+        permissions: session.permissions,
       });
       // The fork answered for the thread and this resume answers for the
       // process the new session is driven by, which is the one it runs on.
@@ -2000,6 +2061,10 @@ export class SessionManager {
         this.onHookNotification(session, method, p);
         break;
 
+      case Methods.AUTO_APPROVAL_REVIEW_COMPLETED:
+        onAutoApprovalReviewCompleted(session, method, p);
+        break;
+
       default:
         // Ignore other notifications (account, config, etc.)
         break;
@@ -2569,6 +2634,8 @@ function newSessionRecord(fields: {
     profile: spawnOpts.profile,
     approvalPolicy: spawnOpts.approvalPolicy,
     sandbox: spawnOpts.sandbox,
+    approvalsReviewer: advanced?.approvalsReviewer,
+    permissions: advanced?.permissions,
     personality: advanced?.personality,
     effort,
     summary: advanced?.summary,
@@ -2607,6 +2674,8 @@ function sessionOfRecovered(
     profile: normalizeOptionalString(rec.meta.profile),
     approvalPolicy: rec.meta.approvalPolicy as ApprovalPolicy | undefined,
     sandbox: rec.meta.sandbox as SandboxMode | undefined,
+    approvalsReviewer: rec.meta.approvalsReviewer as ApprovalsReviewer | undefined,
+    permissions: normalizeOptionalString(rec.meta.permissions),
     personality: rec.meta.personality as Personality | undefined,
     effort: rec.meta.effort as EffortLevel | undefined,
     summary: rec.meta.summary as SummaryMode | undefined,
@@ -3167,6 +3236,8 @@ function scannerOf(session: SessionInfo): ActivityMarkerScanner {
 interface TurnOverrides {
   model?: string;
   approvalPolicy?: ApprovalPolicy;
+  approvalsReviewer?: ApprovalsReviewer;
+  permissions?: string;
   effort?: EffortLevel;
   summary?: SummaryMode;
   personality?: Personality;
@@ -3211,10 +3282,21 @@ function applyTurnOverrides(
   if (overrides?.approvalPolicy) {
     session.approvalPolicy = overrides.approvalPolicy as ApprovalPolicy;
   }
+  if (overrides?.approvalsReviewer) session.approvalsReviewer = overrides.approvalsReviewer;
+  // A session records one of the two, never both: `thread/resume` sends the
+  // profile and the spawn sends `-c sandbox_mode=`, and a session carrying both
+  // would put a profile and a sandbox on one restored thread.
+  if (overrides?.permissions) {
+    session.permissions = overrides.permissions;
+    session.sandbox = undefined;
+  }
   if (overrides?.effort) session.effort = overrides.effort;
   if (overrides?.summary) session.summary = overrides.summary;
   if (overrides?.personality) session.personality = overrides.personality;
-  if (overrides?.sandbox) session.sandbox = overrides.sandbox as SandboxMode;
+  if (overrides?.sandbox) {
+    session.sandbox = overrides.sandbox as SandboxMode;
+    session.permissions = undefined;
+  }
 }
 
 /** The cwd a reply's override asks the turn to run in, or nothing when it names none. */
@@ -3255,6 +3337,11 @@ function buildTurnParams(
     effort: overrides?.effort ?? session.effort,
     summary: overrides?.summary ?? session.summary,
     personality: overrides?.personality ?? session.personality,
+    approvalsReviewer: overrides?.approvalsReviewer ?? session.approvalsReviewer,
+    // Only what this turn named. The thread already carries the session's own
+    // profile, and re-sending it beside a `sandboxPolicy` the same reply asked
+    // for is the pair `turn/start` refuses.
+    permissions: overrides?.permissions,
     cwd: resolvedCwd,
     outputSchema: overrides?.outputSchema,
   };
@@ -3339,6 +3426,47 @@ function onItemNotification(
     item: p.item,
     status,
   });
+}
+
+/**
+ * The line a poll reports for a review that did not approve, keyed by status.
+ *
+ * `approved` is absent: the action went through, and overwriting the turn's own
+ * activity line to say so would bury what the work is on.
+ */
+const AUTO_REVIEW_ACTIVITY: Record<string, string> = {
+  denied: "Approval auto-review denied an action of this turn",
+  timedOut: "Approval auto-review timed out on an action of this turn",
+  aborted: "Approval auto-review was aborted on an action of this turn",
+};
+
+/**
+ * `item/autoApprovalReview/completed` — the auto_review subagent decided an
+ * approval this server never saw.
+ *
+ * Only `review.status` is read. The schema marks `GuardianApprovalReview`
+ * `[UNSTABLE]`, "This shape is expected to change soon", so `rationale`,
+ * `riskLevel` and `userAuthorization` reach `events.jsonl` with the rest of the
+ * raw params and no branch here depends on them.
+ *
+ * A status other than `approved` is why the turn did what it did, so it becomes
+ * the activity line a poll answers with as well as an `approval_result` record.
+ */
+function onAutoApprovalReviewCompleted(
+  session: SessionInfo,
+  method: string,
+  p: Record<string, unknown>
+): void {
+  const review = p.review as Record<string, unknown> | undefined;
+  const status = normalizeOptionalString(review?.status);
+  recordEvent(session, "approval_result", {
+    method,
+    ...p,
+    reviewer: "auto_review",
+    status,
+  });
+  const line = status === undefined ? undefined : AUTO_REVIEW_ACTIVITY[status];
+  if (line) recordActivity(session, line);
 }
 
 /**
