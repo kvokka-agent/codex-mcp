@@ -27,7 +27,7 @@ Minimum pass target:
 2. `codex` and `codex_reply` are asynchronous (return immediately, then progress via polling).
 3. Approval flow works (`respond_permission`) and session state changes correctly.
 4. A real coding task closes the loop: test fails -> agent fixes -> test passes.
-5. Session management works (`list/get/resume/cancel/interrupt/fork/clean/clean_background_terminals`).
+5. Session management works (`list/get/resume/cancel/interrupt/fork/clean/clean_background_terminals/terminate_background_terminal`).
 6. A session whose server went away comes back as `abandoned` and `resume` carries its thread on.
 
 Optional but recommended:
@@ -457,7 +457,10 @@ Validate:
 5. `action="fork"` creates a new session/thread branch.
 6. `action="resume"` is refused with `SESSION_BUSY` on a session this server already drives, and with `SESSION_HELD_BY_OTHER_SERVER` on one another running server holds. Section 7.7 covers the case it is for.
 7. `action="clean"` batch-removes terminal sessions. Run it first with `dryRun: true` and confirm `matchedSessionIds` lists only `idle`/`error`/`cancelled` sessions, then run it for real and confirm `removedCount` matches and `codex_session(action="list")` no longer shows them.
-8. `action="clean_background_terminals"` returns success and does not crash the session. **Note:** codex-mcp asks for the `experimentalApi` capability during `initialize`, so a CLI build that carries this method serves it. An older build that does not know the capability answers `Error [INTERNAL]` naming `experimentalApi` — record the error and continue.
+8. `action="clean_background_terminals"` answers `backgroundTerminals` and does not crash the session. On a thread that ran no background command it reads `terminals: []`, `survivors: []`, `truncated: false`. Start one (`codex_reply` with a prompt that runs a command in the background) and confirm the same call then lists it, carries `terminated` for it, and reports it in `survivors` or as `gone: true`.
+9. `action="terminate_background_terminal"` with a `processId` from step 8 answers `terminals: [{ processId, terminated }]`. A `processId` no longer running answers `terminated: false` rather than an error.
+
+**Note:** `thread/backgroundTerminals/list` and `…/terminate` arrived in Codex CLI 0.150; the floor this server drives is 0.101.0. codex-mcp asks for the `experimentalApi` capability during `initialize`, so a build that carries these methods serves them. A build that does not answers `Error [INTERNAL]`: `clean_background_terminals` falls back to `thread/backgroundTerminals/clean` and reports `cleanCalled: true` with `listError.stage: "before"`, and `terminate_background_terminal` raises the error. Record which of the two you saw and continue.
 
 Example payload:
 
@@ -465,6 +468,7 @@ Example payload:
 { "action": "clean", "statuses": ["cancelled"], "olderThanMs": 0, "dryRun": true }
 { "action": "clean", "statuses": ["cancelled"], "olderThanMs": 0 }
 { "action": "clean_background_terminals", "sessionId": "<SESSION_ID>" }
+{ "action": "terminate_background_terminal", "sessionId": "<SESSION_ID>", "processId": "<PROCESS_ID>" }
 ```
 
 Interrupt trigger strategy:
@@ -494,7 +498,7 @@ Pass criteria:
 2. No transport crash on management operations.
 3. `interrupt` successfully stops a running turn (or is documented as missed due to timing).
 4. `clean` reports `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }`, and the dry run removes nothing.
-5. `clean_background_terminals` returns `{ success: true, message }`, or `Error [INTERNAL]` on a CLI build that does not know the `experimentalApi` capability (see note in step 7 above).
+5. `clean_background_terminals` returns `{ sessionId, backgroundTerminals }` whose `terminals` and `survivors` match what the thread actually ran, and `terminate_background_terminal` returns the `terminated` the CLI answered — never `Error [INTERNAL]` on a CLI at 0.150 or above (see the note under step 9 for one below it).
 
 ## TC6 (Optional): Structured Output
 

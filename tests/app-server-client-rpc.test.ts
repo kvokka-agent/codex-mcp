@@ -584,6 +584,23 @@ describe("AppServerClient JSON-RPC", () => {
     expect(cleanReq.params).toEqual({ threadId: "t" });
     reply(idOf(cleanReq, Methods.THREAD_BACKGROUND_TERMINALS_CLEAN), {});
     await expect(clean).resolves.toEqual({});
+
+    const list = client.threadBackgroundTerminalsList({ threadId: "t", cursor: "page_2" });
+    const listReq = lastWritten();
+    expect(listReq.method).toBe(Methods.THREAD_BACKGROUND_TERMINALS_LIST);
+    expect(listReq.params).toEqual({ threadId: "t", cursor: "page_2" });
+    reply(idOf(listReq, Methods.THREAD_BACKGROUND_TERMINALS_LIST), { data: [], nextCursor: null });
+    await expect(list).resolves.toEqual({ data: [], nextCursor: null });
+
+    const terminate = client.threadBackgroundTerminalsTerminate({
+      threadId: "t",
+      processId: "proc_1",
+    });
+    const terminateReq = lastWritten();
+    expect(terminateReq.method).toBe(Methods.THREAD_BACKGROUND_TERMINALS_TERMINATE);
+    expect(terminateReq.params).toEqual({ threadId: "t", processId: "proc_1" });
+    reply(idOf(terminateReq, Methods.THREAD_BACKGROUND_TERMINALS_TERMINATE), { terminated: false });
+    await expect(terminate).resolves.toEqual({ terminated: false });
   });
 
   it("stops flushing as soon as the stream signals backpressure again", async () => {

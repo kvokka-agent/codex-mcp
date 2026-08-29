@@ -527,6 +527,22 @@ app-server hangs the turn when one goes unanswered.
 `prompt` becomes `input: [{ type: "text", text: prompt }]`, and each entry of
 `advanced.images` appends `{ type: "localImage", path }`.
 
+### Background terminals
+
+`ThreadBackgroundTerminalsCleanResponse.json` is `{"type":"object"}` with no
+properties, so `thread/backgroundTerminals/clean` cannot say what it cleaned.
+`clean_background_terminals` therefore measures instead of calling it:
+`thread/backgroundTerminals/list` for what is there, one
+`thread/backgroundTerminals/terminate` per `processId` — which answers
+`terminated: boolean` per process — and a second listing for what is left. The
+listing's `nextCursor` is followed to `MAX_BACKGROUND_TERMINAL_PAGES` (20) and no
+further; a cursor still standing there is reported as `truncated: true`.
+
+`clean` is the fallback for one case: a first listing that failed. The sweep then
+runs and the answer carries `cleanCalled: true` with the listing's error, so the
+caller is told the state is unknown rather than that the thread is clear. A CLI
+below 0.150.1, which serves neither `list` nor `terminate`, takes that path.
+
 ### Reading ids out of responses
 
 `thread/start`, `thread/fork` and `thread/resume` answer `{ thread: Thread }`,

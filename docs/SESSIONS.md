@@ -215,6 +215,19 @@ directory a live server owns is skipped whatever its age.
 and `olderThanMs`, previewable with `dryRun`, and leaving the disk alone with
 `includeDisk: false`.
 
+## Background terminals
+
+A turn can leave a command running in the background of its thread.
+`codex_session(action="clean_background_terminals", sessionId)` lists them,
+terminates each by its `processId`, and lists again, so the answer says which
+were there, which are gone and which are still running. Kill one instead of all
+with `action="terminate_background_terminal"` and the `processId` the clean
+reported. [TOOLS.md](TOOLS.md#the-background-terminals-of-a-thread) is the field
+list.
+
+Read `survivors` before calling the clean done: a process that ignored the
+terminate is in it, and so is one that started while the pass was running.
+
 ## When a session ends badly
 
 - **A retryable interruption keeps the session `running`.** Only a failure the

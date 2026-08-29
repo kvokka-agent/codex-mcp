@@ -336,8 +336,55 @@ export interface ThreadResumeResult {
   thread: { id: string };
 }
 
+/**
+ * thread/backgroundTerminals/clean — schema v2/ThreadBackgroundTerminalsCleanParams.json.
+ * The response is `{"type":"object"}` with no properties, so the call says
+ * nothing about what it cleaned.
+ */
 export interface ThreadBackgroundTerminalsCleanParams {
   threadId: string;
+}
+
+/** thread/backgroundTerminals/list — schema v2/ThreadBackgroundTerminalsListParams.json. */
+export interface ThreadBackgroundTerminalsListParams {
+  threadId: string;
+  /** Opaque cursor a previous page answered with. */
+  cursor?: string | null;
+  /** Page size. Codex picks one when this is absent. */
+  limit?: number | null;
+}
+
+/** One entry of the list answer — schema definition `ThreadBackgroundTerminal`. */
+export interface ThreadBackgroundTerminal {
+  command: string;
+  cwd: string;
+  itemId: string;
+  processId: string;
+  osPid?: number | null;
+  cpuPercent?: number | null;
+  rssKb?: number | null;
+}
+
+/** thread/backgroundTerminals/list response — schema v2/ThreadBackgroundTerminalsListResponse.json. */
+export interface ThreadBackgroundTerminalsListResult {
+  data: ThreadBackgroundTerminal[];
+  /** Null when the page is the last one. */
+  nextCursor?: string | null;
+}
+
+/** thread/backgroundTerminals/terminate — schema v2/ThreadBackgroundTerminalsTerminateParams.json. */
+export interface ThreadBackgroundTerminalsTerminateParams {
+  threadId: string;
+  processId: string;
+}
+
+/**
+ * thread/backgroundTerminals/terminate response — schema
+ * v2/ThreadBackgroundTerminalsTerminateResponse.json. `terminated` is the one
+ * per-process measurement the protocol offers.
+ */
+export interface ThreadBackgroundTerminalsTerminateResult {
+  terminated: boolean;
 }
 
 /** thread/delete — schema v2/ThreadDeleteParams.json. The response is empty. */
@@ -712,6 +759,8 @@ export const Methods = {
   THREAD_RESUME: "thread/resume",
   THREAD_FORK: "thread/fork",
   THREAD_BACKGROUND_TERMINALS_CLEAN: "thread/backgroundTerminals/clean",
+  THREAD_BACKGROUND_TERMINALS_LIST: "thread/backgroundTerminals/list",
+  THREAD_BACKGROUND_TERMINALS_TERMINATE: "thread/backgroundTerminals/terminate",
   THREAD_DELETE: "thread/delete",
   TURN_START: "turn/start",
   TURN_INTERRUPT: "turn/interrupt",

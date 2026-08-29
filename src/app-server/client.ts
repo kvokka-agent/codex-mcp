@@ -24,6 +24,10 @@ import {
   Methods,
   type RequestId,
   type ThreadBackgroundTerminalsCleanParams,
+  type ThreadBackgroundTerminalsListParams,
+  type ThreadBackgroundTerminalsListResult,
+  type ThreadBackgroundTerminalsTerminateParams,
+  type ThreadBackgroundTerminalsTerminateResult,
   type ThreadDeleteParams,
   type ThreadForkParams,
   type ThreadForkResult,
@@ -223,6 +227,24 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     params: ThreadBackgroundTerminalsCleanParams
   ): Promise<Record<string, never>> {
     return this.request<Record<string, never>>(Methods.THREAD_BACKGROUND_TERMINALS_CLEAN, params);
+  }
+
+  async threadBackgroundTerminalsList(
+    params: ThreadBackgroundTerminalsListParams
+  ): Promise<ThreadBackgroundTerminalsListResult> {
+    return this.request<ThreadBackgroundTerminalsListResult>(
+      Methods.THREAD_BACKGROUND_TERMINALS_LIST,
+      params
+    );
+  }
+
+  async threadBackgroundTerminalsTerminate(
+    params: ThreadBackgroundTerminalsTerminateParams
+  ): Promise<ThreadBackgroundTerminalsTerminateResult> {
+    return this.request<ThreadBackgroundTerminalsTerminateResult>(
+      Methods.THREAD_BACKGROUND_TERMINALS_TERMINATE,
+      params
+    );
   }
 
   async threadDelete(params: ThreadDeleteParams): Promise<Record<string, never>> {

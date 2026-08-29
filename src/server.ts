@@ -240,7 +240,9 @@ const sessionToolInputShape = {
   sessionId: z
     .string()
     .optional()
-    .describe("Required for get/resume/cancel/interrupt/fork/clean_background_terminals"),
+    .describe(
+      "Required for get/resume/cancel/interrupt/fork/clean_background_terminals/terminate_background_terminal"
+    ),
   includeSensitive: z
     .boolean()
     .default(false)
@@ -261,7 +263,67 @@ const sessionToolInputShape = {
     .boolean()
     .optional()
     .describe("For clean only. Default: true. Also remove persisted session state."),
+  processId: z
+    .string()
+    .optional()
+    .describe(
+      "For terminate_background_terminal only. The processId clean_background_terminals reported for that terminal."
+    ),
 };
+
+const backgroundTerminalOutcomeSchema = z.object({
+  processId: z.string(),
+  itemId: z.string().optional(),
+  command: z.string().optional(),
+  cwd: z.string().optional(),
+  osPid: z.number().int().nullable().optional(),
+  cpuPercent: z.number().nullable().optional(),
+  rssKb: z.number().int().nullable().optional(),
+  terminated: z
+    .boolean()
+    .optional()
+    .describe(
+      "What thread/backgroundTerminals/terminate answered for this process. Absent when that call failed, and `error` says why."
+    ),
+  error: z.string().optional().describe("Why the terminate call for this process failed."),
+  gone: z
+    .boolean()
+    .optional()
+    .describe(
+      "Absent from the listing taken after the pass. Absent itself when that listing failed, which leaves this terminal's fate unknown."
+    ),
+});
+
+const backgroundTerminalsSchema = z
+  .object({
+    threadId: z.string(),
+    terminals: z
+      .array(backgroundTerminalOutcomeSchema)
+      .describe("Every terminal the call acted on, with what happened to each."),
+    survivors: z
+      .array(backgroundTerminalOutcomeSchema)
+      .optional()
+      .describe(
+        "What thread/backgroundTerminals/list answered after the pass: the terminals still standing, including any that started during it. Absent when that listing failed."
+      ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe("The listing stopped at the page bound with a cursor still to follow."),
+    cleanCalled: z
+      .boolean()
+      .optional()
+      .describe(
+        "thread/backgroundTerminals/clean swept the thread because the listing failed. It answers an empty object, so what it left running is unknown."
+      ),
+    listError: z
+      .object({ stage: z.enum(["before", "after"]), message: z.string() })
+      .optional()
+      .describe(
+        "The listing failed at this stage, so the state it would have measured is unknown."
+      ),
+  })
+  .describe("What a background-terminal action measured.");
 
 const sessionToolOutputShape = {
   sessions: z.array(publicSessionInfoSchema).optional(),
@@ -294,6 +356,7 @@ const sessionToolOutputShape = {
   removedCount: z.number().int().optional(),
   diskSessionsRemoved: z.number().int().optional(),
   dryRun: z.boolean().optional(),
+  backgroundTerminals: backgroundTerminalsSchema.optional(),
   success: z.boolean().optional(),
   message: z.string().optional(),
   ...errorOutputShape,
@@ -712,7 +775,7 @@ function registerCodexSessionTool(ctx: ToolContext): void {
     "codex_session",
     {
       title: "Manage Sessions",
-      description: `Session actions: list, get, resume, cancel, interrupt, fork, clean, clean_background_terminals.
+      description: `Session actions: list, get, resume, cancel, interrupt, fork, clean, clean_background_terminals, terminate_background_terminal.
 
 - list: every session of the state directory, this server's and every other server's. Each carries \`activity\` — what it last said it was doing — and \`owner\`, the process holding it. A session with status \`abandoned\` and no \`owner\` was cut off when its server went away and can be resumed.
 - get: details. includeSensitive defaults to false; true adds threadId/cwd/profile/config.
@@ -721,7 +784,8 @@ function registerCodexSessionTool(ctx: ToolContext): void {
 - interrupt: stop current turn.
 - fork: clone current thread into a new session; source remains unchanged.
 - clean: batch-remove idle/error/cancelled sessions, optionally from disk too. Pass statuses:["abandoned"] to drop cut-off sessions instead of resuming them.
-- clean_background_terminals: ask app-server to clean stale background terminals for this thread.`,
+- clean_background_terminals: terminate every background terminal of this thread and answer what happened. backgroundTerminals.terminals lists what was there, each with terminated — what Codex answered for that process — and gone, measured by listing the thread again afterwards. backgroundTerminals.survivors is what was still standing at the end. A listing that failed leaves listError and no measurement, never a claim that the thread is clear.
+- terminate_background_terminal: terminate one of them. Takes processId, from a clean_background_terminals answer, and reports terminated; a process that stayed up answers false rather than raising.`,
       inputSchema: sessionToolInputShape,
       outputSchema: sessionToolOutputShape,
       annotations: {

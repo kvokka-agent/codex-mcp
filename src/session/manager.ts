@@ -28,6 +28,8 @@ import {
 } from "../persistence/index.js";
 import {
   type ApprovalPolicy,
+  type BackgroundTerminalOutcome,
+  type BackgroundTerminalsReport,
   type CheckResult,
   CLEANUP_INTERVAL_MS,
   type CleanableStatus,
@@ -79,6 +81,13 @@ import {
   stripActivityMarkersFromTurn,
 } from "./activity-marker.js";
 import type { PidDetails } from "./persistence.js";
+
+/**
+ * Pages of `thread/backgroundTerminals/list` one call reads. The cursor is
+ * followed to this bound and no further, and the report says `truncated: true`
+ * when a cursor was still standing there.
+ */
+const MAX_BACKGROUND_TERMINAL_PAGES = 20;
 
 const AUTH_REFRESH_UNSUPPORTED_CODE = -32000;
 const AUTH_REFRESH_UNSUPPORTED_MESSAGE =
@@ -910,30 +919,138 @@ export class SessionManager {
     });
   }
 
-  async cleanBackgroundTerminals(sessionId: string): Promise<void> {
+  /**
+   * Terminate every background terminal of a session's thread and report what
+   * happened to each.
+   *
+   * `thread/backgroundTerminals/clean` answers an empty object, so it cannot say
+   * which terminals it left running. The pass lists the thread, terminates each
+   * process by id — `thread/backgroundTerminals/terminate` answers `terminated`
+   * per process — and lists again, so `gone` is measured rather than assumed. A
+   * terminal that started during the pass is in the second listing and in no
+   * `terminals` entry: nothing tried to stop it, and the caller sees it standing.
+   */
+  async cleanBackgroundTerminals(sessionId: string): Promise<BackgroundTerminalsReport> {
+    const { session, client, threadId } = this.backgroundTerminalTarget(sessionId);
+
+    let listed: { terminals: BackgroundTerminalOutcome[]; truncated: boolean };
+    try {
+      listed = await this.listBackgroundTerminals(client, threadId);
+    } catch (err: unknown) {
+      // A CLI below 0.150.1 serves no thread/backgroundTerminals/list. The sweep
+      // still runs, and it reports nothing, so the caller is told exactly that.
+      await client.threadBackgroundTerminalsClean({ threadId });
+      const report: BackgroundTerminalsReport = {
+        threadId,
+        terminals: [],
+        cleanCalled: true,
+        listError: { stage: "before", message: messageOf(err) },
+      };
+      this.recordBackgroundTerminals(session, report);
+      return report;
+    }
+
+    for (const terminal of listed.terminals) {
+      try {
+        const answer = await client.threadBackgroundTerminalsTerminate({
+          threadId,
+          processId: terminal.processId,
+        });
+        terminal.terminated = answer.terminated;
+      } catch (err: unknown) {
+        terminal.error = messageOf(err);
+      }
+    }
+
+    const report: BackgroundTerminalsReport = {
+      threadId,
+      terminals: listed.terminals,
+      truncated: listed.truncated,
+    };
+    try {
+      const after = await this.listBackgroundTerminals(client, threadId);
+      report.survivors = after.terminals;
+      const standing = new Set(after.terminals.map((terminal) => terminal.processId));
+      for (const terminal of listed.terminals) terminal.gone = !standing.has(terminal.processId);
+    } catch (err: unknown) {
+      report.listError = { stage: "after", message: messageOf(err) };
+    }
+    this.recordBackgroundTerminals(session, report);
+    return report;
+  }
+
+  /**
+   * Terminate one background terminal. `terminated: false` is the answer, not an
+   * error: the call reached Codex and the process stayed up.
+   */
+  async terminateBackgroundTerminal(
+    sessionId: string,
+    processId: string
+  ): Promise<BackgroundTerminalsReport> {
+    const { session, client, threadId } = this.backgroundTerminalTarget(sessionId);
+
+    const answer = await client.threadBackgroundTerminalsTerminate({ threadId, processId });
+    const report: BackgroundTerminalsReport = {
+      threadId,
+      terminals: [{ processId, terminated: answer.terminated }],
+    };
+    this.recordBackgroundTerminals(session, report);
+    return report;
+  }
+
+  /** The session, its client and its thread id, or the error that says why not. */
+  private backgroundTerminalTarget(sessionId: string): {
+    session: SessionInfo;
+    client: ICodexClient;
+    threadId: string;
+  } {
     const session = this.getSessionOrThrow(sessionId);
 
     // Status first: cancelSession drops the client, so a client lookup ahead of this
     // reports a cancelled session as SESSION_NOT_FOUND.
     if (session.status === "cancelled") {
       throw new Error(
-        `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and cannot be cleaned`
+        `Error [${ErrorCode.CANCELLED}]: Session '${sessionId}' has been cancelled and its background terminals cannot be reached`
       );
     }
     if (!session.threadId) {
       throw new Error(
-        `Error [${ErrorCode.INTERNAL}]: Session '${sessionId}' has no threadId, cannot clean background terminals`
+        `Error [${ErrorCode.INTERNAL}]: Session '${sessionId}' has no threadId, so it has no background terminals to reach`
       );
     }
 
-    const client = this.getClientOrThrow(sessionId);
+    return { session, client: this.getClientOrThrow(sessionId), threadId: session.threadId };
+  }
 
-    await client.threadBackgroundTerminalsClean({ threadId: session.threadId });
+  /** Read the thread's background terminals, following `nextCursor` to the page bound. */
+  private async listBackgroundTerminals(
+    client: ICodexClient,
+    threadId: string
+  ): Promise<{ terminals: BackgroundTerminalOutcome[]; truncated: boolean }> {
+    const terminals: BackgroundTerminalOutcome[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_BACKGROUND_TERMINAL_PAGES; page++) {
+      const answer = await client.threadBackgroundTerminalsList(
+        cursor === null ? { threadId } : { threadId, cursor }
+      );
+      for (const terminal of answer.data) terminals.push({ ...terminal });
+      cursor = answer.nextCursor ?? null;
+      if (cursor === null) return { terminals, truncated: false };
+    }
+    return { terminals, truncated: true };
+  }
+
+  private recordBackgroundTerminals(session: SessionInfo, report: BackgroundTerminalsReport): void {
     session.lastActiveAt = new Date().toISOString();
     recordEvent(session, "progress", {
-      method: Methods.THREAD_BACKGROUND_TERMINALS_CLEAN,
-      threadId: session.threadId,
-      status: "requested",
+      method: Methods.THREAD_BACKGROUND_TERMINALS_TERMINATE,
+      threadId: report.threadId,
+      terminals: report.terminals.length,
+      gone: report.terminals.filter((terminal) => terminal.gone === true).length,
+      surviving: report.survivors?.length,
+      truncated: report.truncated,
+      cleanCalled: report.cleanCalled,
+      listError: report.listError,
     });
   }
 
@@ -3109,6 +3226,11 @@ function recordActivity(session: SessionInfo, activity: string, itemId?: string)
 
 function setEventSink(session: SessionInfo, sink: EventSink): void {
   eventSinks.set(session, sink);
+}
+
+/** An error as one redacted line, for a report field rather than for a throw. */
+function messageOf(err: unknown): string {
+  return redactPaths(err instanceof Error ? err.message : String(err));
 }
 
 /**

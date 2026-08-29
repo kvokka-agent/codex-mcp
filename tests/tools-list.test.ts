@@ -96,6 +96,7 @@ describe("tools/list metadata", () => {
     expect(codexSession).toContain("includeSensitive defaults to false");
     expect(codexSession).toContain("source remains unchanged");
     expect(codexSession).toContain("clean_background_terminals");
+    expect(codexSession).toContain("terminate_background_terminal");
 
     const codexCheck = tool(tools, "codex_check").description ?? "";
     expect(codexCheck).toContain("waitMs");
@@ -133,6 +134,35 @@ describe("tools/list metadata", () => {
     const waitMsSchema = checkProps.waitMs as Record<string, unknown> | undefined;
     expect(waitMsSchema, "codex_check.waitMs").toBeDefined();
     expect(waitMsSchema).not.toHaveProperty("default");
+  });
+
+  it("publishes the background-terminal surface of codex_session", async () => {
+    const tools = await listTools();
+    const session = tool(tools, "codex_session");
+
+    const actionEnum = present(
+      (propertiesOf(session.inputSchema, "codex_session").action as { enum?: unknown[] }).enum,
+      "the codex_session action enum"
+    );
+    expect(actionEnum).toContain("clean_background_terminals");
+    expect(actionEnum).toContain("terminate_background_terminal");
+    expect(propertiesOf(session.inputSchema, "codex_session")).toHaveProperty("processId");
+
+    const report = present(
+      session.outputSchema?.properties?.backgroundTerminals as
+        | { properties?: Record<string, unknown>; required?: string[] }
+        | undefined,
+      "codex_session.backgroundTerminals"
+    );
+    expect(Object.keys(present(report.properties, "backgroundTerminals properties"))).toEqual([
+      "threadId",
+      "terminals",
+      "survivors",
+      "truncated",
+      "cleanCalled",
+      "listError",
+    ]);
+    expect(report.required).toEqual(["threadId", "terminals"]);
   });
 
   it("reports the registered tool count in the compat report resource", async () => {

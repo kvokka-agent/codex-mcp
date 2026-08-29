@@ -185,7 +185,8 @@ single read.
 | `interrupt` | `sessionId` | `{ success, message }` — stops the current turn, session stays usable |
 | `fork` | `sessionId` | `{ sessionId, threadId, status: "idle", pollInterval }` for the copy; the source is untouched |
 | `clean` | — | `{ matchedSessionIds, removedSessionIds, removedCount, diskSessionsRemoved, dryRun }` |
-| `clean_background_terminals` | `sessionId` | `{ success, message }` |
+| `clean_background_terminals` | `sessionId` | `{ sessionId, backgroundTerminals }` |
+| `terminate_background_terminal` | `sessionId`, `processId` | `{ sessionId, backgroundTerminals }` |
 
 `clean` takes `statuses` (default `idle`, `error`, `cancelled` — `abandoned`
 only when asked for), `olderThanMs`, `dryRun`, and `includeDisk` (default
@@ -201,6 +202,37 @@ that ended, absent until one does. `status` says what the session is now and
 `cancel` rewrites it; `lastTurn` says what the work came to and `cancel` leaves
 it alone, so a session closed after it answered reads `status: "cancelled"` with
 `lastTurn.outcome: "completed"`.
+
+### The background terminals of a thread
+
+`clean_background_terminals` and `terminate_background_terminal` both answer
+`backgroundTerminals`:
+
+| Field | What it carries |
+| --- | --- |
+| `threadId` | The thread the call worked on |
+| `terminals[]` | Every terminal the call acted on: `processId`, the `itemId`, `command`, `cwd`, `osPid`, `cpuPercent` and `rssKb` the listing gave it, `terminated` — what Codex answered for that process — `error` when the terminate call itself failed, and `gone` |
+| `survivors[]` | The listing taken after the pass: what is still running, including a terminal that started during it |
+| `truncated` | The listing stopped at 20 pages with a cursor still to follow |
+| `cleanCalled` | `thread/backgroundTerminals/clean` swept the thread because the listing failed |
+| `listError` | `{ stage: "before" \| "after", message }` — the listing failed there, so what stands now is unknown |
+
+`terminated: false` is an answer, not a failure: the call reached Codex and the
+process stayed up. `gone` is measured against the second listing, so a terminal
+whose terminate answered `true` and which is still listed reads
+`terminated: true, gone: false`.
+
+`terminate_background_terminal` takes the `processId` from a
+`clean_background_terminals` answer, calls `thread/backgroundTerminals/terminate`
+once, and lists nothing: its `terminals` entry carries `processId` and
+`terminated` and no other field.
+
+A Codex CLI below 0.150.1 serves neither `thread/backgroundTerminals/list` nor
+`…/terminate`. `clean_background_terminals` there falls back to
+`thread/backgroundTerminals/clean` and answers `cleanCalled: true` with
+`listError.stage: "before"` — the sweep ran and what it left is unknown.
+`terminate_background_terminal` has nothing to fall back to and raises the error
+the CLI answered.
 
 ## `codex_setup` — is this machine ready
 

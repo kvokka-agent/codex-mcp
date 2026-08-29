@@ -32,7 +32,7 @@ complete.
 | `codex` | start a session | waits for the thread only |
 | `codex_reply` | continue a session | returns at once |
 | `codex_setup` | report executable, auth and Codex CLI version readiness | sync |
-| `codex_session` | list, get, resume, cancel, interrupt, fork, clean, clean background terminals | sync |
+| `codex_session` | list, get, resume, cancel, interrupt, fork, clean, clean background terminals, terminate one of them | sync |
 | `codex_check` | report status and answer what the session waits for | sync, or long-poll on `waitMs` |
 
 A session is driven by exactly one codex-mcp process, which records itself in

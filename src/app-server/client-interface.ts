@@ -10,6 +10,10 @@ import type {
   InitializeResult,
   RequestId,
   ThreadBackgroundTerminalsCleanParams,
+  ThreadBackgroundTerminalsListParams,
+  ThreadBackgroundTerminalsListResult,
+  ThreadBackgroundTerminalsTerminateParams,
+  ThreadBackgroundTerminalsTerminateResult,
   ThreadDeleteParams,
   ThreadForkParams,
   ThreadForkResult,
@@ -40,10 +44,20 @@ export interface ICodexClient {
   /** Resume a previously forked/saved thread. */
   threadResume(params: ThreadResumeParams): Promise<ThreadResumeResult>;
 
-  /** Clean background terminals for a thread. */
+  /** Sweep every background terminal of a thread. The answer is empty. */
   threadBackgroundTerminalsClean(
     params: ThreadBackgroundTerminalsCleanParams
   ): Promise<Record<string, never>>;
+
+  /** One page of the background terminals of a thread. */
+  threadBackgroundTerminalsList(
+    params: ThreadBackgroundTerminalsListParams
+  ): Promise<ThreadBackgroundTerminalsListResult>;
+
+  /** Terminate one background terminal, and answer whether it died. */
+  threadBackgroundTerminalsTerminate(
+    params: ThreadBackgroundTerminalsTerminateParams
+  ): Promise<ThreadBackgroundTerminalsTerminateResult>;
 
   /** Delete a thread and the history Codex keeps for it. */
   threadDelete(params: ThreadDeleteParams): Promise<Record<string, never>>;
