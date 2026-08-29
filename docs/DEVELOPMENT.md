@@ -147,7 +147,7 @@ estimates coverage instead, and every CRAP score comes out inflated.
 and the analysis reads what it measured. fallow exits non-zero on any finding,
 so an unused export, a circular import, a function past the complexity threshold
 or fresh duplication fails the gate. `bunx fallow explain <issue-type>` says what
-a rule means, and `.fallowrc.json` holds the configuration.
+a rule means, and `.fallowrc.jsonc` holds the configuration.
 
 ## The plugin from the working tree
 

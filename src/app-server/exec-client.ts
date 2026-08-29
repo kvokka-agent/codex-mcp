@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ErrorCode } from "../types.js";
 import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
+import { awaitChildExit } from "./child-shutdown.js";
 import { LineReader, readChildOutput } from "./child-stdio.js";
 import type { ICodexClient } from "./client-interface.js";
 import { resolveCodexInvocation } from "./codex-bin.js";
@@ -37,8 +38,6 @@ import {
 
 type NotificationHandler = (method: string, params: unknown) => void;
 type ServerRequestHandler = (id: RequestId, method: string, params: unknown) => void;
-
-const FORCE_KILL_TIMEOUT_MS = 5_000;
 
 /**
  * Convert snake_case item type from exec JSONL to camelCase used by app-server protocol.
@@ -465,20 +464,7 @@ export class ExecClient extends EventEmitter implements ICodexClient {
       proc.stdin?.end();
       this.killProcess();
 
-      // Force kill after timeout (matches AppServerClient behavior)
-      const forceKill = setTimeout(() => forceKillProcess(proc), FORCE_KILL_TIMEOUT_MS);
-      forceKill.unref();
-
-      if (!alreadyExited) {
-        await new Promise<void>((resolve) => {
-          proc.on("exit", () => {
-            clearTimeout(forceKill);
-            resolve();
-          });
-          const fallback = setTimeout(resolve, FORCE_KILL_TIMEOUT_MS + 1000);
-          fallback.unref();
-        });
-      }
+      await awaitChildExit(proc, alreadyExited, () => forceKillProcess(proc));
     }
 
     this.process = null;

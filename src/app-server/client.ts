@@ -9,6 +9,7 @@ import { EventEmitter } from "node:events";
 import type { Writable } from "node:stream";
 import { ErrorCode } from "../types.js";
 import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
+import { awaitChildExit } from "./child-shutdown.js";
 import { LineReader, readChildOutput } from "./child-stdio.js";
 import type { ICodexClient } from "./client-interface.js";
 import { resolveCodexInvocation } from "./codex-bin.js";
@@ -526,42 +527,31 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
       proc.stdin?.end();
       this.terminate("SIGTERM");
 
-      // Force kill after 5s
-      const forceKill = setTimeout(() => {
-        if (this.process && !this.process.killed) {
-          if (process.platform === "win32" && this.process.pid) {
-            try {
-              spawn("taskkill", ["/PID", String(this.process.pid), "/T", "/F"], {
-                stdio: "ignore",
-                windowsHide: true,
-              });
-            } catch (err) {
-              console.error(
-                `[app-server] Failed to force-kill app-server via taskkill: ${err instanceof Error ? err.message : String(err)}`
-              );
-            }
-          } else {
-            this.terminate("SIGKILL");
-          }
-        }
-      }, 5000);
-      forceKill.unref();
-
-      if (!alreadyExited) {
-        await new Promise<void>((resolve) => {
-          proc.on("exit", () => {
-            clearTimeout(forceKill);
-            resolve();
-          });
-          // Resolve anyway after timeout
-          const fallback = setTimeout(resolve, 6000);
-          fallback.unref();
-        });
-      }
+      await awaitChildExit(proc, alreadyExited, () => this.forceKill());
     }
 
     this.process = null;
     this.removeAllListeners();
+  }
+
+  /** Kill the child that outlived its `SIGTERM`, by whatever this platform offers. */
+  private forceKill(): void {
+    const proc = this.process;
+    if (!proc || proc.killed) return;
+    if (process.platform !== "win32" || !proc.pid) {
+      this.terminate("SIGKILL");
+      return;
+    }
+    try {
+      spawn("taskkill", ["/PID", String(proc.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch (err) {
+      console.error(
+        `[app-server] Failed to force-kill app-server via taskkill: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
   }
 
   private terminate(signal: NodeJS.Signals): void {

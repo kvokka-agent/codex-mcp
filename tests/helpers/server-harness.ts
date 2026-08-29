@@ -85,7 +85,6 @@ export class ServerProcess {
   private buffer = "";
   private nextId = 1;
   private pending = new Map<number, PendingCall>();
-  private stderrText = "";
   private exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
   private notifications: ServerNotification[] = [];
   private notificationWaiters = new Set<(notification: ServerNotification) => void>();
@@ -110,17 +109,13 @@ export class ServerProcess {
 
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => this.onStdout(chunk));
-    this.child.stderr.setEncoding("utf8");
-    this.child.stderr.on("data", (chunk: string) => {
-      this.stderrText += chunk;
-    });
+    // Drain stderr without reading it: nothing here asserts on the server's
+    // diagnostics, and a piped stream nobody consumes stops the child once the
+    // pipe buffer fills.
+    this.child.stderr.resume();
     this.exited = new Promise((resolveExit) => {
       this.child.on("exit", (code, signal) => resolveExit({ code, signal }));
     });
-  }
-
-  get stderr(): string {
-    return this.stderrText;
   }
 
   get pid(): number {
@@ -277,7 +272,15 @@ export class ServerProcess {
     }
   }
 
-  /** Stop the process whatever state it is in. */
+  /**
+   * Stop the process whatever state it is in.
+   *
+   * `tests/server-lifecycle.e2e.test.ts` calls this from its `afterEach`, as
+   * `present(servers.pop(), "the server to dispose").dispose()`. fallow
+   * attributes a member call only to a receiver it can name by type, and the
+   * return of a generic helper is not one, so its scan reaches no call here.
+   */
+  // fallow-ignore-next-line unused-class-member -- the one call goes through `present()`
   async dispose(): Promise<void> {
     if (this.child.exitCode === null && this.child.signalCode === null) {
       this.child.kill("SIGKILL");

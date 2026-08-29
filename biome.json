@@ -13,6 +13,7 @@
       "plugins/**",
       ".claude-plugin/**",
       "*.json",
+      "*.jsonc",
       "!bun.lock",
       "!codex-schema"
     ]

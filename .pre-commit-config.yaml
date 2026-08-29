@@ -1,11 +1,23 @@
 repos:
   - repo: local
     hooks:
-      - id: prettier
-        name: prettier
-        entry: bunx prettier --write
+      # `--write` so the commit carries the formatted, import-sorted file rather
+      # than a report of what it should have been. `--no-errors-on-unmatched`
+      # keeps a commit touching only paths biome.json ignores from failing here.
+      - id: biome
+        name: biome
+        entry: bunx biome check --write --no-errors-on-unmatched
         language: system
-        files: \.ts$
+        files: \.(ts|mjs|js|jsonc?)$
+      # The fallow analysis that reads the sources alone. Its CRAP gate needs the
+      # coverage a test run writes, which is what `bun run lint:fallow` does in
+      # the check gate and in CI; this hook answers before the commit instead.
+      - id: fallow
+        name: fallow
+        entry: bunx fallow dead-code
+        language: system
+        pass_filenames: false
+        files: \.(ts|mjs|js)$
       - id: rumdl
         name: rumdl
         entry: bunx rumdl check
