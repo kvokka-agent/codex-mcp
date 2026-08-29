@@ -10,6 +10,13 @@ import {
   StdioClientTransport,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import { parseLaunchArgs, resolveSpawnTarget } from "./lib/launch-args.mjs";
+import {
+  assertResourcesPresent,
+  assertToolsPresent,
+  codexMcpEnv,
+} from "./lib/mcp-client.mjs";
+
 function usage(exitCode = 0) {
   const msg = [
     "Usage:",
@@ -27,73 +34,19 @@ function usage(exitCode = 0) {
 }
 
 function parseArgs(argv) {
-  const out = {
-    useBunx: false,
-    cwd: process.cwd(),
-    verbose: false,
-    overrideCommand: null,
-    overrideArgs: [],
-  };
-
-  const dd = argv.indexOf("--");
-  const main = dd === -1 ? argv : argv.slice(0, dd);
-  const tail = dd === -1 ? [] : argv.slice(dd + 1);
-
-  for (let i = 0; i < main.length; i++) {
-    const a = main[i];
-    if (a === "--help" || a === "-h") usage(0);
-    if (a === "--bunx") {
-      out.useBunx = true;
-      continue;
-    }
-    if (a === "--verbose") {
-      out.verbose = true;
-      continue;
-    }
-    if (a === "--cwd") {
-      const v = main[i + 1];
-      if (!v) usage(2);
-      out.cwd = v;
-      i++;
-      continue;
-    }
-    usage(2);
-  }
-
-  if (tail.length > 0) {
-    out.overrideCommand = tail[0] ?? null;
-    out.overrideArgs = tail.slice(1);
-  }
-
-  return out;
-}
-
-function assert(condition, message) {
-  if (!condition) throw new Error(message);
+  return parseLaunchArgs(argv, {
+    defaults: { verbose: false },
+    switches: { "--verbose": "verbose" },
+    onHelp: () => usage(0),
+    onInvalid: () => usage(2),
+  });
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const { command, args: cmdArgs } = resolveSpawnTarget(args);
 
-  const command = args.overrideCommand
-    ? args.overrideCommand
-    : args.useBunx
-      ? "bunx"
-      : "bun";
-  const cmdArgs = args.overrideCommand
-    ? args.overrideArgs
-    : args.useBunx
-      ? ["@kvokka/codex-mcp"]
-      : ["dist/index.js"];
-
-  // StdioClientTransport hands the child only its own allowlist of variables, so
-  // CODEX_MCP_STATE_DIR set for this run would be dropped and the server would take
-  // the lock on the caller's real state directory and recover its sessions.
-  const codexEnv = Object.fromEntries(
-    Object.entries(process.env).filter(
-      ([key, value]) => key.startsWith("CODEX_MCP_") && value !== undefined
-    )
-  );
+  const codexEnv = codexMcpEnv(process.env);
   codexEnv.CODEX_MCP_STATE_DIR =
     codexEnv.CODEX_MCP_STATE_DIR ??
     path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codex-mcp-smoke-")), "state");
@@ -110,19 +63,12 @@ async function main() {
     transport.stderr.on("data", (chunk) => process.stderr.write(chunk));
   }
 
-  const client = new Client(
-    { name: "codex-mcp-smoke", version: "0.0.0" },
-    { capabilities: {} }
-  );
+  const client = new Client({ name: "codex-mcp-smoke", version: "0.0.0" }, { capabilities: {} });
 
   await client.connect(transport);
 
   const tools = await client.listTools();
-  const names = new Set(tools.tools.map((t) => t.name));
-
-  for (const required of ["codex", "codex_reply", "codex_session", "codex_check", "codex_setup"]) {
-    assert(names.has(required), `missing tool from tools/list: ${required}`);
-  }
+  assertToolsPresent(tools.tools);
 
   if (args.verbose) {
     // eslint-disable-next-line no-console
@@ -130,15 +76,7 @@ async function main() {
   }
 
   const resources = await client.listResources();
-  const uris = new Set(resources.resources.map((r) => r.uri));
-  for (const uri of [
-    "codex-mcp:///server-info",
-    "codex-mcp:///config",
-    "codex-mcp:///gotchas",
-    "codex-mcp:///delegation-guide",
-  ]) {
-    assert(uris.has(uri), `missing resource uri: ${uri}`);
-  }
+  assertResourcesPresent(resources.resources);
 
   await client.readResource({ uri: "codex-mcp:///server-info" });
   await client.readResource({ uri: "codex-mcp:///gotchas" });
