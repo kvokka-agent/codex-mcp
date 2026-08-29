@@ -208,6 +208,59 @@ describe("resume", () => {
     );
   });
 
+  it("takes the settings back from Codex, including ones this server never recorded", async () => {
+    // The directory records `model: "gpt-5"` and nothing about what the thread
+    // ran with. A resume reads the thread out of Codex's own rollout log, so
+    // its answer is what the session runs with from here.
+    writeAbandonedOnDisk("sess_disk");
+    const answered = {
+      thread: { id: "thr_on_disk" },
+      model: "gpt-5.6-luna",
+      modelProvider: "myproxy",
+      cwd: "/srv/work",
+      approvalPolicy: "on-request",
+      sandbox: { type: "readOnly", networkAccess: false },
+      reasoningEffort: "xhigh",
+    };
+    manager = new SessionManager({
+      disableCleanup: true,
+      persistence,
+      createClient: () => {
+        const client = new MockClient();
+        client.threadResume = jest.fn(async () => answered);
+        clients.push(client);
+        return client as never;
+      },
+    });
+
+    await manager.resumeSession("sess_disk");
+
+    const session = manager.getSession("sess_disk", true);
+    expect(session.effective).toEqual({
+      model: "gpt-5.6-luna",
+      modelProvider: "myproxy",
+      reasoningEffort: "xhigh",
+      approvalPolicy: "on-request",
+      sandbox: { type: "readOnly", networkAccess: false },
+      cwd: "/srv/work",
+    });
+    expect(session.model).toBe("gpt-5");
+    expect(readMeta("sess_disk").effective).toMatchObject({ model: "gpt-5.6-luna" });
+  });
+
+  it("keeps the settings it holds when the resume answers none", async () => {
+    writeAbandonedOnDisk("sess_kept", {
+      effective: { model: "gpt-5.6-luna", reasoningEffort: "high" },
+    });
+
+    await manager.resumeSession("sess_kept");
+
+    expect(manager.getSession("sess_kept", true).effective).toEqual({
+      model: "gpt-5.6-luna",
+      reasoningEffort: "high",
+    });
+  });
+
   it("refuses a session a running server holds", async () => {
     writeAbandonedOnDisk("sess_held");
     // This test process is alive under its own pid and start time — the same

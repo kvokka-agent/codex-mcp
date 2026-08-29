@@ -305,6 +305,12 @@ function findDefinition(name: string): JsonObject {
  * A response is read and never constructed, so protocol.ts models only what a
  * caller uses: field existence is checked one way, every field protocol.ts
  * declares against the schema, at every level.
+ *
+ * The three thread responses declare more than the id because a session reports
+ * the settings it runs with, and those are what Codex answered rather than what
+ * the call asked for. They share one type, `ThreadSettingsResult`: the schema
+ * gives the three files the same required block, so a field that drifts in one
+ * of them fails here for all three.
  */
 const MODELLED_RESULTS: Record<string, string> = {
   InitializeResult: "v1/InitializeResponse.json",

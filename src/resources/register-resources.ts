@@ -49,7 +49,7 @@ export const RESOURCE_URIS = {
 
 type RuntimeMetadataProvider = Pick<
   SessionManager,
-  "getActiveSessionCount" | "getObservedDefaultModel"
+  "getActiveSessionCount" | "getCodexDefaultModel"
 >;
 
 export interface ResourceDeps {
@@ -613,7 +613,6 @@ function buildCompatReport(deps: ResourceDeps, codexCliVersion: string | null): 
 }
 
 function buildServerInfoJson(deps: ResourceDeps, getCodexCliVersion: () => string | null): string {
-  const observedModel = deps.sessionManager.getObservedDefaultModel();
   return JSON.stringify(
     {
       name: "codex-mcp",
@@ -628,8 +627,10 @@ function buildServerInfoJson(deps: ResourceDeps, getCodexCliVersion: () => strin
       supportedSandboxModes: SANDBOX_MODES,
       advertisedEffortLevels: ADVERTISED_EFFORT_LEVELS,
       activeSessions: deps.sessionManager.getActiveSessionCount(),
-      defaultModel: observedModel,
-      defaultModelSource: observedModel ? "session-default" : "unknown",
+      // The model Codex answered a `thread/start` that named none with, and
+      // null while no start has measured it. It carries no source field: this
+      // is the one place it comes from, and null already says unknown.
+      defaultModel: deps.sessionManager.getCodexDefaultModel(),
       resources: RESOURCE_CATALOG.map((entry) => ({
         uri: RESOURCE_URIS[entry.key],
         title: entry.title,

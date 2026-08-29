@@ -61,7 +61,15 @@ The server reads the shapes the vendored schema carries and nothing else. A
 `thread/start`, `thread/fork` or `thread/resume` answer that does not put the id
 at `thread.id` raises `INTERNAL` rather than being read from an older place: a
 session needs a real thread id, so an unreadable answer is a backend this server
-cannot drive. The `snake_case` aliases `approval_id` and
+cannot drive.
+
+The id is the only field of those three answers that raises. The settings block
+beside it — `model`, `modelProvider`, `cwd`, `approvalPolicy`, `sandbox`,
+`reasoningEffort` — degrades instead: a session runs without knowing what it
+runs with, so a field the answer does not carry in the shape the schema gives it
+leaves the session keeping what the caller asked for and reporting the effective
+value as unknown. Nothing is invented to fill the gap, and nothing is read from
+another place. The `snake_case` aliases `approval_id` and
 `network_approval_context` are refused, and so is the user-input question-id
 alias `questionId` — the schema field `id` is the only accepted name.
 

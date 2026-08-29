@@ -7,6 +7,9 @@ import { AppServerClient } from "../app-server/client.js";
 import type { ICodexClient } from "../app-server/client-interface.js";
 import type { AppServerSpawnOptions } from "../app-server/lifecycle.js";
 import {
+  APPROVAL_POLICY_PRESETS,
+  type AskForApproval,
+  type AskForApprovalGranular,
   type CommandApprovalParams,
   type CommandApprovalResponse,
   type DynamicToolCallResponse,
@@ -14,6 +17,8 @@ import {
   type LegacyApprovalResponse,
   Methods,
   type RequestId,
+  SANDBOX_POLICY_TYPES,
+  type SandboxPolicy,
   type TurnStartParams,
   toSandboxPolicy,
   type UserInput,
@@ -39,6 +44,7 @@ import {
   DEFAULT_POLL_INTERVAL,
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
+  type EffectiveSettings,
   type EffortLevel,
   ErrorCode,
   FILE_CHANGE_DECISIONS,
@@ -51,6 +57,7 @@ import {
   type ProgressInfo,
   type ProgressPhase,
   type ProgressTokens,
+  type PublicEffectiveSettings,
   type PublicSessionInfo,
   type SandboxMode,
   SESSION_STATUSES,
@@ -263,6 +270,8 @@ export class SessionManager {
   private sessionNotifiers = new Map<string, Set<() => void>>();
   /** The signal each session last woke its waiters on — see `notifyWaiters`. */
   private lastNotifiedSignal = new Map<string, string>();
+  /** The model Codex answered a `thread/start` that named none with — see `getCodexDefaultModel`. */
+  private codexDefaultModel: string | null = null;
 
   constructor(options: SessionManagerOptions = {}) {
     this.createClient = options.createClient ?? (() => new AppServerClient());
@@ -540,6 +549,11 @@ export class SessionManager {
     });
     const threadId = extractThreadId(threadStartResult);
     session.threadId = threadId;
+    // Codex answers with the settings the thread runs with, and where they
+    // differ from what the call asked for its answer is the truth: a start
+    // naming no model is answered with the model `config.toml` picked.
+    this.recordEffectiveSettings(session, threadStartResult);
+    this.recordCodexDefaultModel(spawnOpts.model, session.effective?.model);
     // The first turn can run for minutes and a client can die inside it. The
     // thread id is what a resume needs, so it goes to disk on arrival rather
     // than with the next status change.
@@ -737,26 +751,34 @@ export class SessionManager {
   }
 
   /**
-   * Best-effort effective default model observed from recent sessions.
-   * Returns null when no model can be inferred from in-memory state.
+   * The model Codex starts a thread on when the request names none.
+   *
+   * It is read off the answer to a `thread/start` this server sent with no
+   * model, so it is a model Codex reported running rather than one guessed from
+   * the sessions in memory. Null until such a start has been answered — where
+   * every start names a model, `CODEX_MCP_DEFAULT_MODEL` included, nothing here
+   * measures the default and it stays unknown.
    */
-  getObservedDefaultModel(): string | null {
-    let latestModel: string | null = null;
-    let latestTs = Number.NEGATIVE_INFINITY;
+  getCodexDefaultModel(): string | null {
+    return this.codexDefaultModel;
+  }
 
-    for (const session of this.sessions.values()) {
-      if (session.status === "cancelled") continue;
-      if (typeof session.model !== "string" || session.model.length === 0) continue;
+  /**
+   * Put the settings Codex just answered on the session.
+   *
+   * An answer carrying nothing readable leaves the last ones it gave in place:
+   * those are still settings Codex named, and a half of one answer merged into
+   * another would report a set that never ran together.
+   */
+  private recordEffectiveSettings(session: SessionInfo, answer: unknown): void {
+    session.effective = readEffectiveSettings(answer) ?? session.effective;
+  }
 
-      const ts = Date.parse(session.lastActiveAt);
-      const comparableTs = Number.isFinite(ts) ? ts : Number.NEGATIVE_INFINITY;
-      if (comparableTs >= latestTs) {
-        latestTs = comparableTs;
-        latestModel = session.model;
-      }
+  /** Keep the answer to a start that named no model: that answer is the default. */
+  private recordCodexDefaultModel(requestedModel: string | undefined, answered?: string): void {
+    if (requestedModel === undefined && answered !== undefined) {
+      this.codexDefaultModel = answered;
     }
-
-    return latestModel;
   }
 
   getSession(
@@ -1179,12 +1201,16 @@ export class SessionManager {
         sandbox: session.sandbox,
         config: session.config,
       });
-      await client.threadResume({
+      const resumeResult = await client.threadResume({
         threadId,
         personality: session.personality,
         baseInstructions: session.baseInstructions,
         developerInstructions: session.developerInstructions,
       });
+      // A resume restores the thread from Codex's own rollout log, so the
+      // thread's persisted metadata decides what it runs with — not the
+      // `meta.json` of whichever server started it.
+      this.recordEffectiveSettings(session, resumeResult);
       session.threadId = threadId;
       session.status = "idle";
       session.lastActiveAt = new Date().toISOString();
@@ -1296,6 +1322,7 @@ export class SessionManager {
       developerInstructions: session.developerInstructions,
     });
     const forkedThreadId = extractThreadId(forkResult);
+    const forkedSettings = readEffectiveSettings(forkResult);
 
     // Create new session with its own app-server process
     const newSessionId = `sess_${randomUUID().slice(0, 12)}`;
@@ -1320,6 +1347,7 @@ export class SessionManager {
       pendingRequests: new Map(),
       baseInstructions: session.baseInstructions,
       developerInstructions: session.developerInstructions,
+      effective: forkedSettings,
     };
 
     this.registerSession(newSession);
@@ -1342,12 +1370,15 @@ export class SessionManager {
       });
 
       // Resume the forked thread on the new process
-      await newClient.threadResume({
+      const resumeResult = await newClient.threadResume({
         threadId: forkedThreadId,
         personality: session.personality,
         baseInstructions: session.baseInstructions,
         developerInstructions: session.developerInstructions,
       });
+      // The fork answered for the thread and this resume answers for the
+      // process the new session is driven by, which is the one it runs on.
+      this.recordEffectiveSettings(newSession, resumeResult);
       newSession.threadId = forkedThreadId;
       this.persistSessionIfChanged(newSession);
 
@@ -2492,6 +2523,7 @@ function metaFingerprint(session: SessionInfo): string {
     session.cancelledAt,
     session.cancelledReason,
     session.config,
+    session.effective,
   ]);
 }
 
@@ -2581,6 +2613,7 @@ function sessionOfRecovered(
     config: isRecord(rec.meta.config) ? rec.meta.config : undefined,
     baseInstructions: normalizeOptionalString(rec.meta.baseInstructions),
     developerInstructions: normalizeOptionalString(rec.meta.developerInstructions),
+    effective: readEffectiveSettings(rec.meta.effective),
     approvalTimeoutMs:
       typeof rec.meta.approvalTimeoutMs === "number" ? rec.meta.approvalTimeoutMs : undefined,
     pendingRequests: new Map(),
@@ -2619,6 +2652,7 @@ function publicInfoOfRecovered(rec: RecoveredSession): PublicSessionInfo {
     pendingRequestCount: 0,
     activity: rec.lastActivity,
     owner: ownershipOf(rec.owner),
+    effective: publicEffectiveSettings(readEffectiveSettings(rec.meta.effective)),
   };
 }
 
@@ -3439,6 +3473,7 @@ function toPublicInfo(session: SessionInfo, owner?: SessionOwnership): PublicSes
     activity: session.progressState?.activity,
     lastTurn: lastTurnInfo(session),
     owner,
+    effective: publicEffectiveSettings(session.effective),
   };
 }
 
@@ -3467,6 +3502,7 @@ function toSensitiveInfo(session: SessionInfo, owner?: SessionOwnership): Sensit
     cwd: session.cwd,
     profile: session.profile,
     config: session.config,
+    effective: session.effective,
   };
 }
 
@@ -3666,6 +3702,68 @@ function extractThreadId(result: unknown): string {
   if (isRecord(thread) && typeof thread.id === "string" && thread.id.length > 0) return thread.id;
 
   throw new Error(`Error [${ErrorCode.INTERNAL}]: Invalid thread response: missing thread id`);
+}
+
+/**
+ * The settings Codex answered a thread call with.
+ *
+ * `thread/start`, `thread/fork` and `thread/resume` all report what the thread
+ * runs with rather than what the call asked for, and a `thread/resume` reads
+ * them out of Codex's own rollout log, so they can name settings this server
+ * never recorded. `meta.json` carries the block back under the same names, so a
+ * recovered session reads through this same function.
+ *
+ * Each field is read in the shape `codex-schema/v2/ThreadStartResponse.json`
+ * gives it and left out otherwise. Unlike the thread id, none of it is worth
+ * failing the call over — a session runs perfectly well without knowing its
+ * effective model — and a field left out is a setting the session reports as
+ * unknown, never one filled in from the argument the call sent.
+ */
+function readEffectiveSettings(source: unknown): EffectiveSettings | undefined {
+  if (!isRecord(source)) return undefined;
+  const settings: EffectiveSettings = {
+    model: readNonEmptyString(source.model),
+    modelProvider: readNonEmptyString(source.modelProvider),
+    // Optional on the response, and null for a model advertising no effort.
+    reasoningEffort: readNonEmptyString(source.reasoningEffort),
+    approvalPolicy: readAskForApproval(source.approvalPolicy),
+    sandbox: readSandboxPolicy(source.sandbox),
+    cwd: readNonEmptyString(source.cwd),
+  };
+  return Object.values(settings).some((value) => value !== undefined) ? settings : undefined;
+}
+
+function readNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** A policy preset the schema lists, or its `granular` object. */
+function readAskForApproval(value: unknown): AskForApproval | undefined {
+  if (typeof value === "string") {
+    return APPROVAL_POLICY_PRESETS.includes(value as ApprovalPolicy)
+      ? (value as ApprovalPolicy)
+      : undefined;
+  }
+  if (!isRecord(value) || !isRecord(value.granular)) return undefined;
+  return value as unknown as AskForApprovalGranular;
+}
+
+/** One of the four policy objects the schema's `SandboxPolicy` union carries. */
+function readSandboxPolicy(value: unknown): SandboxPolicy | undefined {
+  if (!isRecord(value) || typeof value.type !== "string") return undefined;
+  return SANDBOX_POLICY_TYPES.includes(value.type as SandboxPolicy["type"])
+    ? (value as SandboxPolicy)
+    : undefined;
+}
+
+/** The effective settings a redacted view carries: `cwd` is a path and stays out. */
+function publicEffectiveSettings(
+  effective: EffectiveSettings | undefined
+): PublicEffectiveSettings | undefined {
+  if (!effective) return undefined;
+  const { model, modelProvider, reasoningEffort, approvalPolicy, sandbox } = effective;
+  const redacted = { model, modelProvider, reasoningEffort, approvalPolicy, sandbox };
+  return Object.values(redacted).some((value) => value !== undefined) ? redacted : undefined;
 }
 
 /**

@@ -909,14 +909,6 @@ describe("SessionManager session operations", () => {
     expect(manager.getPendingActionTypes(started.sessionId)).toEqual([]);
   });
 
-  it("ignores cancelled and model-less sessions when guessing the default model", async () => {
-    const first = await manager.createSession("hi", workspace, { model: "gpt-a" }, "medium");
-    await manager.cancelSession(first.sessionId, "by test");
-    await manager.createSession("hi", workspace, {}, "medium");
-
-    expect(manager.getObservedDefaultModel()).toBeNull();
-  });
-
   it("writes session metadata once per status change", async () => {
     const stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-mcp-meta-"));
     const persistence = new SessionPersistence(stateDir);
