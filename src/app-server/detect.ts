@@ -4,7 +4,7 @@
  * Falls back to exec mode when app-server is unavailable.
  * Can be overridden via CODEX_MCP_MODE env var.
  */
-import { spawn } from "child_process";
+import { spawn, type ChildProcess } from "child_process";
 import { resolveCodexInvocation } from "./codex-bin.js";
 
 export type ClientMode = "app-server" | "exec";
@@ -92,6 +92,65 @@ async function runProbe(
   }
 }
 
+/** What one probe exit says about the subcommand: its code first, then what it printed. */
+function interpretProbeExit(code: number | null, stdout: string, stderr: string): ProbeOutcome {
+  if (code === 0) {
+    return { kind: "supported", detail: "probe exited 0" };
+  }
+  const combined = (stdout + stderr).toLowerCase();
+  const isUnknown =
+    combined.includes("unknown") ||
+    combined.includes("unrecognized") ||
+    combined.includes("not found") ||
+    combined.includes("no such subcommand");
+  if (isUnknown) {
+    return {
+      kind: "unsupported",
+      detail: `probe exited ${code} calling the subcommand unknown`,
+    };
+  }
+  if (combined.includes("app-server")) {
+    return { kind: "supported", detail: `probe exited ${code} documenting the subcommand` };
+  }
+  return {
+    kind: "indeterminate",
+    detail: `probe exited ${code} without mentioning the subcommand: ${summarize(stdout + stderr)}`,
+    timedOut: false,
+  };
+}
+
+/**
+ * ENOENT or another spawn failure: this says the binary could not be run, not
+ * that it lacks the subcommand.
+ */
+function spawnFailureOutcome(err: unknown): ProbeOutcome {
+  return {
+    kind: "indeterminate",
+    detail: `probe process failed to run: ${err instanceof Error ? err.message : String(err)}`,
+    timedOut: false,
+  };
+}
+
+/** Take down a probe that outlived its budget: terminate, then force kill after the grace period. */
+function terminateProbe(proc: ChildProcess): void {
+  try {
+    proc.kill("SIGTERM");
+  } catch {
+    // ignore
+  }
+  // Force kill after grace period if still alive
+  const forceKill = setTimeout(() => {
+    try {
+      if (!proc.killed && proc.exitCode === null) {
+        proc.kill("SIGKILL");
+      }
+    } catch {
+      /* ignore */
+    }
+  }, KILL_GRACE_MS);
+  if (forceKill.unref) forceKill.unref();
+}
+
 /**
  * Probe whether `<binary> app-server --help` succeeds.
  */
@@ -132,60 +191,11 @@ function probeAppServer(
       stderr += chunk.toString();
     });
 
-    proc.on("error", (err) => {
-      // ENOENT or another spawn failure: this says the binary could not be run,
-      // not that it lacks the subcommand.
-      settle({
-        kind: "indeterminate",
-        detail: `probe process failed to run: ${err instanceof Error ? err.message : String(err)}`,
-        timedOut: false,
-      });
-    });
-
-    proc.on("exit", (code) => {
-      if (code === 0) {
-        settle({ kind: "supported", detail: "probe exited 0" });
-        return;
-      }
-      const combined = (stdout + stderr).toLowerCase();
-      const isUnknown =
-        combined.includes("unknown") ||
-        combined.includes("unrecognized") ||
-        combined.includes("not found") ||
-        combined.includes("no such subcommand");
-      if (isUnknown) {
-        settle({
-          kind: "unsupported",
-          detail: `probe exited ${code} calling the subcommand unknown`,
-        });
-      } else if (combined.includes("app-server")) {
-        settle({ kind: "supported", detail: `probe exited ${code} documenting the subcommand` });
-      } else {
-        settle({
-          kind: "indeterminate",
-          detail: `probe exited ${code} without mentioning the subcommand: ${summarize(stdout + stderr)}`,
-          timedOut: false,
-        });
-      }
-    });
+    proc.on("error", (err) => settle(spawnFailureOutcome(err)));
+    proc.on("exit", (code) => settle(interpretProbeExit(code, stdout, stderr)));
 
     const timer = setTimeout(() => {
-      try {
-        proc.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
-      // Force kill after grace period if still alive
-      const forceKill = setTimeout(() => {
-        try {
-          if (!proc.killed && proc.exitCode === null) {
-            proc.kill("SIGKILL");
-          }
-        } catch {
-          /* ignore */
-        }
-      }, KILL_GRACE_MS);
-      if (forceKill.unref) forceKill.unref();
+      terminateProbe(proc);
       settle({
         kind: "indeterminate",
         detail: `probe still running after ${timeoutMs}ms`,
