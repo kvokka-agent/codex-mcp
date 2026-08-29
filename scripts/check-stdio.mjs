@@ -35,14 +35,13 @@ function usage(exitCode = 0) {
 
 function parseArgs(argv) {
   return parseLaunchArgs(argv, {
+    usage,
     defaults: { timeoutMs: 2000, stdioMode: "auto", reportJson: null },
     values: {
       "--timeout-ms": { key: "timeoutMs", read: readPositiveMs },
       "--mode": { key: "stdioMode", read: readStdioMode },
       "--report-json": { key: "reportJson", read: (raw) => raw },
     },
-    onHelp: () => usage(0),
-    onInvalid: () => usage(2),
   });
 }
 

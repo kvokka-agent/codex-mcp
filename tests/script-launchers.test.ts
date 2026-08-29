@@ -38,15 +38,12 @@ type LaunchArgs = {
   [key: string]: unknown;
 };
 
-// The scripts pass an `onHelp` and an `onInvalid` that exit the process; these
-// throw, so parsing stops where it stops in production.
+// The scripts pass a `usage` that exits the process; this one throws, so
+// parsing stops where it stops in production.
 function parse(argv: string[], spec: Record<string, unknown> = {}): LaunchArgs {
   return parseLaunchArgs(argv, {
-    onHelp: () => {
-      throw new Error("usage(0)");
-    },
-    onInvalid: () => {
-      throw new Error("usage(2)");
+    usage: (exitCode: number) => {
+      throw new Error(`usage(${exitCode})`);
     },
     ...spec,
   }) as LaunchArgs;
@@ -244,7 +241,6 @@ const RUN = {
   platform: "linux",
 };
 
-type Report = ReturnType<typeof asReport>;
 function asReport(run: typeof RUN) {
   return buildStdioReport(run) as {
     ok: boolean;

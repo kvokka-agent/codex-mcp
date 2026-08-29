@@ -52,6 +52,14 @@ export function ensureServerBuilt(): void {
   built = true;
 }
 
+interface ServerMessage {
+  id?: number;
+  method?: string;
+  params?: Record<string, unknown>;
+  result?: unknown;
+  error?: { message: string };
+}
+
 export interface ServerOptions {
   /** State directory the server owns. Defaults to a fresh temporary one. */
   stateDir?: string;
@@ -125,29 +133,27 @@ export class ServerProcess {
     while ((index = this.buffer.indexOf("\n")) !== -1) {
       const line = this.buffer.slice(0, index).trim();
       this.buffer = this.buffer.slice(index + 1);
-      if (!line) continue;
-      const msg = JSON.parse(line) as {
-        id?: number;
-        method?: string;
-        params?: Record<string, unknown>;
-        result?: unknown;
-        error?: { message: string };
-      };
-      if (typeof msg.id !== "number") {
-        // A message with no id is a notification the server sent on its own.
-        if (typeof msg.method === "string") {
-          const notification = { method: msg.method, params: msg.params ?? {} };
-          this.notifications.push(notification);
-          for (const waiter of this.notificationWaiters) waiter(notification);
-        }
-        continue;
-      }
-      const call = this.pending.get(msg.id);
-      if (!call) continue;
-      this.pending.delete(msg.id);
-      if (msg.error) call.reject(new Error(msg.error.message));
-      else call.resolve(msg.result);
+      if (line) this.receive(JSON.parse(line) as ServerMessage);
     }
+  }
+
+  private receive(msg: ServerMessage): void {
+    if (typeof msg.id !== "number") {
+      // A message with no id is a notification the server sent on its own.
+      if (typeof msg.method === "string") this.receiveNotification(msg.method, msg.params ?? {});
+      return;
+    }
+    const call = this.pending.get(msg.id);
+    if (!call) return;
+    this.pending.delete(msg.id);
+    if (msg.error) call.reject(new Error(msg.error.message));
+    else call.resolve(msg.result);
+  }
+
+  private receiveNotification(method: string, params: Record<string, unknown>): void {
+    const notification = { method, params };
+    this.notifications.push(notification);
+    for (const waiter of this.notificationWaiters) waiter(notification);
   }
 
   private send(msg: unknown): void {

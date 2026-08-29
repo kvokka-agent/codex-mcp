@@ -35,10 +35,9 @@ function usage(exitCode = 0) {
 
 function parseArgs(argv) {
   return parseLaunchArgs(argv, {
+    usage,
     defaults: { verbose: false },
     switches: { "--verbose": "verbose" },
-    onHelp: () => usage(0),
-    onInvalid: () => usage(2),
   });
 }
 

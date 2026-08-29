@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-export const STDIO_MODES = ["auto", "strict", "off"];
+const STDIO_MODES = ["auto", "strict", "off"];
 
 /** @param {string} raw @returns {string | undefined} */
 export function readStdioMode(raw) {

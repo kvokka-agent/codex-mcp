@@ -20,21 +20,20 @@ export function splitArgv(argv) {
  *
  * `switches` maps a flag to the key it sets to `true`. `values` maps a flag to
  * the key it sets and the `read` that turns the next argument into that value;
- * `read` returning `undefined` rejects the argument. The scripts pass an
- * `onHelp` and an `onInvalid` that exit the process, so parsing continues past
- * either only under a test.
+ * `read` returning `undefined` rejects the argument. `usage` prints the script's
+ * help and exits with the code it is given, so parsing continues past a help or
+ * a bad flag only under a test.
  *
  * @param {string[]} argv
  * @param {{
  *   defaults?: Record<string, unknown>,
  *   switches?: Record<string, string>,
  *   values?: Record<string, { key: string, read: (raw: string) => unknown }>,
- *   onHelp: () => void,
- *   onInvalid: () => void,
+ *   usage: (exitCode: number) => void,
  * }} spec
  */
 export function parseLaunchArgs(argv, spec) {
-  const { defaults = {}, switches = {}, values = {}, onHelp, onInvalid } = spec;
+  const { defaults = {}, switches = {}, values = {}, usage } = spec;
   const out = {
     useBunx: false,
     cwd: process.cwd(),
@@ -49,7 +48,7 @@ export function parseLaunchArgs(argv, spec) {
   for (let i = 0; i < main.length; i++) {
     const flag = main[i];
     if (flag === "--help" || flag === "-h") {
-      onHelp();
+      usage(0);
       continue;
     }
     const switchKey = knownSwitches[flag];
@@ -61,7 +60,7 @@ export function parseLaunchArgs(argv, spec) {
     const raw = value === undefined ? undefined : main[i + 1];
     const read = raw ? value.read(raw) : undefined;
     if (read === undefined) {
-      onInvalid();
+      usage(2);
       continue;
     }
     out[value.key] = read;
