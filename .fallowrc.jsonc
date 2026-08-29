@@ -5,7 +5,7 @@
   "ignorePatterns": ["codex-schema/**"],
   "includeEntryExports": true,
   "duplicates": {
-    // 71 lines, 0.6% of lines today, in three groups: the two approval builders
+    // 84 lines, 0.6% of lines today, in three groups: the two approval builders
     // of `src/session/manager.ts` that already delegate to
     // `awaitPendingRequest`, and the required and all-optional zod shapes of the
     // same session fields in `src/server.ts`. Each pair carries something its
