@@ -1,8 +1,8 @@
 # Repo agent instructions (codex-mcp)
 
 A TypeScript (ESM) MCP server that wraps the OpenAI Codex CLI. It spawns
-`codex app-server` child processes — or falls back to `codex exec --json` for
-binaries without an app-server — and exposes their capability as five MCP tools.
+`codex app-server` child processes and exposes their capability as five MCP
+tools.
 
 ## Where the truth lives
 
@@ -31,7 +31,7 @@ complete.
 | --- | --- | --- |
 | `codex` | start a session | waits for the thread only |
 | `codex_reply` | continue a session | returns at once |
-| `codex_setup` | report executable, auth and backend readiness | sync |
+| `codex_setup` | report executable, auth and Codex CLI version readiness | sync |
 | `codex_session` | list, get, resume, cancel, interrupt, fork, clean, clean background terminals | sync |
 | `codex_check` | report status and answer what the session waits for | sync, or long-poll on `waitMs` |
 
@@ -43,7 +43,8 @@ server is `abandoned`, and `codex_session(action="resume")` picks it back up.
 ## Prerequisites
 
 `bun` >= 1.4, which is the whole toolchain and the runtime, and a `codex` on
-PATH that answers `codex --version`.
+PATH that answers `codex --version` with 0.101.0 or newer — every session runs
+on `codex app-server`, which older builds do not carry.
 
 ## Commands
 
@@ -59,11 +60,9 @@ src/
 ├── index.ts            startup, shutdown, the transport
 ├── server.ts           tool registration and the zod schemas
 ├── types.ts            shared constants, statuses, defaults
-├── app-server/         the two backends and the wire protocol
+├── app-server/         the backend and the wire protocol
 │   ├── client.ts             app-server JSON-RPC over stdio
 │   ├── client-interface.ts   what a backend must implement
-│   ├── exec-client.ts        the codex exec --json fallback
-│   ├── detect.ts             which backend this binary carries
 │   ├── codex-bin.ts          how to spawn it on this platform
 │   ├── protocol.ts           method names and message types
 │   └── lifecycle.ts

@@ -11,11 +11,11 @@ import { executeCodexReply } from "./tools/codex-reply.js";
 import { executeCodexSession } from "./tools/codex-session.js";
 import { executeCodexSetup } from "./tools/codex-setup.js";
 import {
+  ADVERTISED_EFFORT_LEVELS,
   ALL_DECISIONS,
   APPROVAL_POLICIES,
   CHECK_ACTIONS,
   CLEANABLE_STATUSES,
-  EFFORT_LEVELS,
   ErrorCode,
   MAX_LONG_POLL_WAIT_MS,
   PERSONALITIES,
@@ -199,9 +199,14 @@ const setupResultShape = {
     state: z.enum(["authenticated", "unauthenticated", "unknown"]),
     detail: z.string(),
   }),
+  backend: z.object({
+    ok: z.boolean(),
+    cliVersion: z.string().nullable(),
+    minimumCliVersion: z.string(),
+    detail: z.string(),
+  }),
   runtime: z.object({
     sameMachineRequired: z.boolean(),
-    clientMode: z.enum(["app-server", "exec"]).optional(),
     stateDir: z.string(),
   }),
   projectContext: z.object({
@@ -333,7 +338,6 @@ const checkToolOutputShape = {
       turnId: z.string(),
       outcome: z.enum(["completed", "error", "cancelled"]).optional(),
       text: z.string().optional(),
-      output: z.string().optional(),
       structuredOutput: z.unknown().optional(),
       turn: z.unknown().optional(),
       status: z.string().optional(),
@@ -575,9 +579,9 @@ function codexInputShape(sessionDefaults: SessionDefaults) {
           .enum(APPROVAL_POLICIES)
           .optional()
           .describe(
-            `Optional enum: untrusted/on-failure/on-request/never (default: ${sessionDefaults.approvalPolicy}).`
+            `Optional enum: untrusted/on-request/never (default: ${sessionDefaults.approvalPolicy}).`
           )
-      : z.enum(APPROVAL_POLICIES).describe("Required enum: untrusted/on-failure/on-request/never."),
+      : z.enum(APPROVAL_POLICIES).describe("Required enum: untrusted/on-request/never."),
     sandbox: sessionDefaults.sandbox
       ? z
           .enum(SANDBOX_MODES)
@@ -589,9 +593,12 @@ function codexInputShape(sessionDefaults: SessionDefaults) {
           .enum(SANDBOX_MODES)
           .describe("Required enum: read-only/workspace-write/danger-full-access."),
     effort: z
-      .enum(EFFORT_LEVELS)
+      .string()
+      .min(1)
       .optional()
-      .describe(`Reasoning effort (default: ${sessionDefaults.effort}).`),
+      .describe(
+        `Reasoning effort (default: ${sessionDefaults.effort}). Codex 0.150.1 advertises ${ADVERTISED_EFFORT_LEVELS.join("/")}, and each model advertises its own set — Codex refuses one the chosen model does not.`
+      ),
     cwd: z.string().optional().describe("Working directory (default: server cwd)."),
     model: z
       .string()
@@ -641,7 +648,13 @@ function registerCodexReplyTool(ctx: ToolContext): void {
         prompt: z.string().describe("Follow-up message"),
         model: z.string().optional().describe("Override model."),
         approvalPolicy: z.enum(APPROVAL_POLICIES).optional().describe("Override approval policy."),
-        effort: z.enum(EFFORT_LEVELS).optional().describe("Override effort."),
+        effort: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            `Override effort. Codex 0.150.1 advertises ${ADVERTISED_EFFORT_LEVELS.join("/")}, and each model advertises its own set — Codex refuses one the chosen model does not.`
+          ),
         summary: z.enum(SUMMARY_MODES).optional().describe("Override summary."),
         personality: z.enum(PERSONALITIES).optional().describe("Override personality."),
         sandbox: z.enum(SANDBOX_MODES).optional().describe("Override sandbox."),
@@ -671,7 +684,7 @@ function registerCodexSetupTool(ctx: ToolContext): void {
     {
       title: "Codex Setup",
       description:
-        "Run local readiness checks for codex-mcp: executable resolution, login status, detected backend mode, and project config. Use this before starting a session when setup is uncertain.",
+        "Run local readiness checks for codex-mcp: executable resolution, login status, Codex CLI version against the minimum this server drives, and project config. Use this before starting a session when setup is uncertain.",
       inputSchema: {
         cwd: z
           .string()
@@ -687,7 +700,7 @@ function registerCodexSetupTool(ctx: ToolContext): void {
         openWorldHint: false,
       },
     },
-    async (args) => toolEnvelope(await executeCodexSetup(args, serverCwd), false)
+    (args) => toolEnvelope(executeCodexSetup(args, serverCwd), false)
   );
 }
 
@@ -761,10 +774,7 @@ respond_user_input: answer a user-input action.`,
   );
 }
 
-export function createServer(
-  serverCwd: string,
-  options?: SessionManagerOptions & { clientMode?: string }
-): ServerContext {
+export function createServer(serverCwd: string, options?: SessionManagerOptions): ServerContext {
   // Read before anything is built: an unreadable value stops the server here
   // rather than at the first session it would have started differently.
   const sessionDefaults = resolveSessionDefaults();
@@ -783,13 +793,10 @@ export function createServer(
   });
 
   // Read-only MCP resources (helpful docs / metadata).
-  // The manager builds an AppServerClient when no factory is injected, so the mode is known
-  // without a probe; an injected factory can build anything, and only its caller knows what.
   registerResources(server, {
     version: SERVER_VERSION,
     sessionManager,
     sessionDefaults,
-    clientMode: options?.clientMode ?? (options?.createClient ? "unknown" : "app-server"),
     diskPersistence: options?.persistence !== undefined,
   });
 

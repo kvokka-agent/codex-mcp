@@ -12,7 +12,7 @@ import { present } from "./helpers/present.js";
  */
 const spawnState = {
   calls: [] as Array<{ command: string; args: string[] }>,
-  impl: (() => ({ status: 0, stdout: "codex-cli 0.52.0", stderr: "" })) as (
+  impl: (() => ({ status: 0, stdout: "codex-cli 0.150.1", stderr: "" })) as (
     command: string,
     args: string[]
   ) => unknown,
@@ -41,7 +41,7 @@ const { SessionManager } = await import("../src/session/manager.js");
 const {
   APPROVAL_POLICIES,
   SANDBOX_MODES,
-  EFFORT_LEVELS,
+  ADVERTISED_EFFORT_LEVELS,
   DEFAULT_EFFORT_LEVEL,
   DEFAULT_APPROVAL_TIMEOUT_MS,
   ErrorCode,
@@ -50,6 +50,7 @@ const {
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
 } = await import("../src/types.js");
+const { MIN_CODEX_CLI_VERSION } = await import("../src/utils/codex-version.js");
 
 const DEFAULT_SPAWN_IMPL = spawnState.impl;
 
@@ -220,7 +221,6 @@ class StubCodexClient extends EventEmitter {
   /** Handler the manager registered, so a test can play backend notifications into it. */
   private notify: ((method: string, params: unknown) => void) | null = null;
   destroyed = false;
-  supportsTurnOverrides = true;
   childPid: number | undefined = undefined;
   turnStartCalls: Array<{ effort?: string }> = [];
   /** Codex CLI builds that reject minimal effort answer with this shape of message. */
@@ -547,16 +547,18 @@ describe("resource documents served over MCP", () => {
     }
   });
 
-  it("names under 'Effort selection' every effort level the enum defines, and no other", () => {
+  it("names under 'Effort selection' every effort level Codex advertises, and no other", () => {
     const guide = present(docs.get(RESOURCE_URIS.delegationGuide), "the delegation guide resource");
     const section = guide.split("## Effort selection")[1].split("\n##")[0];
-    const named = collectMatches(section, /`([a-z]+)`/g);
+    // `minimal` is named there by the web_search retry note, not as a level to pick.
+    const named = collectMatches(section, /`([a-z]+)`/g).filter((level) => level !== "minimal");
 
-    for (const level of EFFORT_LEVELS) {
+    for (const level of ADVERTISED_EFFORT_LEVELS) {
       expect(section, `effort level undocumented: ${level}`).toContain(`\`${level}\``);
     }
-    expect(named.filter((level) => !EFFORT_LEVELS.includes(level as never))).toEqual([]);
-    expect(named, "first mentions run out of enum order").toEqual([...EFFORT_LEVELS]);
+    expect(named, "first mentions run out of advertised order").toEqual([
+      ...ADVERTISED_EFFORT_LEVELS,
+    ]);
     expect(section).toContain(`names no effort runs at ${DEFAULT_EFFORT_LEVEL}`);
   });
 
@@ -663,41 +665,6 @@ describe("resource documents served over MCP", () => {
     expect(compat.featureNotes.diskPersistence).toContain("restart drops their history");
   });
 
-  it("names the backend the server drives instead of assuming app-server", async () => {
-    // No injected factory: SessionManager builds an AppServerClient, so the mode is known.
-    const serverInfo = present(docs.get(RESOURCE_URIS.serverInfo), "the server-info resource");
-
-    expect((JSON.parse(serverInfo) as { clientMode: string }).clientMode).toBe("app-server");
-
-    const injected = await openServer({
-      disableCleanup: true,
-      createClient: () => new StubCodexClient() as never,
-    });
-    const declared = await openServer({
-      disableCleanup: true,
-      clientMode: "exec",
-      createClient: () => new StubCodexClient() as never,
-    });
-
-    try {
-      const injectedInfo = present(
-        injected.docs.get(RESOURCE_URIS.serverInfo),
-        "the server-info resource of the injected-client server"
-      );
-      const declaredInfo = present(
-        declared.docs.get(RESOURCE_URIS.serverInfo),
-        "the server-info resource of the exec-mode server"
-      );
-
-      // An injected factory can build any client; the server is not told which, so it says so.
-      expect((JSON.parse(injectedInfo) as { clientMode: string }).clientMode).toBe("unknown");
-      expect((JSON.parse(declaredInfo) as { clientMode: string }).clientMode).toBe("exec");
-    } finally {
-      await injected.server.close();
-      await declared.server.close();
-    }
-  });
-
   it("names the round the driver polls in, and the server's own ceiling", () => {
     const guide = present(docs.get(RESOURCE_URIS.delegationGuide), "the delegation guide resource");
 
@@ -798,8 +765,9 @@ describe("resource documents served over MCP", () => {
 
       expect(turnMessage.has("output")).toBe(false);
       expect(result.text).toBe("the answer");
-      expect(result.output).toBeUndefined();
-      expect(docs.get(RESOURCE_URIS.gotchas)).toContain("`result.output` is exec-mode only");
+      expect(docs.get(RESOURCE_URIS.gotchas)).toContain(
+        "The app-server `Turn` carries no text field"
+      );
     } finally {
       manager.destroy();
     }
@@ -864,18 +832,11 @@ describe("resource documents served over MCP", () => {
     for (const answer of answers) expect(Object.keys(answer)).toEqual(answerShape.required);
   });
 
-  it("keeps the EXEC_NOT_SUPPORTED story consistent between gotchas and the error hints", () => {
+  it("names the Codex CLI floor in the gotchas resource", () => {
     const gotchas = present(docs.get(RESOURCE_URIS.gotchas), "the gotchas resource");
-    const errorsText = present(docs.get(RESOURCE_URIS.errors), "the errors resource");
 
-    expect(gotchas).toContain(ErrorCode.EXEC_NOT_SUPPORTED);
-    expect(gotchas).toContain("threadFork");
-    const hint = present(
-      errorsText.match(/^- `EXEC_NOT_SUPPORTED`: (.+)$/m),
-      "the EXEC_NOT_SUPPORTED hint of the errors resource"
-    )[1];
-    expect(hint).toContain("threadFork");
-    expect(hint).toContain("app-server");
+    expect(gotchas).toContain(MIN_CODEX_CLI_VERSION);
+    expect(gotchas).toContain("codex app-server");
   });
 });
 
@@ -884,7 +845,6 @@ describe("runtime metadata in server-info and compat-report", () => {
     version?: string;
     activeSessions?: () => number;
     observedModel?: string | null;
-    clientMode?: string;
     diskPersistence?: boolean;
     sessionDefaults?: SessionDefaults;
   }) {
@@ -903,7 +863,6 @@ describe("runtime metadata in server-info and compat-report", () => {
       } as never,
       {
         version: deps.version ?? "0.0.0-test",
-        clientMode: deps.clientMode ?? "app-server",
         diskPersistence: deps.diskPersistence ?? true,
         sessionDefaults: deps.sessionDefaults ?? {
           effort: DEFAULT_EFFORT_LEVEL,
@@ -939,9 +898,9 @@ describe("runtime metadata in server-info and compat-report", () => {
       "the runtime block of the compat report"
     ).codexCliVersion;
 
-    expect(first).toBe("0.52.0");
-    expect(second).toBe("0.52.0");
-    expect(inCompat).toBe("0.52.0");
+    expect(first).toBe("0.150.1");
+    expect(second).toBe("0.150.1");
+    expect(inCompat).toBe("0.150.1");
     expect(spawnState.calls).toHaveLength(1);
     expect(spawnState.calls[0].args).toEqual(["--version"]);
     expect(spawnState.calls[0].command.length).toBeGreaterThan(0);
@@ -1006,10 +965,17 @@ describe("runtime metadata in server-info and compat-report", () => {
     expect(register({}).json(RESOURCE_URIS.serverInfo).codexCliVersion).toBeNull();
   });
 
-  it("echoes the client mode it was given without inventing one", () => {
-    expect(register({ clientMode: "exec" }).json(RESOURCE_URIS.serverInfo).clientMode).toBe("exec");
-    expect(register({ clientMode: "unknown" }).json(RESOURCE_URIS.serverInfo).clientMode).toBe(
-      "unknown"
+  it("names the Codex CLI floor in server-info", () => {
+    expect(register({}).json(RESOURCE_URIS.serverInfo).minCodexCliVersion).toBe(
+      MIN_CODEX_CLI_VERSION
+    );
+  });
+
+  it("warns in the compat report when the detected CLI is below the floor", () => {
+    spawnState.impl = () => ({ status: 0, stdout: "codex-cli 0.100.0", stderr: "" });
+
+    expect(register({}).json(RESOURCE_URIS.compatReport).runtimeWarnings).toContain(
+      "Codex CLI 0.100.0 is below the 0.101.0 this server needs: it carries no `codex app-server`, so no session starts. Upgrade the CLI."
     );
   });
 

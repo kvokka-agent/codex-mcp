@@ -3,11 +3,16 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { resolveCodexInvocation } from "../app-server/codex-bin.js";
-import { type ClientMode, detectClientMode } from "../app-server/detect.js";
 import {
   type CodexExecutableInfo,
   resolveDefaultCodexExecutable,
 } from "../utils/codex-executable.js";
+import {
+  belowMinimumCodexCliMessage,
+  detectCodexCliVersion,
+  isCodexCliBelowMinimum,
+  MIN_CODEX_CLI_VERSION,
+} from "../utils/codex-version.js";
 
 export interface CodexSetupInput {
   cwd?: string;
@@ -35,9 +40,14 @@ export interface CodexSetupResult {
     state: AuthState;
     detail: string;
   };
+  backend: {
+    ok: boolean;
+    cliVersion: string | null;
+    minimumCliVersion: string;
+    detail: string;
+  };
   runtime: {
     sameMachineRequired: true;
-    clientMode?: ClientMode;
     stateDir: string;
   };
   projectContext: {
@@ -103,11 +113,40 @@ function probeCodexAuth(info: CodexExecutableInfo): CodexSetupResult["auth"] {
 interface CodexProbe {
   executable: CodexSetupResult["executable"];
   auth: CodexSetupResult["auth"];
-  clientMode?: ClientMode;
+  backend: CodexSetupResult["backend"];
   internalExecutable: boolean;
 }
 
-async function probeCodexEnvironment(): Promise<CodexProbe> {
+/** What the CLI answered about its own version, and whether that clears the floor. */
+function probeCodexBackend(): CodexSetupResult["backend"] {
+  const cliVersion = detectCodexCliVersion();
+  if (cliVersion === null) {
+    return {
+      ok: false,
+      cliVersion,
+      minimumCliVersion: MIN_CODEX_CLI_VERSION,
+      // An unread version is not an old CLI: the probe answered nothing, and calling that
+      // ready would send the caller into a session that fails on the spawn.
+      detail: `\`codex --version\` printed no version, so this build cannot be held against the ${MIN_CODEX_CLI_VERSION} floor.`,
+    };
+  }
+  if (isCodexCliBelowMinimum(cliVersion)) {
+    return {
+      ok: false,
+      cliVersion,
+      minimumCliVersion: MIN_CODEX_CLI_VERSION,
+      detail: belowMinimumCodexCliMessage(cliVersion),
+    };
+  }
+  return {
+    ok: true,
+    cliVersion,
+    minimumCliVersion: MIN_CODEX_CLI_VERSION,
+    detail: `Codex CLI ${cliVersion} carries \`codex app-server\`, which every session runs on.`,
+  };
+}
+
+function probeCodexEnvironment(): CodexProbe {
   let internalExecutable = false;
   try {
     const info = resolveDefaultCodexExecutable();
@@ -132,13 +171,22 @@ async function probeCodexEnvironment(): Promise<CodexProbe> {
           state: "unknown",
           detail: "Auth status not checked because no codex executable was detected.",
         },
+        backend: {
+          ok: false,
+          cliVersion: null,
+          minimumCliVersion: MIN_CODEX_CLI_VERSION,
+          detail: "Codex CLI version not checked because no codex executable was detected.",
+        },
         internalExecutable,
       };
     }
 
-    const auth = probeCodexAuth(info);
-    const clientMode = await detectClientMode(info.command, info.isPath);
-    return { executable, auth, clientMode, internalExecutable };
+    return {
+      executable,
+      auth: probeCodexAuth(info),
+      backend: probeCodexBackend(),
+      internalExecutable,
+    };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -151,6 +199,12 @@ async function probeCodexEnvironment(): Promise<CodexProbe> {
         ok: false,
         state: "unknown",
         detail: "Auth status not checked because executable resolution failed.",
+      },
+      backend: {
+        ok: false,
+        cliVersion: null,
+        minimumCliVersion: MIN_CODEX_CLI_VERSION,
+        detail: "Codex CLI version not checked because executable resolution failed.",
       },
       internalExecutable,
     };
@@ -182,21 +236,20 @@ function collectSetupAdvice(
   if (!projectContext.hasUserConfig && !projectContext.hasProjectConfig) {
     warnings.push("No Codex config.toml was found in ~/.codex or this project.");
   }
-  if (probe.clientMode === "exec") {
-    warnings.push(
-      "Codex app-server support was not detected; codex-mcp would run in exec fallback mode with fewer capabilities."
-    );
+  if (!probe.backend.ok && probe.executable.ok) {
+    warnings.push(probe.backend.detail);
+    nextSteps.push(`Upgrade the Codex CLI to ${MIN_CODEX_CLI_VERSION} or newer.`);
   }
 
   return { warnings, nextSteps };
 }
 
-export async function executeCodexSetup(
+export function executeCodexSetup(
   input: CodexSetupInput | undefined,
   serverCwd: string
-): Promise<CodexSetupResult> {
+): CodexSetupResult {
   const cwd = input?.cwd && input.cwd.trim() !== "" ? input.cwd : serverCwd;
-  const probe = await probeCodexEnvironment();
+  const probe = probeCodexEnvironment();
 
   const projectContext = {
     hasUserConfig: existsSync(path.join(homedir(), ".codex", "config.toml")),
@@ -206,13 +259,13 @@ export async function executeCodexSetup(
   const { warnings, nextSteps } = collectSetupAdvice(probe, projectContext);
 
   return {
-    ready: probe.executable.ok && probe.auth.ok,
+    ready: probe.executable.ok && probe.auth.ok && probe.backend.ok,
     cwd,
     executable: probe.executable,
     auth: probe.auth,
+    backend: probe.backend,
     runtime: {
       sameMachineRequired: true,
-      clientMode: probe.clientMode,
       stateDir: resolveCodexStateDir(),
     },
     projectContext,

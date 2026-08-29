@@ -24,6 +24,7 @@ import {
   Methods,
   type RequestId,
   type ThreadBackgroundTerminalsCleanParams,
+  type ThreadDeleteParams,
   type ThreadForkParams,
   type ThreadForkResult,
   type ThreadResumeParams,
@@ -71,17 +72,8 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     return this._destroyed;
   }
 
-  get supportsTurnOverrides(): boolean {
-    return true;
-  }
-
   get childPid(): number | undefined {
     return this.process?.pid ?? undefined;
-  }
-
-  /** app-server takes every per-turn override, so none is ever dropped. */
-  get unappliedTurnOverrides(): readonly string[] {
-    return [];
   }
 
   /**
@@ -231,6 +223,10 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     params: ThreadBackgroundTerminalsCleanParams
   ): Promise<Record<string, never>> {
     return this.request<Record<string, never>>(Methods.THREAD_BACKGROUND_TERMINALS_CLEAN, params);
+  }
+
+  async threadDelete(params: ThreadDeleteParams): Promise<Record<string, never>> {
+    return this.request<Record<string, never>>(Methods.THREAD_DELETE, params);
   }
 
   async turnStart(

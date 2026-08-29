@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { executeCodexSetup } from "../src/tools/codex-setup.js";
+import { isCodexCliBelowMinimum } from "../src/utils/codex-version.js";
 import { mockModule } from "./helpers/mock.js";
 
 const { spawnSyncMock, spawnMock, homedirMock } = {
@@ -41,9 +42,22 @@ function writeConfig(dir: string): void {
   writeFileSync(path.join(dir, ".codex", "config.toml"), "model = 'gpt-5'\n");
 }
 
-/** spawnSync result for `codex login status`. */
+type SpawnResult = { status: number | null; stdout?: string; stderr?: string; error?: Error };
+
+/** What the stubbed CLI answers `codex --version` with; every test starts on a supported build. */
+let versionResult: SpawnResult = { status: 0, stdout: "codex-cli 0.150.1", stderr: "" };
+
+/** What the stubbed CLI answers `codex login status` with. */
+let authResult: SpawnResult = { status: 0 };
+
 function loginStatus(status: number | null, stdout = "", stderr = ""): void {
-  spawnSyncMock.mockReturnValue({ status, stdout, stderr });
+  authResult = { status, stdout, stderr };
+}
+
+function installSpawnStub(): void {
+  spawnSyncMock.mockImplementation((_command: string, args: string[]) =>
+    args.includes("--version") ? versionResult : authResult
+  );
 }
 
 beforeEach(() => {
@@ -55,10 +69,11 @@ beforeEach(() => {
   homedirMock.mockReturnValue(home);
   spawnSyncMock.mockReset();
   spawnMock.mockReset();
+  versionResult = { status: 0, stdout: "codex-cli 0.150.1", stderr: "" };
   loginStatus(0, "Logged in as tester");
+  installSpawnStub();
 
   delete process.env.CODEX_MCP_COMMAND;
-  process.env.CODEX_MCP_MODE = "app-server";
   process.env.CODEX_MCP_STATE_DIR = path.join(root, "state");
   process.env.CODEX_MCP_PATH = makeExecutable(path.join(root, "bin"), "codex");
   jest.spyOn(console, "error").mockImplementation(() => {});
@@ -92,9 +107,14 @@ describe("executeCodexSetup", () => {
       state: "authenticated",
       detail: "Logged in as tester",
     });
+    expect(result.backend).toEqual({
+      ok: true,
+      cliVersion: "0.150.1",
+      minimumCliVersion: "0.101.0",
+      detail: "Codex CLI 0.150.1 carries `codex app-server`, which every session runs on.",
+    });
     expect(result.runtime).toEqual({
       sameMachineRequired: true,
-      clientMode: "app-server",
       stateDir: path.join(root, "state"),
     });
     expect(result.projectContext).toEqual({ hasUserConfig: true, hasProjectConfig: false });
@@ -176,7 +196,7 @@ describe("executeCodexSetup", () => {
 
   it("surfaces a failed auth probe", async () => {
     writeConfig(home);
-    spawnSyncMock.mockReturnValue({ status: null, error: new Error("spawn ENOENT") });
+    authResult = { status: null, error: new Error("spawn ENOENT") };
 
     const result = await executeCodexSetup(undefined, serverCwd);
     expect(result.auth).toEqual({
@@ -193,7 +213,7 @@ describe("executeCodexSetup", () => {
     process.env.CODEX_MCP_PATH = makeExecutable(path.join(root, "bin"), "codex-internal");
 
     const result = await executeCodexSetup(undefined, serverCwd);
-    expect(spawnSyncMock).not.toHaveBeenCalled();
+    expect(spawnSyncMock.mock.calls.map(([, args]) => args)).toEqual([["--version"]]);
     expect(result.auth.ok).toBe(true);
     expect(result.auth.state).toBe("unknown");
     expect(result.auth.detail).toContain("codex-internal");
@@ -216,7 +236,12 @@ describe("executeCodexSetup", () => {
       state: "unknown",
       detail: "Auth status not checked because no codex executable was detected.",
     });
-    expect(result.runtime.clientMode).toBeUndefined();
+    expect(result.backend).toEqual({
+      ok: false,
+      cliVersion: null,
+      minimumCliVersion: "0.101.0",
+      detail: "Codex CLI version not checked because no codex executable was detected.",
+    });
     expect(result.ready).toBe(false);
     expect(spawnSyncMock).not.toHaveBeenCalled();
     expect(result.warnings[0]).toContain("No codex executable was auto-detected");
@@ -242,15 +267,42 @@ describe("executeCodexSetup", () => {
     expect(result.ready).toBe(false);
   });
 
-  it("warns about the reduced capabilities of exec fallback mode", async () => {
+  it("refuses readiness for a CLI below the minimum and names the upgrade", async () => {
     writeConfig(home);
-    process.env.CODEX_MCP_MODE = "exec";
+    versionResult = { status: 0, stdout: "codex-cli 0.100.0", stderr: "" };
 
     const result = await executeCodexSetup(undefined, serverCwd);
-    expect(result.runtime.clientMode).toBe("exec");
+    expect(result.backend.ok).toBe(false);
+    expect(result.backend.cliVersion).toBe("0.100.0");
     expect(result.warnings).toContain(
-      "Codex app-server support was not detected; codex-mcp would run in exec fallback mode with fewer capabilities."
+      "Codex CLI 0.100.0 is below the 0.101.0 this server needs: it carries no `codex app-server`, so no session starts. Upgrade the CLI."
     );
+    expect(result.nextSteps).toContain("Upgrade the Codex CLI to 0.101.0 or newer.");
+    expect(result.ready).toBe(false);
+  });
+
+  it("refuses readiness when the CLI printed no version to hold against the floor", async () => {
+    // An unread version is not an old CLI, and the report says which of the two it is.
+    writeConfig(home);
+    versionResult = { status: 1, stdout: "", stderr: "error: unrecognized argument '--version'\n" };
+
+    const result = await executeCodexSetup(undefined, serverCwd);
+    expect(result.backend).toEqual({
+      ok: false,
+      cliVersion: null,
+      minimumCliVersion: "0.101.0",
+      detail:
+        "`codex --version` printed no version, so this build cannot be held against the 0.101.0 floor.",
+    });
+    expect(result.ready).toBe(false);
+  });
+
+  it("counts the floor release itself as supported", async () => {
+    writeConfig(home);
+    versionResult = { status: 0, stdout: "codex-cli 0.101.0", stderr: "" };
+
+    const result = await executeCodexSetup(undefined, serverCwd);
+    expect(result.backend.ok).toBe(true);
     expect(result.ready).toBe(true);
   });
 
@@ -262,5 +314,26 @@ describe("executeCodexSetup", () => {
     process.env.CODEX_MCP_STATE_DIR = "   ";
     const blank = await executeCodexSetup(undefined, serverCwd);
     expect(blank.runtime.stateDir).toBe(path.join(home, ".codex-mcp", "state"));
+  });
+});
+
+describe("isCodexCliBelowMinimum", () => {
+  it("ranks a release against the floor", () => {
+    expect(isCodexCliBelowMinimum("0.100.9")).toBe(true);
+    expect(isCodexCliBelowMinimum("0.101.0")).toBe(false);
+    expect(isCodexCliBelowMinimum("0.150.1")).toBe(false);
+    expect(isCodexCliBelowMinimum("1.0.0")).toBe(false);
+  });
+
+  it("counts a prerelease of the floor release as the floor", () => {
+    expect(isCodexCliBelowMinimum("0.101.0-alpha.1")).toBe(false);
+    expect(isCodexCliBelowMinimum("0.100.0-alpha.1")).toBe(true);
+  });
+
+  it("reports a string carrying no three release numbers as not below the floor", () => {
+    // An unreadable version is reported as unread — `codex_setup` says so in its
+    // own branch — never as an old CLI this ranked and refused.
+    expect(isCodexCliBelowMinimum("0.150")).toBe(false);
+    expect(isCodexCliBelowMinimum("nightly")).toBe(false);
   });
 });

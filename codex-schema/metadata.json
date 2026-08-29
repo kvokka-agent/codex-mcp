@@ -1,11 +1,12 @@
 {
-  "generatedAt": "2026-02-27",
+  "generatedAt": "2026-08-29",
   "generator": {
     "name": "codex-cli",
-    "version": "0.106.0"
+    "version": "0.150.1"
   },
   "command": "codex app-server generate-json-schema --experimental --out codex-schema",
   "notes": [
-    "This schema bundle is vendored to make protocol changes reviewable and to keep implementation/tests in sync."
+    "This schema bundle is vendored to make protocol changes reviewable and to keep implementation/tests in sync.",
+    "codex-schema/README.md and codex-schema/metadata.json are hand-written and survive a regeneration; every other file under codex-schema/ is overwritten by the command above."
   ]
 }

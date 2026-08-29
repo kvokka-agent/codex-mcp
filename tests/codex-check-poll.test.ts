@@ -24,7 +24,6 @@ class MockClient extends EventEmitter {
   notificationHandler: ((method: string, params: unknown) => void) | null = null;
   serverRequestHandler: ((id: number, method: string, params: unknown) => void) | null = null;
 
-  supportsTurnOverrides = true;
   childPid: number | undefined = undefined;
 
   start = jest.fn(async () => ({ userAgent: "mock" }));
@@ -133,8 +132,12 @@ describe("executeCodexCheck", () => {
   }
 
   function completeTurn(text = "done"): void {
+    client.emitNotification(Methods.ITEM_COMPLETED, {
+      turnId: "turn_mock",
+      item: { id: "item_answer", type: "agentMessage", text },
+    });
     client.emitNotification(Methods.TURN_COMPLETED, {
-      turn: { id: "turn_mock", output: text, status: "completed" },
+      turn: { id: "turn_mock", status: "completed", items: [] },
     });
   }
 
@@ -298,19 +301,21 @@ describe("executeCodexCheck", () => {
       // `TurnResult.turn` holds the assistant text a second time. Leaving that
       // copy unstripped put a raw marker back into the answer a caller reported.
       const withMarker = "%%%ACTIVITY: считаю файлы%%%\nсемь";
+      client.emitNotification(Methods.ITEM_COMPLETED, {
+        turnId: "turn_mock",
+        item: { id: "item_1", type: "agentMessage", text: withMarker },
+      });
       client.emitNotification(Methods.TURN_COMPLETED, {
         turn: {
           id: "turn_mock",
           status: "completed",
-          output: withMarker,
           items: [{ id: "item_1", type: "agentMessage", text: withMarker }],
         },
       });
 
       const res = expectCheck(executeCodexCheck({ action: "poll", sessionId }, manager));
-      const turn = res.result?.turn as { output: string; items: Array<{ text: string }> };
+      const turn = res.result?.turn as { items: Array<{ text: string }> };
       expect(res.result?.text).toBe("семь");
-      expect(turn.output).toBe("семь");
       expect(turn.items[0].text).toBe("семь");
     });
 

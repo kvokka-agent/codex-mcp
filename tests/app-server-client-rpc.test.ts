@@ -130,7 +130,6 @@ describe("AppServerClient JSON-RPC", () => {
     await expect(started).resolves.toEqual({ userAgent: "mock-app-server" });
     expect(client.childPid).toBe(4242);
     expect(client.destroyed).toBe(false);
-    expect(client.supportsTurnOverrides).toBe(true);
   });
 
   it("opts into the experimental API in the initialize handshake", async () => {

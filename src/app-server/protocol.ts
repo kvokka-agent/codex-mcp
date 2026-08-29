@@ -51,8 +51,20 @@ export type JsonRpcMessage = JsonRpcRequest | JsonRpcResponse | JsonRpcNotificat
 export interface InitializeParams {
   clientInfo: { name: string; version: string; title?: string };
   capabilities?: {
+    /** Opt into the experimental API methods and fields. Default false. */
     experimentalApi?: boolean;
+    /** Exact notification method names the server suppresses for this connection. */
     optOutNotificationMethods?: string[];
+    /** MCP extension settings, keyed by extension name — for example `openai/form`. */
+    extensions?: Record<string, unknown> | null;
+    /** Legacy opt-in for the `openai/form` MCP extension; `extensions` replaces it. */
+    mcpServerOpenaiFormElicitation?: boolean;
+    /**
+     * Opt into `attestation/generate` requests for the upstream
+     * `x-oai-attestation` header. Default false, and left false here: this
+     * server has no attestation signer to answer with.
+     */
+    requestAttestation?: boolean;
   };
 }
 
@@ -62,33 +74,113 @@ export interface InitializeResult {
 
 // ── Shared enums / aliases ─────────────────────────────────────────
 
-export type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
+export type ApprovalPolicy = "untrusted" | "on-request" | "never";
 
 /**
- * Object branch of the schema's `AskForApproval` union: switches individual
- * approval channels off instead of naming a policy preset.
+ * Object branch of the schema's `AskForApproval` union: names each approval
+ * channel instead of naming a policy preset.
  */
-export interface AskForApprovalReject {
-  reject: {
+export interface AskForApprovalGranular {
+  granular: {
     mcp_elicitations: boolean;
     rules: boolean;
     sandbox_approval: boolean;
+    /**
+     * Turns on the `item/permissions/requestApproval` server request.
+     * Default false, and this server leaves it there — it models no answer to
+     * that request.
+     */
+    request_permissions?: boolean;
+    /** Ask before a skill runs. Default false. */
+    skill_approval?: boolean;
   };
 }
 
-/** Schema `AskForApproval`: a policy preset string, or the `reject` object. */
-export type AskForApproval = ApprovalPolicy | AskForApprovalReject;
+/** Schema `AskForApproval`: a policy preset string, or the `granular` object. */
+export type AskForApproval = ApprovalPolicy | AskForApprovalGranular;
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type Personality = "none" | "friendly" | "pragmatic";
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+/**
+ * A non-empty effort value the model advertises. The schema stopped enumerating
+ * these, so a closed union here would refuse an effort a newer model accepts.
+ */
+export type ReasoningEffort = string;
 export type ReasoningSummary = "auto" | "concise" | "detailed" | "none";
 
 // ── Thread Management ──────────────────────────────────────────────
 
-export interface DynamicToolSpec {
+/**
+ * The `function` variant of the schema's `DynamicToolSpec` and of its
+ * `DynamicToolNamespaceTool`, which carry the same shape.
+ */
+export interface FunctionDynamicToolSpec {
+  type: "function";
   name: string;
   description: string;
   inputSchema: unknown;
+  /** Withhold the schema from the model until the tool is first called. Default false. */
+  deferLoading?: boolean;
+}
+
+/** One tool of a `namespace` spec; the schema allows the function variant only. */
+export type DynamicToolNamespaceTool = FunctionDynamicToolSpec;
+
+/**
+ * A tool the client offers the thread. The `type` discriminator is required and
+ * has no default, so a spec without it is refused.
+ */
+export type DynamicToolSpec =
+  | FunctionDynamicToolSpec
+  | {
+      type: "namespace";
+      name: string;
+      description: string;
+      tools: DynamicToolNamespaceTool[];
+    };
+
+/**
+ * Where approval requests are routed for review. Absent means the schema
+ * default `user`. `auto_review` hands the decision to a subagent;
+ * `guardian_subagent` is the legacy spelling of it.
+ */
+export type ApprovalsReviewer = "user" | "auto_review" | "guardian_subagent";
+
+/** Persisted thread history contract. */
+export type ThreadHistoryMode = "legacy" | "paginated";
+
+/**
+ * Multi-agent delegation instructions. The schema marks every use of this
+ * `@deprecated Ignored` — reasoning effort `ultra` drives the behaviour now.
+ */
+export type MultiAgentMode = "explicitRequestOnly" | "proactive" | { custom: string };
+
+/** What made the client start this thread. */
+export type ThreadStartSource = "startup" | "clear";
+
+/** Client-supplied analytics classification of a thread; free-form string. */
+export type ThreadSource = string;
+
+/** Where a selected capability root resolves. The schema gives one variant. */
+export type CapabilityRootLocation = {
+  type: "environment";
+  environmentId: string;
+  /** Absolute path for the root in the selected environment. */
+  path: string;
+};
+
+/** A root the hosting platform selected, exposing one or more capabilities. */
+export interface SelectedCapabilityRoot {
+  /** Stable identifier supplied by the capability selection platform. */
+  id: string;
+  location: CapabilityRootLocation;
+}
+
+/** One execution environment offered to a thread or a turn. */
+export interface TurnEnvironmentParams {
+  environmentId: string;
+  cwd: string;
+  /** Environment-native workspace roots. Omitted defaults to `cwd`. */
+  runtimeWorkspaceRoots?: string[] | null;
 }
 
 /** thread/start — all fields optional */
@@ -112,7 +204,34 @@ export interface ThreadStartParams {
   dynamicTools?: DynamicToolSpec[] | null;
   experimentalRawEvents?: boolean;
   mockExperimentalField?: string | null;
-  persistExtendedHistory?: boolean;
+  /**
+   * Let a provider with an authoritative model catalogue swap an unavailable
+   * requested model for its default. Omitted leaves the unavailable model an error.
+   */
+  allowProviderModelFallback?: boolean;
+  approvalsReviewer?: ApprovalsReviewer | null;
+  /**
+   * Sticky environments for the thread. Omitted selects the default
+   * environment; an empty array disables environment access for every turn that
+   * names none; a non-empty array makes its first entry the current environment.
+   */
+  environments?: TurnEnvironmentParams[] | null;
+  historyMode?: ThreadHistoryMode | null;
+  /** @deprecated The schema marks this ignored; set `effort: "ultra"` instead. */
+  multiAgentMode?: MultiAgentMode | null;
+  /** Named permissions profile id. Cannot be combined with `sandbox`. */
+  permissions?: string | null;
+  /**
+   * Project the thread belongs to. A durable thread persists the assignment;
+   * an ephemeral one exposes it only in live responses.
+   */
+  projectId?: string | null;
+  /** Replaces the thread's runtime workspace roots. Every path must be absolute. */
+  runtimeWorkspaceRoots?: string[] | null;
+  selectedCapabilityRoots?: SelectedCapabilityRoot[] | null;
+  serviceTier?: string | null;
+  sessionStartSource?: ThreadStartSource | null;
+  threadSource?: ThreadSource | null;
 }
 
 /**
@@ -133,13 +252,51 @@ export interface ThreadForkParams {
   sandbox?: SandboxMode | null;
   cwd?: string | null;
   config?: Record<string, unknown> | null;
+  /** [UNSTABLE] Rollout path to fork from; when set it replaces `threadId`. */
   path?: string | null;
-  persistExtendedHistory?: boolean;
+  approvalsReviewer?: ApprovalsReviewer | null;
+  /**
+   * Fork before this turn, dropping it and every later one. Cannot be combined
+   * with `lastTurnId`.
+   */
+  beforeTurnId?: string | null;
+  /** Fork through this turn, inclusive. The turn named must not be in progress. */
+  lastTurnId?: string | null;
+  /**
+   * Carry the source thread's goal into the fork without starting its automatic
+   * continuation; the next explicit turn owns the goal. Default false.
+   */
+  deferGoalContinuation?: boolean;
+  ephemeral?: boolean;
+  /**
+   * Answer with thread metadata and fork state only, leaving `thread.turns`
+   * unpopulated. Default false.
+   */
+  excludeTurns?: boolean;
+  /** Named permissions profile id. Cannot be combined with `sandbox`. */
+  permissions?: string | null;
+  /** Replaces the thread's runtime workspace roots. Every path must be absolute. */
+  runtimeWorkspaceRoots?: string[] | null;
+  serviceTier?: string | null;
+  threadSource?: ThreadSource | null;
 }
 
 /** thread/fork response — schema v2/ThreadForkResponse.json. */
 export interface ThreadForkResult {
   thread: { id: string };
+}
+
+/** How much of each turn a `thread/resume` answer carries back. */
+export type TurnItemsView = "notLoaded" | "summary" | "full";
+
+/** The `thread/turns/list` page a resume can bootstrap the client with. */
+export interface ThreadResumeInitialTurnsPageParams {
+  /** Page size. Omitted leaves the server's default. */
+  limit?: number | null;
+  /** Omitted defaults to `desc` — newest turn first. */
+  sortDirection?: "asc" | "desc" | null;
+  /** Omitted defaults to `summary`. */
+  itemsView?: TurnItemsView | null;
 }
 
 export interface ThreadResumeParams {
@@ -153,9 +310,25 @@ export interface ThreadResumeParams {
   personality?: Personality | null;
   cwd?: string | null;
   config?: Record<string, unknown> | null;
+  /** [UNSTABLE] Rollout path to resume from; it must match a running thread's. */
   path?: string | null;
   history?: unknown[] | null;
-  persistExtendedHistory?: boolean;
+  approvalsReviewer?: ApprovalsReviewer | null;
+  /**
+   * Answer with thread metadata and resume state only, leaving `thread.turns`
+   * unpopulated. Default false.
+   */
+  excludeTurns?: boolean;
+  /**
+   * Include a first page of turns in the resume answer, sparing the client a
+   * `thread/turns/list` round trip.
+   */
+  initialTurnsPage?: ThreadResumeInitialTurnsPageParams | null;
+  /** Named permissions profile id. Cannot be combined with `sandbox`. */
+  permissions?: string | null;
+  /** Replaces the thread's runtime workspace roots. Every path must be absolute. */
+  runtimeWorkspaceRoots?: string[] | null;
+  serviceTier?: string | null;
 }
 
 /** thread/resume response — schema v2/ThreadResumeResponse.json. */
@@ -167,24 +340,22 @@ export interface ThreadBackgroundTerminalsCleanParams {
   threadId: string;
 }
 
-// ── SandboxPolicy ──────────────────────────────────────────────────
+/** thread/delete — schema v2/ThreadDeleteParams.json. The response is empty. */
+export interface ThreadDeleteParams {
+  threadId: string;
+}
 
-export type ReadOnlyAccess =
-  | {
-      type: "restricted";
-      includePlatformDefaults?: boolean;
-      readableRoots?: string[];
-    }
-  | { type: "fullAccess" };
+// ── SandboxPolicy ──────────────────────────────────────────────────
 
 export type SandboxPolicy =
   | { type: "dangerFullAccess" }
-  | { type: "readOnly"; access?: ReadOnlyAccess }
+  | { type: "readOnly"; networkAccess?: boolean }
   | { type: "externalSandbox"; networkAccess?: "restricted" | "enabled" }
   | {
       type: "workspaceWrite";
+      /** Absolute paths. Default `[]`, which leaves only the thread cwd writable. */
       writableRoots?: string[];
-      readOnlyAccess?: ReadOnlyAccess;
+      /** Default false. */
       networkAccess?: boolean;
       excludeSlashTmp?: boolean;
       excludeTmpdirEnvVar?: boolean;
@@ -211,10 +382,15 @@ export interface TextElement {
   placeholder?: string | null;
 }
 
+/** How much of an image the model is given. Absent leaves the server's choice. */
+export type ImageDetail = "auto" | "low" | "high" | "original";
+
 export type UserInput =
   | { type: "text"; text: string; text_elements?: TextElement[] }
-  | { type: "image"; url: string }
-  | { type: "localImage"; path: string }
+  | { type: "image"; url: string; detail?: ImageDetail | null }
+  | { type: "localImage"; path: string; detail?: ImageDetail | null }
+  | { type: "audio"; url: string }
+  | { type: "localAudio"; path: string }
   | { type: "skill"; name: string; path: string }
   | { type: "mention"; name: string; path: string };
 
@@ -225,6 +401,13 @@ export interface CollaborationMode {
     developer_instructions?: string | null;
     reasoning_effort?: ReasoningEffort | null;
   };
+}
+
+/** One context fragment a client hands the turn, keyed by an opaque source id. */
+export interface AdditionalContextEntry {
+  /** `untrusted` marks content the model must not treat as instructions. */
+  kind: "untrusted" | "application";
+  value: string;
 }
 
 export interface TurnStartParams {
@@ -239,6 +422,28 @@ export interface TurnStartParams {
   cwd?: string | null;
   outputSchema?: Record<string, unknown>;
   collaborationMode?: CollaborationMode | null;
+  additionalContext?: Record<string, AdditionalContextEntry> | null;
+  approvalsReviewer?: ApprovalsReviewer | null;
+  /** Client-chosen id for the user message this turn starts from. */
+  clientUserMessageId?: string | null;
+  /**
+   * Environments for this turn onward. Omitted keeps the thread's sticky
+   * environments; empty disables environment access for the turn.
+   */
+  environments?: TurnEnvironmentParams[] | null;
+  /** @deprecated The schema marks this ignored; set `effort: "ultra"` instead. */
+  multiAgentMode?: MultiAgentMode | null;
+  /** Named permissions profile id. Cannot be combined with `sandboxPolicy`. */
+  permissions?: string | null;
+  /**
+   * Flattened into the `x-codex-turn-metadata` client metadata of the upstream
+   * ResponsesAPI request. `session_id`, `thread_id`, `turn_id` and `window_id`
+   * are reserved and cannot be overridden here.
+   */
+  responsesapiClientMetadata?: Record<string, string> | null;
+  /** Replaces the thread's runtime workspace roots. Every path must be absolute. */
+  runtimeWorkspaceRoots?: string[] | null;
+  serviceTier?: string | null;
 }
 
 /** turn/start response — schema v2/TurnStartResponse.json. */
@@ -253,8 +458,14 @@ export interface TurnInterruptParams {
 
 export interface TurnSteerParams {
   threadId: string;
+  /** The request fails unless this names the turn currently running. */
   expectedTurnId: string;
   input: UserInput[];
+  additionalContext?: Record<string, AdditionalContextEntry> | null;
+  /** Client-chosen id for the user message this steer carries. */
+  clientUserMessageId?: string | null;
+  /** Flattened into the upstream `x-codex-turn-metadata` client metadata. */
+  responsesapiClientMetadata?: Record<string, string> | null;
 }
 
 // ── Approval Requests (server → client) ────────────────────────────
@@ -273,12 +484,19 @@ export interface CommandApprovalParams {
   reason?: string | null;
   commandActions?: unknown[] | null;
   proposedExecpolicyAmendment?: string[] | null;
-
-  // Added in codex-cli 0.106.x: richer approval contexts.
   additionalPermissions?: unknown;
   availableDecisions?: unknown;
   networkApprovalContext?: unknown;
   proposedNetworkPolicyAmendments?: unknown;
+  /** Unix milliseconds when the approval request started. */
+  startedAtMs: number;
+  /** Environment the command runs in. Absent means the thread's own. */
+  environmentId?: string | null;
+  /**
+   * `writeStdin` is input for a terminal already running, not a new command.
+   * Absent means `command` — an older server sends no kind at all.
+   */
+  kind?: "command" | "writeStdin";
 }
 
 export type CommandApprovalDecision =
@@ -303,6 +521,8 @@ export interface FileChangeApprovalParams {
   turnId: string;
   grantRoot?: string | null;
   reason?: string | null;
+  /** Unix milliseconds when the approval request started. */
+  startedAtMs: number;
 }
 
 export type FileChangeApprovalDecision = "accept" | "acceptForSession" | "decline" | "cancel";
@@ -317,6 +537,10 @@ export interface UserInputRequestParams {
   itemId: string;
   threadId: string;
   turnId: string;
+  /** False means the turn goes on without an answer; true means it waits. */
+  isBlocking: boolean;
+  /** @deprecated The schema points at `isBlocking` to decide whether to block. */
+  autoResolutionMs?: number | null;
   questions: Array<{
     id: string;
     header: string;
@@ -339,12 +563,16 @@ export interface DynamicToolCallParams {
   callId: string;
   tool: string;
   arguments: unknown;
+  /** Namespace the tool was declared under; absent for a top-level tool. */
+  namespace?: string | null;
 }
 
 export interface DynamicToolCallResponse {
   success: boolean;
   contentItems: Array<
-    { type: "inputText"; text: string } | { type: "inputImage"; imageUrl: string }
+    | { type: "inputText"; text: string }
+    | { type: "inputImage"; imageUrl: string }
+    | { type: "inputAudio"; audioUrl: string }
   >;
 }
 
@@ -378,10 +606,26 @@ export interface ReasoningDeltaParams {
   delta: string;
 }
 
-export interface ItemNotificationParams {
+/**
+ * item/started. Split from `item/completed` because the schema requires a
+ * different timestamp on each, so one interface would have to claim a field
+ * that notification never carries.
+ */
+export interface ItemStartedNotificationParams {
   threadId: string;
   turnId: string;
   item: unknown;
+  /** Unix milliseconds when the item's lifecycle started. */
+  startedAtMs: number;
+}
+
+/** item/completed. */
+export interface ItemCompletedNotificationParams {
+  threadId: string;
+  turnId: string;
+  item: unknown;
+  /** Unix milliseconds when the item's lifecycle completed. */
+  completedAtMs: number;
 }
 
 export interface ThreadStateNotificationParams {
@@ -468,6 +712,7 @@ export const Methods = {
   THREAD_RESUME: "thread/resume",
   THREAD_FORK: "thread/fork",
   THREAD_BACKGROUND_TERMINALS_CLEAN: "thread/backgroundTerminals/clean",
+  THREAD_DELETE: "thread/delete",
   TURN_START: "turn/start",
   TURN_INTERRUPT: "turn/interrupt",
   TURN_STEER: "turn/steer",
@@ -513,11 +758,4 @@ export const Methods = {
   ACCOUNT_LOGIN_COMPLETED: "account/login/completed",
   DEPRECATION_NOTICE: "deprecationNotice",
   CONFIG_WARNING: "configWarning",
-
-  // Synthetic methods — not app-server protocol methods.
-  // ExecClient translates `codex exec --json` event types into notifications so
-  // both clients feed one handler; these two have no app-server counterpart.
-  // tests/protocol-schema.test.ts lists them as the only allowed non-schema values.
-  RAW_RESPONSE_ITEM_COMPLETED: "rawResponseItem/completed",
-  SESSION_CONFIGURED: "sessionConfigured",
 } as const;

@@ -20,8 +20,8 @@ single file `dist/index.js`, and that file is what every step below launches.
 `bun` builds it, runs it and runs the tests; nothing in the repository calls
 node.
 
-The server drives the Codex CLI, so `codex --version` must answer and
-`codex login` must have run. Without a login the server still starts and
+The server drives the Codex CLI, so `codex --version` must answer at or above
+the minimum [INSTALL.md](INSTALL.md) states, and `codex login` must have run. Without a login the server still starts and
 `codex_setup` reports `auth.state: unauthenticated` — enough to check the
 protocol, not enough to run a turn.
 
@@ -194,9 +194,8 @@ Claude Code files every line under the project it was launched from:
 
 Each line is JSON; the server's output arrives as `{"error": "Server stderr: …"}`
 and the client's own connection trace as `{"debug": …}`. Startup answers the
-first questions there — which codex binary was resolved, whether the app-server
-probe passed or the run fell back to `exec`, how many sessions the state
-directory held, and how many of them another running server owns.
+first questions there — which codex binary was resolved, how many sessions the
+state directory held, and how many of them another running server owns.
 
 Outside a client, `bun dist/index.js` writes the same lines to the terminal.
 

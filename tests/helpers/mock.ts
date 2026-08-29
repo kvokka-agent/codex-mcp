@@ -29,14 +29,3 @@ export function mockModule(specifier: string, real: object, factory: () => unkno
     for (const spelling of spellings) mock.module(spelling, () => real);
   });
 }
-
-/**
- * The spy already standing in for `fn`, typed as one.
- *
- * `jest.spyOn` hands the spy back, and a test that reads it off the object
- * afterwards — `console.error`, once the spy is on `console` — holds the same
- * function under its original type.
- */
-export function mocked<T extends (...args: never[]) => unknown>(fn: T): ReturnType<typeof mock<T>> {
-  return fn as unknown as ReturnType<typeof mock<T>>;
-}

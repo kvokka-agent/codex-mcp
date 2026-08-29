@@ -1,21 +1,5 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "JSONRPCRequest",
-  "description": "A request that expects a response.",
-  "type": "object",
-  "required": [
-    "id",
-    "method"
-  ],
-  "properties": {
-    "id": {
-      "$ref": "#/definitions/RequestId"
-    },
-    "method": {
-      "type": "string"
-    },
-    "params": true
-  },
   "definitions": {
     "RequestId": {
       "anyOf": [
@@ -23,10 +7,54 @@
           "type": "string"
         },
         {
-          "type": "integer",
-          "format": "int64"
+          "format": "int64",
+          "type": "integer"
         }
       ]
+    },
+    "W3cTraceContext": {
+      "properties": {
+        "traceparent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tracestate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     }
-  }
+  },
+  "description": "A request that expects a response.",
+  "properties": {
+    "id": {
+      "$ref": "#/definitions/RequestId"
+    },
+    "method": {
+      "type": "string"
+    },
+    "params": true,
+    "trace": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/W3cTraceContext"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional W3C Trace Context for distributed tracing."
+    }
+  },
+  "required": [
+    "id",
+    "method"
+  ],
+  "title": "JSONRPCRequest",
+  "type": "object"
 }

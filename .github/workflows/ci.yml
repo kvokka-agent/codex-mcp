@@ -44,8 +44,7 @@ jobs:
   # claims. Launching the built bundle is the only thing that exercises the
   # startup path: STATE_DIR lock, session recovery, orphan reaping, and a stdout
   # kept clean until the MCP handshake. Neither script needs the codex binary —
-  # the server resolves it lazily and falls back to exec mode when PATH carries
-  # none.
+  # the server resolves it lazily and neither script starts a session.
   runtime:
     strategy:
       fail-fast: false

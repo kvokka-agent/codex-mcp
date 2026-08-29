@@ -454,7 +454,7 @@ describe("codexMcpEnv", () => {
   });
 
   it("drops a CODEX_MCP_ name that carries no value", () => {
-    expect(codexMcpEnv({ CODEX_MCP_MODE: undefined, CODEX_MCP_STATE_DIR: "/var/state" })).toEqual({
+    expect(codexMcpEnv({ CODEX_MCP_PATH: undefined, CODEX_MCP_STATE_DIR: "/var/state" })).toEqual({
       CODEX_MCP_STATE_DIR: "/var/state",
     });
   });

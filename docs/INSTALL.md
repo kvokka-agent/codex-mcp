@@ -4,8 +4,9 @@ The server runs on the same machine as the MCP client and talks to it over
 stdio. Terms are defined in [GLOSSARY.md](GLOSSARY.md).
 
 Before anything else: `bun` >= 1.4, which starts and runs the server, and a
-Codex CLI that answers `codex --version` and has had `codex login` run. The
-package ships behind a `#!/usr/bin/env bun` line and asks for no Node.js.
+Codex CLI 0.101.0 or newer that has had `codex login` run — every session runs
+on `codex app-server`, which older builds do not carry. The package ships behind
+a `#!/usr/bin/env bun` line and asks for no Node.js.
 Without a login the server
 still starts and `codex_setup` reports `auth.state: unauthenticated` — enough to
 check the protocol, not enough to run a turn.
@@ -98,19 +99,6 @@ client's own configuration when the default is not the one you want:
 }
 ```
 
-## Picking the backend
-
-At startup the server runs `codex app-server --help` with a five-second budget —
-retried once at ten seconds if it times out — and takes `app-server` mode when
-that answers. Anything else falls back to `exec` mode, and the server says so on
-stderr. `CODEX_MCP_MODE` set to `app-server` or `exec` skips the probe.
-
-`exec` mode drives `codex exec --json`, continues a thread with
-`codex exec resume`, and reaches less than app-server mode does:
-[COMPARISON.md](COMPARISON.md#what-codex-mcp-does-not-do) lists what it gives
-up. `codex_setup` and the `codex-mcp:///server-info` resource both report which
-mode is live.
-
 ## Environment variables
 
 A value the server cannot read for one of the five `CODEX_MCP_DEFAULT_*` variables
@@ -122,20 +110,20 @@ default instead of the configured one is shaped exactly like the configured one.
 | `CODEX_MCP_STATE_DIR` | `~/.codex-mcp/state` | Where the state directory lives. A directory the server cannot open drops disk persistence and the server runs from memory. |
 | `CODEX_MCP_PATH` | unset | Filesystem path to the codex executable. |
 | `CODEX_MCP_COMMAND` | unset | Command name resolved on `PATH`. Mutually exclusive with `CODEX_MCP_PATH`. |
-| `CODEX_MCP_MODE` | probe | `app-server` or `exec`, forcing the backend. Any other value is ignored. |
 | `CODEX_MCP_STDIO_MODE` | `auto` | `auto` reports stdout-contamination risk on stderr, `strict` refuses to start when stdin or stdout is a TTY, `off` skips the check. |
 | `CODEX_MCP_DISABLE_NOISE_FILTER` | unset | `1` keeps shell-profile noise — oh-my-posh, PSReadLine, `WARNING:` lines, conda prefixes — in command output instead of stripping it. |
 | `CODEX_MCP_DISABLE_ACTIVITY_MARKER` | unset | `1` stops the server putting the activity-marker instruction on new threads, so `progress.activity` stays empty. |
 | `CODEX_MCP_DEFAULT_MODEL` | unset | Model a `codex` call that names none starts on. Unset leaves the model to the Codex CLI's own config.toml. |
-| `CODEX_MCP_DEFAULT_EFFORT` | `low` | Reasoning effort a `codex` call that names none starts on: `none`, `minimal`, `low`, `medium`, `high` or `xhigh`. |
+| `CODEX_MCP_DEFAULT_EFFORT` | `low` | Reasoning effort a `codex` call that names none starts on. Any non-empty string; Codex 0.150.1 advertises `low`, `medium`, `high`, `xhigh`, `max` and `ultra`, and each model advertises its own set. |
 | `CODEX_MCP_DEFAULT_APPROVAL_TIMEOUT_MS` | `60000` | Milliseconds a pending approval waits before it auto-declines, where the call names no `advanced.approvalTimeoutMs`. |
-| `CODEX_MCP_DEFAULT_APPROVAL_POLICY` | unset | Approval policy a `codex` call that names none starts on: `untrusted`, `on-failure`, `on-request` or `never`. Unset keeps `approvalPolicy` a required parameter. |
+| `CODEX_MCP_DEFAULT_APPROVAL_POLICY` | unset | Approval policy a `codex` call that names none starts on: `untrusted`, `on-request` or `never`. Unset keeps `approvalPolicy` a required parameter. |
 | `CODEX_MCP_DEFAULT_SANDBOX` | unset | Sandbox a `codex` call that names none starts on: `read-only`, `workspace-write` or `danger-full-access`. Unset keeps `sandbox` a required parameter. |
 | `MCP_TOOL_TIMEOUT` | unset | The MCP client's own ceiling on one tool call, in ms. Set it for the client; a client hands its environment to the servers it spawns, so the server reads it and returns a `codex_check` long poll just inside it. |
 
 ## Checking the install
 
 Call `codex_setup` from the client. It reports the resolved executable, whether
-`codex login status` answered, the backend mode, the state directory, and
-whether a user or project `config.toml` is visible from the target directory —
-with a `nextSteps` line for anything that is not ready.
+`codex login status` answered, the Codex CLI version against the minimum above,
+the state directory, and whether a user or project `config.toml` is
+visible from the target directory — with a `nextSteps` line for anything that is
+not ready.

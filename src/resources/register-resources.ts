@@ -1,20 +1,24 @@
-import { spawnSync } from "node:child_process";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
 import type { SessionManager } from "../session/manager.js";
 import {
+  ADVERTISED_EFFORT_LEVELS,
   APPROVAL_POLICIES,
   DEFAULT_APPROVAL_TIMEOUT_MS,
   DEFAULT_EFFORT_LEVEL,
   DEFAULT_IDLE_CLEANUP_MS,
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
-  EFFORT_LEVELS,
   ErrorCode,
   MAX_LONG_POLL_WAIT_MS,
   SANDBOX_MODES,
 } from "../types.js";
-import { getDefaultCodexExecutable } from "../utils/codex-executable.js";
+import {
+  belowMinimumCodexCliMessage,
+  detectCodexCliVersion,
+  isCodexCliBelowMinimum,
+  MIN_CODEX_CLI_VERSION,
+} from "../utils/codex-version.js";
 import type { SessionDefaults } from "../utils/session-defaults.js";
 import { SESSION_DEFAULT_ENV } from "../utils/session-defaults.js";
 import { resolveStdioMode } from "../utils/stdio-guard.js";
@@ -51,8 +55,6 @@ type RuntimeMetadataProvider = Pick<
 export interface ResourceDeps {
   version: string;
   sessionManager: RuntimeMetadataProvider;
-  /** Backend the server drives, as the caller resolved it; `unknown` when it could not. */
-  clientMode: string;
   /** Whether the state directory was claimed at startup, so session history outlives a restart. */
   diskPersistence: boolean;
   /** How a session starts when the caller names nothing, as the environment set it. */
@@ -79,7 +81,7 @@ const RESOURCE_CATALOG: ResourceCatalogEntry[] = [
     key: "compatReport",
     name: "compat_report",
     title: "Compat Report",
-    description: "Cross-backend compatibility capability report",
+    description: "Capability and runtime compatibility report",
     mimeType: "application/json",
   },
   {
@@ -136,8 +138,6 @@ const ERROR_CODE_HINTS: Record<ErrorCode, string> = {
     "Non-JSON or malformed app-server line. Check shell/profile noise and transport health.",
   [ErrorCode.WRITE_QUEUE_DROPPED]:
     "stdin backpressure overflow. Reduce burst size and re-run in smaller turns.",
-  [ErrorCode.EXEC_NOT_SUPPORTED]:
-    "Operation not supported in exec mode. Features like threadFork and threadResume require app-server mode.",
   [ErrorCode.INTERNAL]: "Unexpected server-side failure. Inspect logs and retry safely.",
 };
 
@@ -151,32 +151,6 @@ function asTextResource(uri: URL, text: string, mimeType: string): ReadResourceR
       },
     ],
   };
-}
-
-/**
- * The version the local codex CLI printed, or null when it printed no version.
- *
- * `spawnSync` reports a failed launch in `run.error` and a non-zero exit in `run.status`, and a
- * codex build that does not know `--version` writes its usage error to stderr with exit 1. Only a
- * successful run whose output carries a version number answers this question; anything else is
- * "not detected", never the first word of an error message.
- */
-function detectCodexCliVersion(timeoutMs = 1500): string | null {
-  try {
-    const executable = getDefaultCodexExecutable();
-    const run = spawnSync(executable.command, ["--version"], {
-      encoding: "utf8",
-      timeout: timeoutMs,
-      windowsHide: true,
-    });
-    if (run.error || run.status !== 0) return null;
-    const combined = `${run.stdout ?? ""}\n${run.stderr ?? ""}`.trim();
-    const versionToken = combined.match(/v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/);
-    if (!versionToken) return null;
-    return versionToken[0].replace(/^v/, "");
-  } catch {
-    return null;
-  }
 }
 
 function msToMinutes(ms: number): number {
@@ -243,14 +217,13 @@ function configEnvironmentLines(defaults: SessionDefaults): string[] {
     "",
     "- `CODEX_MCP_PATH`: filesystem path to the codex executable. Default: none — codex-mcp looks for `codex`, then `codex-internal`, in `PATH`.",
     "- `CODEX_MCP_COMMAND`: bare command name resolved from `PATH`. Default: none. Mutually exclusive with `CODEX_MCP_PATH`; setting both, or pointing either at something that does not resolve, stops the server at startup.",
-    "- `CODEX_MCP_MODE`: forces the backend to `app-server` or `exec`. Default: probe `<codex> app-server --help` and fall back to `exec`.",
     "- `CODEX_MCP_STDIO_MODE`: `auto` (default) reports stdout contamination risk on stderr, `strict` refuses to start when stdio is attached to a terminal, `off` skips the check. An unknown value is treated as `auto`.",
     "- `CODEX_MCP_STATE_DIR`: directory holding session metadata, events and results. Default: `~/.codex-mcp/state`.",
     "- `CODEX_MCP_DISABLE_NOISE_FILTER`: set to `1` to keep shell-profile noise (oh-my-posh, PSReadLine banners) in command output events. Default: those lines are stripped.",
     "- `CODEX_MCP_DISABLE_ACTIVITY_MARKER`: set to `1` to start threads without the activity-marker instruction, which leaves `progress.activity` empty. Default: the instruction is sent, and markers are extracted and cut from the result either way.",
     '- `CODEX_MCP_PROGRESS_HEARTBEAT_MS`: how often a held `codex_check(action="poll")` repeats the standing activity line as `notifications/progress`. Default: 30000. Set 0 to send heartbeats no more, which also lets a client watchdog end a call that has been silent.',
     `- \`${SESSION_DEFAULT_ENV.model}\`: model a \`codex\` call that names none starts on. Default: none — the Codex CLI reads its own config.toml. Now: ${defaults.model ?? "unset"}.`,
-    `- \`${SESSION_DEFAULT_ENV.effort}\`: reasoning effort a \`codex\` call that names none starts on, one of ${EFFORT_LEVELS.join(", ")}. Default: ${DEFAULT_EFFORT_LEVEL}. Now: ${defaults.effort}.`,
+    `- \`${SESSION_DEFAULT_ENV.effort}\`: reasoning effort a \`codex\` call that names none starts on. Any non-empty value; Codex 0.150.1 advertises ${ADVERTISED_EFFORT_LEVELS.join(", ")}, and Codex refuses one the chosen model does not advertise. Default: ${DEFAULT_EFFORT_LEVEL}. Now: ${defaults.effort}.`,
     `- \`${SESSION_DEFAULT_ENV.approvalTimeoutMs}\`: milliseconds a pending approval waits before it auto-declines, where the call names no \`advanced.approvalTimeoutMs\`. Default: ${DEFAULT_APPROVAL_TIMEOUT_MS}. Now: ${defaults.approvalTimeoutMs}.`,
     `- \`${SESSION_DEFAULT_ENV.approvalPolicy}\`: approval policy a \`codex\` call that names none starts on, one of ${APPROVAL_POLICIES.join(", ")}. Default: none, which keeps \`approvalPolicy\` a required parameter. Now: ${defaults.approvalPolicy ?? "unset"}.`,
     `- \`${SESSION_DEFAULT_ENV.sandbox}\`: sandbox a \`codex\` call that names none starts on, one of ${SANDBOX_MODES.join(", ")}. Default: none, which keeps \`sandbox\` a required parameter. Now: ${defaults.sandbox ?? "unset"}.`,
@@ -310,7 +283,7 @@ function buildGotchasText(defaults: SessionDefaults): string {
     "- `actions[]` holds what the caller must answer: approval requests and questions. Answer each by its `requestId`.",
     "- `result` arrives with the first check that sees a terminal status and carries the turn's final answer; every later check of that terminal session carries it again, so a lost answer is read back rather than written from memory.",
     "- Terminal `result.text` is the turn's final assistant message.",
-    "- `result.output` is exec-mode only, where the exec client fills it with that same message. The app-server `Turn` has no text field: `result.turn` carries `turn.status` and `turn.error`, and the answer stays in `result.text`.",
+    "- The app-server `Turn` carries no text field: `result.turn` holds `turn.status` and `turn.error`, and the answer stays in `result.text`.",
     "- `progress` normalizes the current phase, the pending action count, the time of the last event, the active turn id and the token totals the backend has reported.",
     "- `progress.activity` is one line in Codex's own words saying what it is doing right now — `\"Разбираю падение теста в session-manager\"`. The server tells every thread it starts to mark such a line as `%%%ACTIVITY: ...%%%`, lifts it out of the agent-message stream and overwrites the previous one. It is a heading, not a percentage: it says nothing about how much is done, it is absent until the turn's first marker, and it is cut out of `result.text`.",
     "- A retryable interruption keeps the session `running` and shows up as a phase that does not advance; a failure the backend will not retry moves the session to `error`, where `result.error` says what happened.",
@@ -335,12 +308,9 @@ function buildGotchasText(defaults: SessionDefaults): string {
     "- codex-mcp does not hard-code a strict concurrent-session cap.",
     "- Practical limit depends on machine resources and child-process load.",
     "",
-    "## Exec fallback mode",
+    "## The Codex CLI",
     "",
-    "- When the codex binary does not support `app-server`, codex-mcp falls back to `exec` mode (`codex exec --json`).",
-    "- Check `codex-mcp:///server-info` `clientMode` field to detect which mode is active.",
-    "- **Exec mode supports multi-turn**: first turn uses `codex exec`, subsequent turns use `codex exec resume <threadId>` for context continuity.",
-    "- **Exec mode limitations**: no approval/user-input interactions, `threadFork`/`threadResume` throw `EXEC_NOT_SUPPORTED`. `sandbox`/`profile`/`cwd`/`outputSchema` overrides only apply on the first turn (exec resume does not support `-s`/`-p`/`-C`/`--output-schema`).",
+    `- codex-mcp drives \`codex app-server\`, which the Codex CLI carries from ${MIN_CODEX_CLI_VERSION}. An older binary starts no session; \`codex_setup\` reports the version it found.`,
     "",
   ].join("\n");
 }
@@ -349,7 +319,7 @@ function quickstartStartLines(): string[] {
   return [
     "## Minimal flow",
     "",
-    "0. Optional but recommended: run `codex_setup` first to verify the local Codex CLI, login state, and backend mode.",
+    "0. Optional but recommended: run `codex_setup` first to verify the local Codex CLI, its version, and login state.",
     "",
     "1. Start session (`codex`)",
     "",
@@ -449,7 +419,7 @@ function quickstartClosingLines(): string[] {
     "",
     "- `codex-mcp:///config`: parameter-by-parameter guide, including `advanced.*` mapping and reply overrides.",
     "- `codex-mcp:///delegation-guide`: task presets for approvalPolicy/sandbox selection.",
-    "- `codex-mcp:///gotchas`: checking, approval timeout, and exec-mode failure modes.",
+    "- `codex-mcp:///gotchas`: checking, approval timeout, and the Codex CLI floor.",
     "",
   ];
 }
@@ -504,11 +474,11 @@ function delegationTaskLines(): string[] {
     "| Task | approvalPolicy | sandbox | Notes |",
     "|------|---------------|---------|-------|",
     "| Code review / analysis | `never` | `read-only` | Safe: sandbox blocks writes, no approval needed |",
-    "| Quick bug fix | `on-failure` | `workspace-write` | Auto-approves unless error |",
-    "| Feature implementation | `on-failure` | `workspace-write` | Async mode recommended for longer tasks |",
-    "| Sensitive refactor | `on-request` | `workspace-write` | Codex asks before each action; requires active polling |",
-    "| Full autonomy | `never` | `workspace-write` | No guardrails — only for well-scoped, trusted tasks |",
-    "| Network access needed | `on-failure` | `danger-full-access` | Rare; avoid unless genuinely required |",
+    "| Quick bug fix | `on-request` | `workspace-write` | Codex edits inside the sandbox and asks only to step outside it |",
+    "| Feature implementation | `on-request` | `workspace-write` | Same, and the poll loop answers what a longer task raises |",
+    "| Sensitive refactor | `untrusted` | `workspace-write` | Codex asks before each command; requires active polling |",
+    "| Unattended run | `never` | `danger-full-access` | No prompts, and nothing to step outside of. `never` refuses a command that needs approval rather than granting it, so pair it with a sandbox wide enough for the work |",
+    "| Network access needed | `on-request` | `danger-full-access` | Rare; avoid unless genuinely required |",
     "",
     "**Key rule:** `read-only` sandbox already prevents writes, so `approvalPolicy: 'never'` is safe with it. Avoid `untrusted` + `read-only` — every read command triggers approval for no safety gain.",
     "",
@@ -529,9 +499,8 @@ function delegationPolicyLines(defaults: SessionDefaults): string[] {
           )}, which ${SESSION_DEFAULT_ENV.approvalPolicy} and ${SESSION_DEFAULT_ENV.sandbox} set.`
       : "A call states its own approval policy and sandbox; the server carries no default for either.",
     "",
-    "- `never`: no interactive prompts. Best for read-only review or tightly scoped trusted tasks.",
-    "- `on-failure`: pragmatic default for implementation work when you still want some safety rails.",
-    "- `on-request`: use when a human or outer agent will actively poll and answer approvals.",
+    "- `never`: no interactive prompts, and no escalation either — a command that needs approval is refused with `approval required by policy, but AskForApproval is set to Never`. Pair it with a sandbox that already permits the work: `read-only` for review, `danger-full-access` for an unattended run.",
+    "- `on-request`: Codex works inside the sandbox and asks when it wants to step outside it. The pragmatic choice for implementation work, and it needs a human or outer agent polling to answer.",
     "- `untrusted`: strictest interactive mode; expect frequent prompts and higher timeout sensitivity.",
     `- Default approval timeout is ${defaults.approvalTimeoutMs}ms. If interactive approvals are possible, raise \`advanced.approvalTimeoutMs\` to at least 300000 so requests do not expire between normal running-session polls.`,
     "",
@@ -539,12 +508,11 @@ function delegationPolicyLines(defaults: SessionDefaults): string[] {
     `Every start returns at once. Follow the turn with \`codex_check(action="poll", waitMs=300000)\` until the status is terminal, and write \`progress.activity\` out after each round that came back still running — that line is what the person waiting reads. \`waitMs\` accepts up to ${MAX_LONG_POLL_WAIT_MS}, and the server holds the call for as long as the MCP client tolerates one.`,
     "",
     "## Effort selection",
-    "Levels, least to most reasoning: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. The value is passed to the Codex CLI as the turn reasoning effort.",
-    "- `none`: least reasoning; fully specified, mechanical steps",
-    "- `minimal`: small lookups and single-file edits",
+    `The effort is any non-empty string, and each model advertises the set it takes. Codex 0.150.1 advertises ${ADVERTISED_EFFORT_LEVELS.map((level) => `\`${level}\``).join(", ")}, least to most reasoning; Codex refuses an effort the chosen model does not advertise and that refusal comes back on the turn.`,
     "- `low`: quick questions, lookups, simple edits",
     "- `medium`: multi-file changes, moderate reasoning",
     "- `high`/`xhigh`: complex architecture decisions, large refactors",
+    "- `max`/`ultra`: the deepest reasoning a model that advertises them offers",
     `A codex call that names no effort runs at ${defaults.effort}, and \`${SESSION_DEFAULT_ENV.effort}\` sets which level that is.`,
     "",
     "**`minimal` and web search:** some Codex CLI builds reject `effort: 'minimal'` when the `web_search` tool is enabled. codex-mcp retries that turn at `low` and reports the switch in `compatWarnings` on the response.",
@@ -558,14 +526,14 @@ function delegationTroubleshootingLines(): string[] {
     "",
     "**Empty polls:** Pass `waitMs`; stop when status is terminal. See `codex-mcp:///gotchas`.",
     "",
-    "**Session not found after restart:** Sessions survive a restart as readable history, not as live sessions. Previously-running ones surface as `status: 'error'` with a restart reason, and `codex_reply` on any recovered session fails with `SESSION_NOT_FOUND`. Start a new session instead.",
+    "**A session the server left behind:** a session whose server went away mid-turn comes back as `status: 'abandoned'`, and `codex_reply` on it answers `SESSION_NOT_RUNNING`. Call `codex_session(action=\"resume\")` to pick its thread back up — Codex restores it from its own rollout log, including a turn that never finished.",
     "",
     "**Approval timeout:** Default is 60s; infrequent polling causes silent auto-decline. See `codex-mcp:///gotchas`.",
     "",
     "## Read next",
     "- `codex-mcp:///quickstart` for the exact start -> poll -> respond loop",
     "- `codex-mcp:///config` for parameter mapping and override persistence",
-    "- `codex-mcp:///gotchas` for timeout and exec-mode caveats",
+    "- `codex-mcp:///gotchas` for timeout caveats",
     "",
     "## Security notes",
     "- `sandbox: 'read-only'` is the strongest isolation — blocks all writes regardless of approval policy",
@@ -588,6 +556,8 @@ function buildCompatReport(deps: ResourceDeps, codexCliVersion: string | null): 
   const runtimeWarnings: string[] = [];
   if (!codexCliVersion) {
     runtimeWarnings.push("Unable to detect local codex CLI version from PATH.");
+  } else if (isCodexCliBelowMinimum(codexCliVersion)) {
+    runtimeWarnings.push(belowMinimumCodexCliMessage(codexCliVersion));
   }
   if (!deps.diskPersistence) {
     runtimeWarnings.push(
@@ -631,6 +601,7 @@ function buildCompatReport(deps: ResourceDeps, codexCliVersion: string | null): 
       runtime: {
         codexMcpVersion: deps.version,
         codexCliVersion,
+        minCodexCliVersion: MIN_CODEX_CLI_VERSION,
         activeSessions: deps.sessionManager.getActiveSessionCount(),
       },
     },
@@ -646,14 +617,14 @@ function buildServerInfoJson(deps: ResourceDeps, getCodexCliVersion: () => strin
       name: "codex-mcp",
       version: deps.version,
       codexCliVersion: getCodexCliVersion(),
-      clientMode: deps.clientMode,
+      minCodexCliVersion: MIN_CODEX_CLI_VERSION,
       runtime: describeRuntime(),
       platform: process.platform,
       arch: process.arch,
       stdioMode: resolveStdioMode().mode,
       supportedApprovalPolicies: APPROVAL_POLICIES,
       supportedSandboxModes: SANDBOX_MODES,
-      supportedEffortLevels: EFFORT_LEVELS,
+      advertisedEffortLevels: ADVERTISED_EFFORT_LEVELS,
       activeSessions: deps.sessionManager.getActiveSessionCount(),
       defaultModel: observedModel,
       defaultModelSource: observedModel ? "session-default" : "unknown",
