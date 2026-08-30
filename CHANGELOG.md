@@ -11,6 +11,8 @@ version it names — [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+## [3.0.2] - 2026-08-30
+
 ### Changed
 
 - **The fallow analysis is a gate a commit has to pass, not a report it can walk past.** `bunx fallow` printed its findings and exited 0, so nothing it found stopped anything. The pre-commit hook now runs `bun run lint:fallow` — the suite under coverage, then the analysis over what it measured — and a finding stops the commit. Each analysis is called by name, because the combined `fallow` run exits 0 in every machine-readable format whatever it found. `.fallowrc.jsonc` carries what fallow enforces itself: CRAP 15, cyclomatic 10, cognitive 12, duplication 0.3%, and `minOccurrences: 3` so a reported clone group is a shape repeated three times rather than a pair — the percentage still counts the pairs, so that setting relaxes nothing. `.fallow-gate.jsonc` carries the three per-file ceilings fallow measures and leaves to the reader — 500 lines, 15 fan-out, 0.7 complexity density — which `scripts/fallow-gate.mjs` reads out of the report and fails on. The hotspot table `fallow health` prints — commits and churn per file — is information the reader acts on, not a ceiling. A file over a ceiling is split, or excepted by an entry naming the metric, the limit it is held to and the reason; an exception that no longer holds anything back fails the run.
