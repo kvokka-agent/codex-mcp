@@ -15,7 +15,7 @@ import type {
   PermissionProfileSummary,
 } from "../src/app-server/protocol.js";
 import { createServer } from "../src/server.js";
-import { SessionManager } from "../src/session/manager.js";
+import { SessionManager } from "../src/session/manager/session-manager.js";
 import { executeCodex } from "../src/tools/codex.js";
 import { executeCodexReply } from "../src/tools/codex-reply.js";
 import type { SessionDefaults } from "../src/utils/session-defaults.js";

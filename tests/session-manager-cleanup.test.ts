@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
-import { SessionManager } from "../src/session/manager.js";
+import { SessionManager } from "../src/session/manager/session-manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
 import {
   DEFAULT_IDLE_CLEANUP_MS,
@@ -167,8 +167,9 @@ describe("SessionManager background cleanup", () => {
 
   it("cancels a session whose lastActiveAt cannot be parsed", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
-    const sessions = (manager as unknown as { sessions: Map<string, { lastActiveAt: string }> })
-      .sessions;
+    const sessions = (
+      manager as unknown as { runtime: { sessions: Map<string, { lastActiveAt: string }> } }
+    ).runtime.sessions;
     present(sessions.get(started.sessionId), "the started session").lastActiveAt =
       "not-a-timestamp";
 
@@ -335,8 +336,9 @@ describe("SessionManager cleanSessions", () => {
 
   it("skips a session whose lastActiveAt cannot be compared against olderThanMs", async () => {
     const idleId = await startIdleSession();
-    const sessions = (manager as unknown as { sessions: Map<string, { lastActiveAt: string }> })
-      .sessions;
+    const sessions = (
+      manager as unknown as { runtime: { sessions: Map<string, { lastActiveAt: string }> } }
+    ).runtime.sessions;
     present(sessions.get(idleId), "the idle session").lastActiveAt = "not-a-timestamp";
 
     const report = await manager.cleanSessions({ olderThanMs: 1000 });

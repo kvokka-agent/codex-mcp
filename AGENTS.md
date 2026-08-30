@@ -76,7 +76,30 @@ src/
 │   ├── retention.ts
 │   └── fs-errors.ts
 ├── session/
-│   ├── manager.ts            the state machine
+│   ├── manager/              the state machine
+│   │   ├── session-manager.ts    the facade every caller holds
+│   │   ├── core.ts               `SessionRuntime`, the state the rest act on
+│   │   ├── store.ts              the session index and its writes to disk
+│   │   ├── waiters.ts            the long poll
+│   │   ├── pending-requests.ts   the requests a session holds open
+│   │   ├── turns.ts              create and reply
+│   │   ├── fork-resume.ts        pick an existing thread back up
+│   │   ├── turn-control.ts       interrupt, steer, background terminals
+│   │   ├── cleanup.ts            cancel, clean, the timer sweep
+│   │   ├── notifications.ts      the notification router and the thread handlers
+│   │   ├── notifications-stream.ts  deltas, shell noise, warnings, hooks
+│   │   ├── server-requests.ts    approvals and questions the backend opens
+│   │   ├── approvals.ts          the caller's answer to one of them
+│   │   ├── approval-decisions.ts what a decision may be, and its wire shape
+│   │   ├── approval-io.ts        answering the backend, and what is logged
+│   │   ├── handlers.ts           what this server does with each backend message
+│   │   ├── poll.ts               what a caller reads without moving anything
+│   │   ├── events.ts             the event log, the activity line, the listeners
+│   │   ├── progress.ts           phase, tokens, the poll interval
+│   │   ├── session-decode.ts     a session read off Codex or off disk
+│   │   ├── session-view.ts       a session as a caller reads it, and its signal
+│   │   ├── turn-params.ts        what a turn is started with
+│   │   └── read.ts               reading a value out of foreign JSON
 │   ├── persistence.ts        the disk adapter
 │   ├── activity-marker.ts
 │   └── orphan-reaper.ts
@@ -95,6 +118,10 @@ src/
 - ESM and TypeScript. Local imports carry the `.js` suffix.
 - `unknown` plus narrowing, never `any`.
 - Validation lives in the zod schemas of `src/server.ts`.
+- `src/session/manager/` keeps its state in one `SessionRuntime` and its
+  behaviour in free functions over it. `SessionManager` is a facade of
+  one-line delegates; a module states what it does as `f(runtime, …)`, and no
+  module reads another's fields.
 - Tool responses stay MCP-safe: `{ content, structuredContent?, isError }`.
 - Diagnostics go to `console.error`. stdout is the MCP channel and carries
   nothing but JSON-RPC.

@@ -5,7 +5,7 @@
  * caller through `codex_check(action="poll", waitMs=…)`, which answers each time
  * Codex says it is working on something new.
  */
-import type { SessionManager } from "../session/manager.js";
+import type { SessionManager } from "../session/manager/session-manager.js";
 import type { SessionStartResult } from "../types.js";
 import { ErrorCode } from "../types.js";
 import type { CodexToolParams } from "../utils/config.js";

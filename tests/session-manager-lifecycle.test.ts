@@ -6,7 +6,7 @@ import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { type RecoveredSession, SCHEMA_VERSION } from "../src/persistence/recovery-scanner.js";
-import { SessionManager } from "../src/session/manager.js";
+import { SessionManager } from "../src/session/manager/session-manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
 import { advanceAsync } from "./helpers/clock.js";
 import { present } from "./helpers/present.js";
@@ -73,8 +73,10 @@ function internalSession(
   sessionId: string
 ): { threadId?: string; status: string } {
   const sessions = (
-    manager as unknown as { sessions: Map<string, { threadId?: string; status: string }> }
-  ).sessions;
+    manager as unknown as {
+      runtime: { sessions: Map<string, { threadId?: string; status: string }> };
+    }
+  ).runtime.sessions;
   return present(sessions.get(sessionId), `the internal record of session ${sessionId}`);
 }
 

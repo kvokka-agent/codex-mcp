@@ -2,7 +2,7 @@
  * codex_session tool — manage sessions (list/get/resume/cancel/interrupt/steer/
  * fork/clean/clean_background_terminals/terminate_background_terminal).
  */
-import type { SessionManager } from "../session/manager.js";
+import type { SessionManager } from "../session/manager/session-manager.js";
 import { type CleanableStatus, ErrorCode, type SessionAction } from "../types.js";
 
 export interface CodexSessionParams {

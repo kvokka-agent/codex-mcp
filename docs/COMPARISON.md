@@ -513,7 +513,7 @@ The tool surface is in [TOOLS.md](TOOLS.md) and the mechanism in
 [DESIGN.md](DESIGN.md). Against the eight requirements:
 
 - **The turn is carried by the poll, not by the call.** `codex` returns once
-  `turn/start` is accepted (`src/session/manager.ts:541-559`). One
+  `turn/start` is accepted (`src/session/manager/turns.ts`). One
   `codex_check(action="poll", waitMs=…)` waits up to `MAX_LONG_POLL_WAIT_MS`,
   3,600,000 ms (`src/types.ts:419`), cut by `PollWindow` to the client's own
   tool-call ceiling less a 5,000 ms margin (`src/utils/poll-window.ts:82-134`) —
@@ -531,7 +531,7 @@ The tool surface is in [TOOLS.md](TOOLS.md) and the mechanism in
   message naming the replacement (`src/server.ts:365-373`). The transcript stays
   in Codex's rollout log. A long poll wakes only on `signalOf` — status, the
   open request ids, the result timestamp, the activity timestamp
-  (`manager.ts:3137-3150`) — so deltas and token counters cost the caller
+  (`src/session/manager/session-view.ts`) — so deltas and token counters cost the caller
   nothing.
 - **One line of what the agent is doing.** The server appends an activity-marker
   instruction to `developerInstructions`, reassembles `%%%ACTIVITY: …%%%` across
@@ -539,22 +539,22 @@ The tool surface is in [TOOLS.md](TOOLS.md) and the mechanism in
   (`src/session/activity-marker.ts:40-194`). It reaches the caller as
   `progress.activity`, in Codex's own words.
 - **Ten sessions, ten processes, no lock.** One client and one child per session
-  (`manager.ts:228-229`); the only per-session cap is four concurrent long polls
-  (`manager.ts:153`).
+  (`src/session/manager/core.ts`); the only per-session cap is four concurrent long polls
+  (`src/session/manager/waiters.ts`).
 - **The session survives the server.** Orderly shutdown rewrites every running
-  session to `abandoned` (`manager.ts:1139-1149`); a hard kill is derived on the
+  session to `abandoned` (`src/session/manager/fork-resume.ts`); a hard kill is derived on the
   next start. `codex_session(action="resume")` respawns with the recorded
   profile, model, policy, sandbox and config and calls `thread/resume`, and
   Codex restores the thread from its own rollout log
-  (`manager.ts:1034-1075`). Pending approvals are lost.
+  (`src/session/manager/fork-resume.ts`). Pending approvals are lost.
 - **Two servers share one state directory.** Ownership is per session:
   `owner.json` holds `{pid, startedAt}`, listings show `owner.state`, and
   adopting another server's session fails with `SESSION_HELD_BY_OTHER_SERVER`
-  (`src/persistence/session-owner.ts:20-98`, `manager.ts:1100-1112`).
+  (`src/persistence/session-owner.ts:20-98`, `src/session/manager/fork-resume.ts`).
 - **Edits are asked for, not announced.** With `approvalPolicy` other than
   `never`, Codex's requests arrive in `actions[]` with their `availableDecisions`
   and the turn waits until the caller answers by `requestId`
-  (`manager.ts:1355-1372`). Unanswered, they auto-decline at
+  (`src/session/manager/server-requests.ts`). Unanswered, they auto-decline at
   `DEFAULT_APPROVAL_TIMEOUT_MS`, 60,000 ms, and the turn continues; a
   `waiting_approval` session advertises a 1,000 ms poll interval.
 - **A failed turn is a failed turn.** Every handler returns `isError: true` and

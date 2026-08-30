@@ -1,5 +1,5 @@
 import { describe, expect, it, jest } from "bun:test";
-import type { SessionManager } from "../src/session/manager.js";
+import type { SessionManager } from "../src/session/manager/session-manager.js";
 import { executeCodexSession } from "../src/tools/codex-session.js";
 
 describe("executeCodexSession", () => {

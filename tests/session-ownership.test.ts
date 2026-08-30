@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ownStartedAt } from "../src/persistence/process-identity.js";
 import { createServer } from "../src/server.js";
-import { SessionManager } from "../src/session/manager.js";
+import { SessionManager } from "../src/session/manager/session-manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
 import { ErrorCode } from "../src/types.js";
 import { present } from "./helpers/present.js";

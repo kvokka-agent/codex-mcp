@@ -4,7 +4,7 @@
  * Like `codex`, it returns as soon as the turn is under way; the turn is
  * followed with `codex_check(action="poll", waitMs=…)`.
  */
-import type { SessionManager } from "../session/manager.js";
+import type { SessionManager } from "../session/manager/session-manager.js";
 import type {
   ApprovalPolicy,
   ApprovalsReviewer,

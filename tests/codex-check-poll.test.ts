@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
-import { SessionManager } from "../src/session/manager.js";
+import { SessionManager } from "../src/session/manager/session-manager.js";
 import { executeCodexCheck } from "../src/tools/codex-check.js";
 import type { CheckResult } from "../src/types.js";
 import { DEFAULT_APPROVAL_TIMEOUT_MS, MAX_LONG_POLL_WAIT_MS } from "../src/types.js";

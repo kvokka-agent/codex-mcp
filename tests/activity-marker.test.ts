@@ -23,7 +23,7 @@ import {
   stripActivityMarkers,
   stripActivityMarkersFromTurn,
 } from "../src/session/activity-marker.js";
-import { SessionManager } from "../src/session/manager.js";
+import { SessionManager } from "../src/session/manager/session-manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
 import type { CheckResult } from "../src/types.js";
 

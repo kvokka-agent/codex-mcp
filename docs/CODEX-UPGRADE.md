@@ -86,7 +86,7 @@ An interface change touches every one of these, or states why it does not:
 
 - `src/server.ts` — the tool input and output schemas
 - `src/tools/*.ts`
-- `src/session/manager.ts`
+- `src/session/manager/`
 - `src/app-server/protocol.ts`, `src/types.ts`
 - `docs/TOOLS.md`, `docs/SESSIONS.md`, `docs/DESIGN.md`
 - `docs/E2E_LOCAL_TEST_PLAN.md`

@@ -10,7 +10,7 @@ import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client.js";
 import { Methods } from "../src/app-server/protocol.js";
 import { createServer } from "../src/server.js";
-import { SessionManager } from "../src/session/manager.js";
+import { SessionManager } from "../src/session/manager/session-manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
 import { executeCodex } from "../src/tools/codex.js";
 import { executeCodexReply } from "../src/tools/codex-reply.js";

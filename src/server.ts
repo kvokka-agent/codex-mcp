@@ -5,7 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ANSWERED_APPROVALS_REVIEWERS } from "./app-server/protocol.js";
 import { registerResources } from "./resources/index.js";
-import { SessionManager, type SessionManagerOptions } from "./session/manager.js";
+import { SessionManager, type SessionManagerOptions } from "./session/manager/session-manager.js";
 import { executeCodex } from "./tools/codex.js";
 import { executeCodexCheck } from "./tools/codex-check.js";
 import { executeCodexReply } from "./tools/codex-reply.js";

@@ -1,7 +1,7 @@
 /**
  * codex_check tool — report session status and answer what it waits for.
  */
-import type { SessionManager } from "../session/manager.js";
+import type { SessionManager } from "../session/manager/session-manager.js";
 import {
   ALL_DECISIONS,
   type ApprovalDecision,

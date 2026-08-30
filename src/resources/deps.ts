@@ -1,4 +1,4 @@
-import type { SessionManager } from "../session/manager.js";
+import type { SessionManager } from "../session/manager/session-manager.js";
 import type { SessionDefaults } from "../utils/session-defaults.js";
 
 type RuntimeMetadataProvider = Pick<

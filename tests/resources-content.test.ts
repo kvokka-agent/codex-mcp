@@ -37,7 +37,7 @@ const { Methods } = await import("../src/app-server/protocol.js");
 import type { SessionDefaults } from "../src/utils/session-defaults.js";
 
 const { registerResources, RESOURCE_URIS } = await import("../src/resources/index.js");
-const { SessionManager } = await import("../src/session/manager.js");
+const { SessionManager } = await import("../src/session/manager/session-manager.js");
 const {
   APPROVAL_POLICIES,
   SANDBOX_MODES,
