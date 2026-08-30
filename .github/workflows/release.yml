@@ -110,10 +110,21 @@ jobs:
           # default depth of 1 carries none of it, and the push is rejected as a
           # non-fast-forward however far ahead the candidate actually is.
           fetch-depth: 0
-      # `scripts/release.mjs` names the plugin tag, and bun is what runs it.
+      # `scripts/release.mjs` names the plugin tag and `scripts/badges.mjs` writes the
+      # badge documents; bun is what runs both. Neither reaches node_modules, so this job
+      # installs nothing.
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
+      # What `verify` measured over this very commit, carried here as job outputs. The
+      # suite runs once per release, in `check`, and this job only writes down what it
+      # answered. An output that never got set arrives as the empty string, which the
+      # script refuses rather than writing over a badge.
+      - name: Write the badges the checks measured
+        env:
+          FALLOW_BADGE: ${{ needs.verify.outputs.fallow-badge }}
+          COVERAGE_BADGE: ${{ needs.verify.outputs.coverage-badge }}
+        run: bun scripts/badges.mjs write "$FALLOW_BADGE" "$COVERAGE_BADGE"
       - name: Move the release branch to the verified commit and tag it
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -131,73 +142,35 @@ jobs:
                  "builds a new candidate on $tip and checks that one."
             exit 1
           fi
+          # Both tags name $SHA, the commit the matrix passed on. The badge commit below
+          # is checked by nothing, so no tag may reach it.
           git tag "v$VERSION" "$SHA"
           # Claude Code resolves a plugin dependency's version range against
           # `{plugin-name}--v{version}` tags alone, so the release carries that tag beside
           # `v$VERSION` on the same commit.
           plugin_tag=$(bun scripts/release.mjs tag "$VERSION")
           git tag "$plugin_tag" "$SHA"
+          # The branch goes one commit further than the tags where a badge moved: a child
+          # of $SHA carrying the two documents, which keeps the push a fast-forward. Where
+          # neither moved the branch stops at $SHA and the release writes no extra commit.
+          # `[skip ci]` is read off the head commit of a push, which is this one, and it
+          # is what keeps the push from starting a release run over a tree whose only
+          # change is two generated documents.
+          head="$SHA"
+          if ! git diff --quiet -- docs/fallow-badge.json docs/coverage-badge.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore(release): badges v$VERSION [skip ci]" \
+              -- docs/fallow-badge.json docs/coverage-badge.json
+            head=$(git rev-parse HEAD)
+          fi
           # One push, every ref: GitHub honours --atomic, so a branch update it rejects
           # takes the tags down with it. The branch update is a plain fast-forward, which
           # is what rejects it when a commit reaches the branch between the check above
           # and this line.
-          git push --atomic origin "$SHA:refs/heads/$RELEASE_BRANCH" \
+          git push --atomic origin "$head:refs/heads/$RELEASE_BRANCH" \
             "refs/tags/v$VERSION" "refs/tags/$plugin_tag"
           git push origin ":refs/heads/$CANDIDATE"
-
-  # The health score the README badge shows, measured on the commit that shipped.
-  # No `if`: `needs` alone says the release happened, because a merge that cut no
-  # version and a hand-started publish both leave `promote` skipped, and a failed
-  # `promote` skips this too.
-  badge:
-    needs: [prepare, promote]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.prepare.outputs.sha }}
-          # Two things need the whole history here. The badge commit is pushed as
-          # a fast-forward of the release branch, and git proves that from the
-          # history between the two — the same reason `promote` asks for it. And
-          # ten points of the score `bun run badge` writes are the hotspot
-          # penalty fallow reads out of the commits of the last six months; over
-          # a shallow checkout no file is a hotspot, the penalty comes out 0 and
-          # the badge would claim 95 for a tree that scores 85.
-          fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.0
-      - run: bun install --frozen-lockfile
-      # `fallow health` scores against the Istanbul report `.fallowrc.jsonc` names
-      # and fails without it, so the suite runs under coverage first.
-      - run: bun run coverage
-      - run: bun run badge
-      - name: Push the score onto the release branch
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-          SHA: ${{ needs.prepare.outputs.sha }}
-          RELEASE_BRANCH: ${{ github.ref_name }}
-        run: |
-          if git diff --quiet -- docs/fallow-badge.json; then
-            echo "v$VERSION scores what the badge already shows."
-            exit 0
-          fi
-          git fetch --no-tags origin "refs/heads/$RELEASE_BRANCH"
-          tip=$(git rev-parse FETCH_HEAD)
-          if [ "$tip" != "$SHA" ]; then
-            echo "$RELEASE_BRANCH moved to $tip after v$VERSION was tagged, so this badge" \
-                 "commit is no longer a fast-forward of it. The next release measures the" \
-                 "score again and pushes it; v$VERSION itself is tagged and published."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # `[skip ci]` keeps this commit from starting a second release run and a
-          # second matrix over a tree whose only change is the badge.
-          git commit -m "chore(release): score v$VERSION [skip ci]" -- docs/fallow-badge.json
-          git push origin "HEAD:refs/heads/$RELEASE_BRANCH"
 
   # npm carries one @kvokka/codex-mcp and this repository is where it comes from. A
   # fork that merges a labelled pull request raises its own version and tags its own

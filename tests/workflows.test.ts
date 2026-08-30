@@ -4,24 +4,40 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 // @ts-expect-error -- plain ESM, shared with the script that runs it.
-import { BADGE_PATH } from "../scripts/lib/fallow-badge.mjs";
+import { BADGES, badgeOutput } from "../scripts/lib/badge-file.mjs";
 
 const WORKFLOWS = join(dirname(fileURLToPath(import.meta.url)), "..", ".github", "workflows");
 
 const LEVEL = { none: 0, read: 1, write: 2 } as const;
 type Scope = string;
 type Permissions = Record<Scope, keyof typeof LEVEL>;
-type Step = { run?: string; uses?: string; with?: Record<string, unknown> };
+type Step = {
+  id?: string;
+  run?: string;
+  uses?: string;
+  env?: Record<string, string>;
+  with?: Record<string, unknown>;
+};
 type Job = {
   uses?: string;
   needs?: string[];
   if?: string;
   permissions?: Permissions;
+  outputs?: Record<string, string>;
   steps?: Step[];
 };
 type Workflow = { on: Record<string, unknown>; jobs: Record<string, Job> };
 
 const workflow = (file: string) => parse(readFileSync(join(WORKFLOWS, file), "utf8")) as Workflow;
+
+/** One `git …` command of a run block, with the line continuations joined up. */
+const gitCommand = (run: string, starts: string) =>
+  run
+    .split("\n")
+    .join(" ")
+    .replace(/\\\s+/g, " ")
+    .split(" git ")
+    .find((command) => command.startsWith(starts)) as string;
 
 // What a `permissions` block gives one scope. A block that names the scope gives what it
 // says; a block that leaves it out gives none, and so does a job with no block at all.
@@ -99,12 +115,7 @@ describe("the release tags", () => {
   });
 
   it("pushes the branch and both tags in one atomic push", () => {
-    const push = (step.run as string)
-      .split("\n")
-      .join(" ")
-      .replace(/\\\s+/g, " ")
-      .split(" git ")
-      .find((command) => command.startsWith("push --atomic")) as string;
+    const push = gitCommand(step.run as string, "push --atomic");
 
     expect(push).toContain("refs/tags/v$VERSION");
     expect(push).toContain("refs/tags/$plugin_tag");
@@ -115,51 +126,109 @@ describe("the release tags", () => {
   });
 });
 
-// The badge job pushes to the release branch after `promote` moved it, and what it
-// pushes is what `bun run badge` measured. Every mistake below leaves the release
-// green and the badge stale, weeks after the change that made it.
-describe("the release badge job", () => {
-  const badge = workflow("release.yml").jobs.badge;
-  const steps = badge.steps ?? [];
-  const runs = steps.map((step) => step.run ?? "");
+// Both README badges are measured by the job that runs the suite under coverage and
+// committed by the job that moves the release branch. Every mistake below leaves a
+// release green and a badge stale, or puts a tag on a commit nothing checked.
+describe("the badges the release commits", () => {
+  const ci = workflow("ci.yml");
+  const check = ci.jobs.check;
+  const release = workflow("release.yml");
+  const promote = release.jobs.promote;
+  const git = promote.steps?.find((each) => each.run?.includes("git tag"))?.run as string;
+  // The output name each badge travels under — read off the line the script writes
+  // to `$GITHUB_OUTPUT` — and the file each is written to.
+  const names = Object.keys(BADGES as Record<string, string>).map((label) => {
+    const line = badgeOutput({ label }) as string;
+    return line.slice(0, line.indexOf("="));
+  });
+  const paths = Object.values(BADGES as Record<string, string>).join(" ");
 
-  it("runs only where the release moved the branch", () => {
-    expect(badge.needs).toEqual(["prepare", "promote"]);
-    // `promote` is skipped by a merge that cut no version and by a hand-started
-    // publish, and `needs` carries that skip here — an `always()` would not.
-    expect(badge.if).toBeUndefined();
+  it("is measured where the suite already ran under coverage", () => {
+    const runs = (check.steps ?? []).map((step) => step.run ?? "");
+
+    expect(runs.indexOf("bun run lint:fallow")).toBeGreaterThanOrEqual(0);
+    expect(runs.findIndex((run) => run.startsWith("bun run badge"))).toBeGreaterThan(
+      runs.indexOf("bun run lint:fallow")
+    );
   });
 
-  it("measures the commit the release tagged", () => {
-    const checkout = steps.find((step) => step.uses?.startsWith("actions/checkout@")) as Step;
+  // The suite under coverage is the expensive half of a release and it runs in
+  // `verify`. A release job that ran it again would be measuring a second time what
+  // the matrix already answered — and would need the build the e2e tests spawn.
+  it("runs the suite once a release, in the workflow that checks the commit", () => {
+    const runs = Object.values(release.jobs).flatMap((job) =>
+      (job.steps ?? []).map((step) => step.run ?? "")
+    );
+
+    expect(runs.filter((run) => /bun (run coverage|run test|test)\b/.test(run))).toEqual([]);
+  });
+
+  // A reusable workflow's output takes three declarations to reach its caller: the
+  // step writes `$GITHUB_OUTPUT`, the job names it in `outputs`, and `workflow_call`
+  // names it again with the job's value. A name that stops matching anywhere along
+  // the chain arrives as the empty string, months later, in the release.
+  it("carries each document from the step that wrote it to the caller of ci.yml", () => {
+    const step = (check.steps ?? []).find((each) => each.run?.startsWith("bun run badge")) as Step;
+    const called = ci.on.workflow_call as { outputs: Record<string, { value: string }> };
+
+    expect(Object.keys(check.outputs ?? {})).toEqual(names);
+    expect(Object.keys(called.outputs)).toEqual(names);
+    for (const name of names) {
+      expect(check.outputs?.[name]).toBe(`\${{ steps.${step.id}.outputs.${name} }}`);
+      expect(called.outputs[name]?.value).toBe(`\${{ jobs.check.outputs.${name} }}`);
+    }
+  });
+
+  it("gives promote what verify answered, and writes no document it made up", () => {
+    const step = promote.steps?.find((each) => each.run?.includes("badges.mjs write")) as Step;
+
+    expect(promote.needs).toContain("verify");
+    expect(Object.values(step.env ?? {})).toEqual(
+      names.map((name) => `\${{ needs.verify.outputs.${name} }}`)
+    );
+    for (const variable of Object.keys(step.env ?? {})) {
+      expect(step.run).toContain(`"$${variable}"`);
+    }
+  });
+
+  // The commit carrying the badges is checked by nothing: it is written after the
+  // matrix passed, out of two documents the matrix measured. So the tags name $SHA,
+  // the commit `verify` ran on, and the branch alone moves to its child.
+  it("tags the verified commit and moves the branch to the badge commit", () => {
+    const push = gitCommand(git, "push --atomic");
+
+    expect(git).toContain('git tag "v$VERSION" "$SHA"');
+    expect(git).toContain('git tag "$plugin_tag" "$SHA"');
+    expect(git).toContain('head="$SHA"');
+    expect(git).toContain("head=$(git rev-parse HEAD)");
+    expect(push).toContain('"$head:refs/heads/$RELEASE_BRANCH"');
+    expect(push).not.toContain("$SHA:refs/heads/");
+  });
+
+  it("writes the badge commit onto the verified commit and nothing else", () => {
+    const checkout = promote.steps?.find((step) =>
+      step.uses?.startsWith("actions/checkout@")
+    ) as Step;
 
     expect(checkout.with?.ref).toBe("${{ needs.prepare.outputs.sha }}");
+    // git proves the fast-forward out of the history between the branch and the
+    // commit, and the default depth of 1 carries none of it.
     expect(checkout.with?.["fetch-depth"]).toBe(0);
+    expect(git).toContain(`git diff --quiet -- ${paths}`);
+    expect(git).toContain(`-- ${paths}`);
+    expect(git).not.toContain("git reset");
+    expect(git).not.toContain("--force");
+    expect(promote.permissions?.contents).toBe("write");
   });
 
-  // `fallow health` scores against the Istanbul report `.fallowrc.jsonc` names and
-  // exits 2 without it, so the suite has to run under coverage first.
-  it("runs the coverage the score is read from before reading it", () => {
-    expect(runs.indexOf("bun run coverage")).toBeGreaterThanOrEqual(0);
-    expect(runs.indexOf("bun run badge")).toBeGreaterThan(runs.indexOf("bun run coverage"));
+  // `[skip ci]` is read off the head commit of a push, which this commit is, so it
+  // keeps the branch update from starting a release run over two generated documents.
+  it("marks the badge commit so it starts no run of its own", () => {
+    expect(git).toContain(`git commit -m "chore(release): badges v$VERSION [skip ci]"`);
   });
 
-  it("commits the file the badge script writes, and nothing else", () => {
-    const push = runs.find((run) => run.includes("git push")) as string;
-
-    expect(push).toContain(`git commit -m "chore(release): score v$VERSION [skip ci]"`);
-    expect(push).toContain(`-- ${BADGE_PATH}`);
-    expect(push).toContain(`git diff --quiet -- ${BADGE_PATH}`);
-  });
-
-  // The tags `promote` pushed sit on the branch tip this commit fast-forwards; a
-  // forced push would take the release out from under them.
-  it("pushes the badge commit as a plain fast-forward", () => {
-    const push = runs.find((run) => run.includes("git push")) as string;
-
-    expect(push).toContain('git push origin "HEAD:refs/heads/$RELEASE_BRANCH"');
-    expect(push).not.toContain("--force");
-    expect(badge.permissions?.contents).toBe("write");
+  it("happens in the job that moves the branch, rather than in one of its own", () => {
+    expect(Object.keys(release.jobs)).toEqual(["prepare", "verify", "promote", "publish"]);
   });
 });
 

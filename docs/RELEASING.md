@@ -25,41 +25,40 @@ merge an empty follow-up pull request carrying the label you meant.
 
 ## What the merge does
 
-`.github/workflows/release.yml` runs on every push to `master` and holds five jobs.
+`.github/workflows/release.yml` runs on every push to `master` and holds four jobs.
 `master` moves in the third of them, after the matrix has passed.
 
 1. **prepare** reads the labels of the pull request whose merge produced the commit,
    through `repos/{repo}/commits/{sha}/pulls`. With no release label the job ends
-   here and the four below it are skipped. With one it runs
+   here and the three below it are skipped. With one it runs
    `bun scripts/release.mjs bump <level>` on the tip of `master`, which raises the
    version files and moves the changelog's `## [Unreleased]` block under the new
    version, commits them as `chore(release): vX.Y.Z` and pushes that commit to a branch
    of its own, `release-candidate/<run id>-<attempt>`. `master` does not move.
 2. **verify** calls `.github/workflows/ci.yml` on the candidate commit — the same
    matrix of six runners the pull request went through, plus the markdown lint. It
-   checks the tree that ships, the raised version files included.
-3. **promote** fast-forwards `master` to the candidate commit and pushes the tag
-   `vX.Y.Z` in one `git push --atomic`, then deletes the candidate branch. This is
-   the first moment `master` carries the new version, and the tag names the exact
-   commit the matrix passed on.
+   checks the tree that ships, the raised version files included, and answers with the
+   two README badge documents its `check` job measured off that tree.
+3. **promote** writes those two documents, tags the candidate commit `vX.Y.Z` and
+   `codex-mcp--vX.Y.Z`, moves `master` and deletes the candidate branch. Where a badge
+   moved, `master` goes one commit further than the tags: a child of the candidate
+   carrying `docs/fallow-badge.json` and `docs/coverage-badge.json`, committed as
+   `chore(release): badges vX.Y.Z [skip ci]`. Branch and tags travel in one
+   `git push --atomic`, so this is the first moment `master` carries the new version,
+   and both tags name the exact commit the matrix passed on — never the badge commit,
+   which no matrix has seen.
 4. **publish** calls `.github/workflows/publish.yml` on the tag, which runs
    `npm publish --provenance --access public` from the `npm` environment. The npm
    registry authenticates the run through OIDC, so the workflow carries no token.
    The job runs in `kvokka/codex-mcp` and nowhere else: a fork that merges a
    labelled pull request raises its own version and tags its own copy, and its run
    reaches this job, skips it and ends green.
-5. **badge** measures the released commit — `bun install`, `bun run coverage`, then
-   `bun run badge`, which reads `fallow health --hotspots --score` — and pushes
-   `docs/fallow-badge.json` onto `master` as `chore(release): score vX.Y.Z [skip ci]`
-   when the score moved. The commit is a plain fast-forward of the tip **promote**
-   left, and the job says so and ends green where `master` moved on in between: the
-   next release measures the score again.
 
 A red matrix leaves `master`, the tags and npm as they were. The candidate branch is
 the only thing such a run wrote, and it holds the commit that failed.
 
-All five are one workflow run: the version, the tag, the published package and the
-score the README badge shows come out of a single link in the Actions tab.
+All four are one workflow run: the version, the tags, the published package and the
+numbers the README badges show come out of a single link in the Actions tab.
 
 The same workflow takes a `ref` by hand from the Actions tab. Given a tag it runs
 `publish` alone, which is how a tag that exists without its npm version reaches npm —
@@ -198,13 +197,14 @@ version the rejected candidate named is still free, and the next run takes it.
 git ls-remote origin refs/heads/master 'refs/tags/vX.Y.Z'
 ```
 
-The push is atomic, so the branch and the tag moved together or not at all. Neither
+The push is atomic, so the branch and the tags moved together or not at all. Neither
 moved — the log says `master` moved during the matrix, or the push was rejected: the
 state is the one **verify failed** describes, and re-running the workflow builds a
 fresh candidate on the current tip. Both moved — the release is on `master` and
 tagged, and only the candidate branch deletion failed: delete
 `release-candidate/<run id>-<attempt>` by hand and re-run the failed jobs so
-**publish** gets its turn.
+**publish** gets its turn. `master` reading one commit above the tag is the badge
+commit and not a second release.
 
 **publish failed.** The tag `vX.Y.Z` exists and `master` carries its version, but npm
 does not have the package. Nothing needs undoing, and the version stays the one the tag
@@ -221,10 +221,6 @@ what the failed run would have published. Start it from `release.yml` and not fr
 
 A publish that failed because the version is already on npm needs nothing at all — the
 release is out.
-
-**badge failed.** The release is out — the tag, `master` and npm are what the run
-left, and `docs/fallow-badge.json` is the only thing behind. The next release measures
-the score again and pushes it.
 
 **The run published and then something failed.** npm versions cannot be replaced.
 Release the fix as a new patch.

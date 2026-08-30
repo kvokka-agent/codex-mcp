@@ -4,7 +4,8 @@
 ![Bun](https://img.shields.io/badge/Bun-%23000000.svg?style=for-the-badge&logo=bun&logoColor=white)
 [![downloads](https://img.shields.io/npm/dm/%40kvokka%2Fcodex-mcp)](https://www.npmjs.com/package/@kvokka/codex-mcp)
 ![CI Status](https://github.com/kvokka/codex-mcp/actions/workflows/ci.yml/badge.svg)
-[![fallow](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/kvokka/codex-mcp/master/docs/fallow-badge.json)](https://github.com/kvokka/codex-mcp/blob/master/docs/DEVELOPMENT.md#static-analysis)
+[![fallow](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/kvokka/codex-mcp/master/docs/fallow-badge.json)](https://github.com/kvokka/codex-mcp/blob/master/docs/DEVELOPMENT.md#the-readme-badges)
+[![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/kvokka/codex-mcp/master/docs/coverage-badge.json)](https://github.com/kvokka/codex-mcp/blob/master/docs/DEVELOPMENT.md#the-readme-badges)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/kvokka/codex-mcp)
 [![license](https://img.shields.io/npm/l/@kvokka/codex-mcp.svg)](https://github.com/kvokka/codex-mcp/blob/master/LICENSE)
 

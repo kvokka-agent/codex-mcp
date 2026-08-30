@@ -41,7 +41,7 @@
     "lint:md": "rumdl check .",
     "lint:fallow": "bun run coverage && bun run gate",
     "gate": "fallow dead-code && fallow dupes && fallow health && bun scripts/fallow-gate.mjs",
-    "badge": "bun scripts/fallow-badge.mjs",
+    "badge": "bun scripts/badges.mjs measure",
     "format": "biome format --write"
   },
   "keywords": [

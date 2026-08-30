@@ -1,24 +1,19 @@
 /**
- * The shields.io endpoint document the README's fallow badge is drawn from.
+ * The health score the README's fallow badge is drawn from.
  *
- * Every asserted value is what the module returned for the report, the health
- * score or the file the test handed it.
+ * Every asserted value is what the module returned for the report or the health
+ * score the test handed it.
  */
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 // @ts-expect-error -- plain ESM, shared with the script that runs it.
-import {
-  BADGE_PATH,
-  badgeDocument,
-  badgeEndpoint,
-  badgeUpdate,
-  readHealthScore,
-} from "../scripts/lib/fallow-badge.mjs";
+import { BADGES, badgeDocument } from "../scripts/lib/badge-file.mjs";
+// @ts-expect-error -- plain ESM, shared with the script that runs it.
+import { fallowEndpoint, readHealthScore } from "../scripts/lib/fallow-badge.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
 
 // Every grade fallow's `letter_grade` hands out: A >= 85, B >= 70, C >= 55,
 // D >= 40, F below.
@@ -74,9 +69,9 @@ describe("readHealthScore", () => {
   });
 });
 
-describe("badgeEndpoint", () => {
+describe("fallowEndpoint", () => {
   it("names the label, the grade and the rounded score shields draws", () => {
-    expect(badgeEndpoint({ score: 95.2, grade: "A" })).toEqual({
+    expect(fallowEndpoint({ score: 95.2, grade: "A" })).toEqual({
       schemaVersion: 1,
       label: "fallow",
       message: "A (95)",
@@ -85,11 +80,11 @@ describe("badgeEndpoint", () => {
   });
 
   it("rounds the score rather than cutting it", () => {
-    expect(badgeEndpoint({ score: 69.6, grade: "C" }).message).toBe("C (70)");
+    expect(fallowEndpoint({ score: 69.6, grade: "C" }).message).toBe("C (70)");
   });
 
   it("gives every grade fallow hands out its own colour", () => {
-    expect(GRADES.map((grade) => badgeEndpoint({ score: 50, grade }).color)).toEqual([
+    expect(GRADES.map((grade) => fallowEndpoint({ score: 50, grade }).color)).toEqual([
       "brightgreen",
       "green",
       "yellow",
@@ -99,60 +94,21 @@ describe("badgeEndpoint", () => {
   });
 
   it("refuses a grade no colour is named for", () => {
-    expect(() => badgeEndpoint({ score: 50, grade: "E" })).toThrow("no colour is named for: E");
+    expect(() => fallowEndpoint({ score: 50, grade: "E" })).toThrow("no colour is named for: E");
   });
 
   it("refuses a health score carrying no number", () => {
-    expect(() => badgeEndpoint({ score: null, grade: "A" })).toThrow("no score");
-  });
-});
-
-describe("badgeDocument", () => {
-  it("writes the endpoint object as a file git can diff", () => {
-    const document = badgeDocument({ score: 41.4, grade: "D" });
-
-    expect(document.endsWith("\n")).toBe(true);
-    expect(JSON.parse(document)).toEqual(badgeEndpoint({ score: 41.4, grade: "D" }));
-  });
-});
-
-describe("badgeUpdate", () => {
-  const document = badgeDocument({ score: 95.2, grade: "A" });
-
-  it("leaves the file alone when it already carries this score", () => {
-    expect(badgeUpdate({ path: BADGE_PATH, document, current: document })).toEqual({
-      changed: false,
-      text: `${BADGE_PATH} already reads A (95).`,
-    });
-  });
-
-  it("rewrites the file when the score moved", () => {
-    const current = badgeDocument({ score: 71.2, grade: "B" });
-
-    expect(badgeUpdate({ path: BADGE_PATH, document, current })).toEqual({
-      changed: true,
-      text: `${BADGE_PATH} now reads A (95).`,
-    });
-  });
-
-  it("writes the file when there is none", () => {
-    expect(badgeUpdate({ path: BADGE_PATH, document, current: null }).changed).toBe(true);
+    expect(() => fallowEndpoint({ score: null, grade: "A" })).toThrow("no score");
   });
 });
 
 describe("the committed badge", () => {
-  const committed = read(BADGE_PATH);
-  const endpoint = JSON.parse(committed) as { message: string };
+  const committed = readFileSync(join(ROOT, BADGES.fallow as string), "utf8");
+  const message = (JSON.parse(committed) as { message: string }).message;
   // The score the file was written from, read back out of what it shows.
-  const [, grade, score] = /^([A-F]) \((\d+)\)$/.exec(endpoint.message) ?? [];
+  const [, grade, score] = /^([A-F]) \((\d+)\)$/.exec(message) ?? [];
 
   it("is byte for byte what this module writes for the score it shows", () => {
-    expect(committed).toBe(badgeDocument({ grade, score: Number(score) }));
-  });
-
-  it("is the file the README badge points shields at", () => {
-    expect(read("README.md")).toContain(
-      `https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/kvokka/codex-mcp/master/${BADGE_PATH}`
-    );
+    expect(committed).toBe(badgeDocument(fallowEndpoint({ grade, score: Number(score) })));
   });
 });

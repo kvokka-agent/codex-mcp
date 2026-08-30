@@ -11,6 +11,14 @@ version it names — [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- **The README shows what the tests reach.** `docs/coverage-badge.json` is a second shields.io endpoint document beside the fallow one, drawn from the Istanbul report the coverage run already writes: the share of measured lines the tests entered and the share of matched functions, over `src/` and `scripts/` and without the helpers a test drags into the report. Both shares are floored, so the badge never reads 90 for a tree the 90% gate would fail, and the colour reads the lower of the two — brightgreen at 95, green at the gate, red below it.
+
+### Changed
+
+- **A release measures its badges once and commits them once.** The `badge` job ran `bun run coverage` after the release was out, which was a second full suite per release and the one place a green release could still end red — it ran no `bun run build`, so the end-to-end tests that spawn the bundle timed out. The `check` job of `ci.yml` now writes both badge documents out of the coverage it already ran and answers with them as workflow outputs, and `promote` writes them down. Where a badge moved, `promote` commits the two documents as a child of the verified commit and moves the release branch to it, in the same `git push --atomic` that carries the tags; both tags name the verified commit, because the badge commit passed no matrix. Where neither moved the release writes no extra commit and pushes exactly what it pushed before.
+
 ## [3.0.2] - 2026-08-30
 
 ### Changed
