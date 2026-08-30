@@ -128,7 +128,12 @@ src/
 │   ├── persistence.ts        the disk adapter
 │   ├── activity-marker.ts
 │   └── orphan-reaper.ts
-├── tools/              one file per tool
+├── tools/              one file per tool, one directory for `codex_setup`
+│   └── codex-setup/
+│       ├── index.ts              `executeCodexSetup`, and the answer it builds
+│       ├── probe.ts              what the machine answers about Codex
+│       ├── advice.ts             a warning and its next step, per condition
+│       └── result.ts             the shape of the answer
 ├── utils/
 └── resources/          the documents the server advertises as MCP resources
     ├── index.ts              registration, and the reader behind each uri

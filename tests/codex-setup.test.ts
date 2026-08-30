@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { executeCodexSetup } from "../src/tools/codex-setup.js";
+import { executeCodexSetup } from "../src/tools/codex-setup/index.js";
 import { _resetForTesting } from "../src/utils/codex-executable.js";
 import { isCodexCliBelowMinimum } from "../src/utils/codex-version.js";
 import { mockModule } from "./helpers/mock.js";

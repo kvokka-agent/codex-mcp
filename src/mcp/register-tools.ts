@@ -4,7 +4,7 @@ import { executeCodex } from "../tools/codex.js";
 import { executeCodexCheck } from "../tools/codex-check.js";
 import { executeCodexReply } from "../tools/codex-reply.js";
 import { executeCodexSession } from "../tools/codex-session.js";
-import { executeCodexSetup } from "../tools/codex-setup.js";
+import { executeCodexSetup } from "../tools/codex-setup/index.js";
 import { progressReporterFor } from "../utils/progress-notifier.js";
 import { payloadIsError, runTool } from "./envelope.js";
 import { checkToolOutputShape, codexCheckInputSchema } from "./schemas/check.js";
