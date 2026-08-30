@@ -4,7 +4,7 @@ import type {
   RecommendedNextAction,
   SessionStartResult,
   SessionStatus,
-} from "../types.js";
+} from "../types/index.js";
 
 const TERMINAL_STATUSES = new Set<SessionStatus>(["idle", "error", "cancelled", "abandoned"]);
 

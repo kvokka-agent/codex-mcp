@@ -1,5 +1,5 @@
 /** The long poll: who sleeps on a session, and what wakes them. */
-import { MAX_LONG_POLL_WAIT_MS, type SessionInfo } from "../../types.js";
+import { MAX_LONG_POLL_WAIT_MS, type SessionInfo } from "../../types/index.js";
 import type { SessionRuntime } from "./core.js";
 import { signalOf } from "./session-view.js";
 

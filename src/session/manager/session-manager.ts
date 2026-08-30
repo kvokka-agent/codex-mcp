@@ -17,7 +17,7 @@ import {
   type SessionStartResult,
   type SteerResult,
   type TurnResult,
-} from "../../types.js";
+} from "../../types/index.js";
 import { resolveApproval, resolveUserInput } from "./approvals.js";
 import {
   type CleanSessionsOptions,

@@ -3,7 +3,7 @@ import {
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
   MAX_LONG_POLL_WAIT_MS,
-} from "../../types.js";
+} from "../../types/index.js";
 import { MIN_CODEX_CLI_VERSION } from "../../utils/codex-version.js";
 import type { SessionDefaults } from "../../utils/session-defaults.js";
 

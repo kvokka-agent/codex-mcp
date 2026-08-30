@@ -25,7 +25,7 @@
  *    is held to the MCP TypeScript SDK's `DEFAULT_REQUEST_TIMEOUT_MSEC`, which
  *    it applies to a `tools/call` nobody configured.
  */
-import { MAX_LONG_POLL_WAIT_MS } from "../types.js";
+import { MAX_LONG_POLL_WAIT_MS } from "../types/index.js";
 
 /**
  * `DEFAULT_REQUEST_TIMEOUT_MSEC` of the MCP TypeScript SDK, which every client

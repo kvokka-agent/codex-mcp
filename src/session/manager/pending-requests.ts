@@ -1,5 +1,5 @@
 /** The requests a session holds open, and how each one is closed. */
-import type { PendingRequest, SessionInfo } from "../../types.js";
+import type { PendingRequest, SessionInfo } from "../../types/index.js";
 import type { SessionRuntime } from "./core.js";
 import { recordEvent } from "./events.js";
 import { notifyWaiters } from "./waiters.js";

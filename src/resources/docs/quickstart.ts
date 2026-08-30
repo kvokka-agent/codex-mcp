@@ -1,4 +1,4 @@
-import { MAX_LONG_POLL_WAIT_MS } from "../../types.js";
+import { MAX_LONG_POLL_WAIT_MS } from "../../types/index.js";
 import type { SessionDefaults } from "../../utils/session-defaults.js";
 
 function quickstartStartLines(): string[] {

@@ -1,7 +1,7 @@
 /** What this server does with everything the app-server sends it. */
 import type { ICodexClient } from "../../app-server/client-interface.js";
 import type { RequestId } from "../../app-server/wire/index.js";
-import { DEFAULT_APPROVAL_TIMEOUT_MS, type SessionInfo } from "../../types.js";
+import { DEFAULT_APPROVAL_TIMEOUT_MS, type SessionInfo } from "../../types/index.js";
 import { redactPaths } from "../../utils/redact.js";
 import { respondToTerminalSessionRequest } from "./approval-io.js";
 import type { SessionRuntime } from "./core.js";

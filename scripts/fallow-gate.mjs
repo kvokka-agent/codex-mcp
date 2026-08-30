@@ -4,7 +4,7 @@
 // decides; this file gets fallow to speak and prints the verdict.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,10 +39,15 @@ function trackedFiles(include, exclude) {
   );
   if (listed.status !== 0) throw new Error(`git ls-files: ${listed.stderr}`);
   const matches = (path, patterns) => patterns.some((glob) => new Bun.Glob(glob).match(path));
-  return listed.stdout
-    .split("\0")
-    .filter(Boolean)
-    .filter((path) => matches(path, include) && !matches(path, exclude));
+  return (
+    listed.stdout
+      .split("\0")
+      .filter(Boolean)
+      .filter((path) => matches(path, include) && !matches(path, exclude))
+      // git lists a deleted file until the deletion is staged, and there is
+      // nothing left to measure in it.
+      .filter((path) => existsSync(join(ROOT, path)))
+  );
 }
 
 const config = require(join(ROOT, ".fallow-gate.jsonc"));

@@ -3,7 +3,7 @@ import {
   APPROVAL_POLICIES,
   MAX_LONG_POLL_WAIT_MS,
   SANDBOX_MODES,
-} from "../types.js";
+} from "../types/index.js";
 import {
   belowMinimumCodexCliMessage,
   isCodexCliBelowMinimum,

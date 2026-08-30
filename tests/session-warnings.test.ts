@@ -24,7 +24,7 @@ import {
   MAX_SESSION_WARNINGS,
   MAX_WARNING_MESSAGE_CHARS,
 } from "../src/session/warnings.js";
-import type { CheckResult } from "../src/types.js";
+import type { CheckResult } from "../src/types/index.js";
 
 /** One hook run, with the fields `HookRunSummary` requires and the overrides a test needs. */
 function hookRun(overrides: Record<string, unknown> = {}): Record<string, unknown> {

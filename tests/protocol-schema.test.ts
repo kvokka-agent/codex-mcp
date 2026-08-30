@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import type { AppServerSpawnOptions } from "../src/app-server/lifecycle.js";
 import { Methods, SANDBOX_POLICY_TYPES, toSandboxPolicy } from "../src/app-server/wire/index.js";
-import { SANDBOX_MODES } from "../src/types.js";
+import { SANDBOX_MODES } from "../src/types/index.js";
 import { mockModule } from "./helpers/mock.js";
 
 const spawnMock = jest.fn();

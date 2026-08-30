@@ -25,7 +25,7 @@ import {
   SESSION_ACTIONS,
   SESSION_STATUSES,
   SUMMARY_MODES,
-} from "./types.js";
+} from "./types/index.js";
 import { PollWindow } from "./utils/poll-window.js";
 import { progressReporterFor } from "./utils/progress-notifier.js";
 import { redactPaths } from "./utils/redact.js";

@@ -8,7 +8,7 @@ import {
   type SessionInfo,
   type SessionStatus,
   WAITING_APPROVAL_POLL_INTERVAL,
-} from "../../types.js";
+} from "../../types/index.js";
 import { isRecord } from "./read.js";
 
 const REASONING_PROGRESS_METHODS = new Set<string>([

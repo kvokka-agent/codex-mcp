@@ -1,99 +1,42 @@
-/**
- * Type definitions for codex-mcp
- *
- * Shared constants are defined as tuples so both Zod schemas and
- * TypeScript types can derive from the same source of truth.
- */
+/** What the server holds about one session, and what a read of it answers. */
 
 import type {
   ApprovalsReviewer as AnsweredApprovalsReviewer,
   AskForApproval,
   SandboxPolicy,
-} from "./app-server/wire/index.js";
+} from "../app-server/wire/index.js";
+import type {
+  ApprovalPolicy,
+  ApprovalsReviewer,
+  EffortLevel,
+  Personality,
+  SandboxMode,
+  SummaryMode,
+} from "./enums.js";
 
-// ── Constants ──────────────────────────────────────────────────────
+/** How a turn ended, as the server saw it end. */
+export type TurnOutcome = "completed" | "error" | "cancelled";
 
-export const APPROVAL_POLICIES = ["untrusted", "on-request", "never"] as const;
-export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
-
-export const SANDBOX_MODES = ["read-only", "workspace-write", "danger-full-access"] as const;
-export type SandboxMode = (typeof SANDBOX_MODES)[number];
-
-export const PERSONALITIES = ["none", "friendly", "pragmatic"] as const;
-export type Personality = (typeof PERSONALITIES)[number];
-
-/**
- * Who decides an approval request the turn raises.
- *
- * `user` routes it to the caller, which answers through `codex_check`.
- * `auto_review` hands it to a Codex subagent that gathers context and applies a
- * risk-based decision framework. The schema also accepts `guardian_subagent`,
- * the legacy spelling of `auto_review`; this server neither publishes nor sends
- * it.
- */
-export const APPROVALS_REVIEWERS = ["user", "auto_review"] as const;
-export type ApprovalsReviewer = (typeof APPROVALS_REVIEWERS)[number];
-
-/**
- * The reasoning efforts every model of Codex CLI 0.150.1 answered `model/list`
- * with, least to most. The set belongs to the model, not to this server, so it
- * feeds the `effort` description and `codex-mcp:///server-info` and gates
- * nothing; the backend refuses an effort the chosen model does not advertise.
- */
-export const ADVERTISED_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
-
-/** Any non-empty reasoning effort. `TurnStartParams.effort` carries it through. */
-export type EffortLevel = string;
-
-export const SUMMARY_MODES = ["auto", "concise", "detailed", "none"] as const;
-export type SummaryMode = (typeof SUMMARY_MODES)[number];
-
-export const SESSION_ACTIONS = [
-  "list",
-  "get",
-  "resume",
-  "cancel",
-  "interrupt",
-  "steer",
-  "fork",
-  "clean",
-  "clean_background_terminals",
-  "terminate_background_terminal",
-] as const;
-export type SessionAction = (typeof SESSION_ACTIONS)[number];
-
-export const CHECK_ACTIONS = ["poll", "respond_permission", "respond_user_input"] as const;
-export type CheckAction = (typeof CHECK_ACTIONS)[number];
-
-type ApprovalType = "command" | "fileChange";
-
-export const COMMAND_DECISIONS = [
-  "accept",
-  "acceptForSession",
-  "acceptWithExecpolicyAmendment",
-  "applyNetworkPolicyAmendment",
-  "decline",
-  "cancel",
-] as const;
-
-export const FILE_CHANGE_DECISIONS = ["accept", "acceptForSession", "decline", "cancel"] as const;
-
-export const ALL_DECISIONS = [
-  "accept",
-  "acceptForSession",
-  "acceptWithExecpolicyAmendment",
-  "applyNetworkPolicyAmendment",
-  "decline",
-  "cancel",
-] as const;
-export type ApprovalDecision = (typeof ALL_DECISIONS)[number];
-
-export interface NetworkPolicyAmendment {
-  action: "allow" | "deny";
-  host: string;
+export interface TurnResult {
+  turnId: string;
+  /**
+   * How the turn ended, recorded where the server saw it end rather than read
+   * back out of the turn record. Absent on a result restored from a server
+   * that did not record one.
+   */
+  outcome?: TurnOutcome;
+  /** Final assistant text for this turn: the last completed agent message. */
+  text?: string;
+  structuredOutput?: unknown;
+  /** Raw turn object from app-server notifications/responses (shape depends on schema version). */
+  turn?: unknown;
+  /** Turn status string if available (e.g. "completed" | "failed" | "interrupted"). */
+  status?: string;
+  /** Raw turn error object if available. */
+  turnError?: unknown;
+  error?: string;
+  completedAt: string;
 }
-
-// ── Session Types ──────────────────────────────────────────────────
 
 /**
  * The settings Codex answered the session's thread call with: what the session
@@ -249,6 +192,8 @@ export type SessionEventType =
   | "approval_result"
   | "result"
   | "error";
+
+type ApprovalType = "command" | "fileChange";
 
 /** Pending approval/user-input request */
 export interface PendingRequest {
@@ -418,204 +363,3 @@ export interface SensitiveSessionInfo extends PublicSessionInfo {
   /** The full block, `cwd` included. */
   effective?: EffectiveSettings;
 }
-
-// ── Result Types ───────────────────────────────────────────────────
-
-/** How a turn ended, as the server saw it end. */
-export type TurnOutcome = "completed" | "error" | "cancelled";
-
-export interface TurnResult {
-  turnId: string;
-  /**
-   * How the turn ended, recorded where the server saw it end rather than read
-   * back out of the turn record. Absent on a result restored from a server
-   * that did not record one.
-   */
-  outcome?: TurnOutcome;
-  /** Final assistant text for this turn: the last completed agent message. */
-  text?: string;
-  structuredOutput?: unknown;
-  /** Raw turn object from app-server notifications/responses (shape depends on schema version). */
-  turn?: unknown;
-  /** Turn status string if available (e.g. "completed" | "failed" | "interrupted"). */
-  status?: string;
-  /** Raw turn error object if available. */
-  turnError?: unknown;
-  error?: string;
-  completedAt: string;
-}
-
-/** One background terminal, and what the call did to it. */
-export interface BackgroundTerminalOutcome {
-  processId: string;
-  /**
-   * The rest of what `thread/backgroundTerminals/list` answered about it. Absent
-   * for `terminate_background_terminal`, which names a process and lists nothing.
-   */
-  itemId?: string;
-  command?: string;
-  cwd?: string;
-  osPid?: number | null;
-  cpuPercent?: number | null;
-  rssKb?: number | null;
-  /** What `thread/backgroundTerminals/terminate` answered. Absent when that call failed. */
-  terminated?: boolean;
-  /** Why the terminate call failed, when it did. */
-  error?: string;
-  /** Absent from the listing taken after the pass. Absent when that listing failed. */
-  gone?: boolean;
-}
-
-/** What a background-terminal call of `codex_session` measured. */
-export interface BackgroundTerminalsReport {
-  threadId: string;
-  /** Every terminal the call acted on. */
-  terminals: BackgroundTerminalOutcome[];
-  /** The listing taken after the pass. Absent when that listing failed. */
-  survivors?: BackgroundTerminalOutcome[];
-  /** The listing stopped at the page bound with a cursor still to follow. */
-  truncated?: boolean;
-  /** `thread/backgroundTerminals/clean` swept the thread; it reports nothing about what it swept. */
-  cleanCalled?: boolean;
-  /** The listing failed at this stage, so what stands afterwards is unknown. */
-  listError?: { stage: "before" | "after"; message: string };
-}
-
-/**
- * What a steer came to.
- *
- * `turn/steer` adds input to the turn that is already running rather than
- * starting one, so `turnId` names that turn and `status` is the status the
- * session was already on.
- */
-export interface SteerResult {
-  sessionId: string;
-  threadId: string;
-  /** The turn the steer joined — the running one, which Codex answered with. */
-  turnId: string;
-  status: SessionStatus;
-  /** What happened, in the terms a caller expecting a new turn needs to read. */
-  message: string;
-}
-
-export interface SessionStartResult {
-  sessionId: string;
-  threadId: string;
-  status: "running" | "idle";
-  pollInterval: number;
-  compatWarnings?: string[];
-  progress?: ProgressInfo;
-  interactionState?: InteractionState;
-  recommendedNextAction?: RecommendedNextAction;
-}
-
-/** One thing the caller must answer: an approval request or a question. */
-export interface PendingAction {
-  type: "approval" | "user_input";
-  requestId: string;
-  kind: "command" | "fileChange" | "user_input";
-  params: unknown;
-  itemId: string;
-  reason?: string;
-  approvalId?: string;
-  commandActions?: unknown[] | null;
-  proposedExecpolicyAmendment?: string[] | null;
-  availableDecisions?: unknown[] | null;
-  additionalPermissions?: unknown;
-  networkApprovalContext?: unknown;
-  proposedNetworkPolicyAmendments?: unknown[] | null;
-  createdAt: string;
-}
-
-/**
- * What `codex_check` answers with: where the session stands and what it waits for.
- *
- * The turn's own history — every reasoning, command and message event — stays in
- * Codex's rollout log under `~/.codex/sessions/`; this server never repeats it to
- * the caller.
- */
-export interface CheckResult {
-  sessionId: string;
-  status: SessionStatus;
-  pollInterval?: number;
-  progress: ProgressInfo;
-  interactionState: InteractionState;
-  recommendedNextAction: RecommendedNextAction;
-  /** What the caller must answer. Empty while the turn needs nothing. */
-  actions: PendingAction[];
-  /**
-   * Why the turn is producing no output, newest last. Empty while nothing said so.
-   *
-   * A caller writes these out beside `progress.activity`: the activity line is
-   * what the turn is doing, and a warning is what is standing in its way.
-   */
-  warnings: SessionWarning[];
-  /** The final answer of the turn, carried by the first check that sees it. */
-  result?: TurnResult;
-  /**
-   * How long the poll held the call before answering, in milliseconds.
-   *
-   * A long poll that answers with the state it started on held the call for the
-   * whole window and nothing the caller acts on happened in it. Present on
-   * `poll` with a `waitMs`, absent on every immediate answer.
-   */
-  waitedMs?: number;
-}
-
-// ── Error Types ────────────────────────────────────────────────────
-
-export enum ErrorCode {
-  INVALID_ARGUMENT = "INVALID_ARGUMENT",
-  SESSION_NOT_FOUND = "SESSION_NOT_FOUND",
-  SESSION_HELD_BY_OTHER_SERVER = "SESSION_HELD_BY_OTHER_SERVER",
-  SESSION_BUSY = "SESSION_BUSY",
-  SESSION_NOT_RUNNING = "SESSION_NOT_RUNNING",
-  REQUEST_NOT_FOUND = "REQUEST_NOT_FOUND",
-  TIMEOUT = "TIMEOUT",
-  CANCELLED = "CANCELLED",
-  APP_SERVER_START_FAILED = "APP_SERVER_START_FAILED",
-  THREAD_FORK_RESUME_FAILED = "THREAD_FORK_RESUME_FAILED",
-  PROTOCOL_PARSE_ERROR = "PROTOCOL_PARSE_ERROR",
-  WRITE_QUEUE_DROPPED = "WRITE_QUEUE_DROPPED",
-  INTERNAL = "INTERNAL",
-}
-
-// ── Defaults ───────────────────────────────────────────────────────
-
-export const DEFAULT_EFFORT_LEVEL: EffortLevel = "low";
-/**
- * Minimum recommended polling interval (ms) when session status is "running".
- * MCP callers should treat this as a floor and can wait longer for larger tasks.
- */
-export const DEFAULT_POLL_INTERVAL = 120_000;
-/**
- * Polling interval (ms) while waiting for approval/user-input actions.
- * Kept short so callers can unblock pending actions before approval timeout.
- */
-export const WAITING_APPROVAL_POLL_INTERVAL = 1000;
-/**
- * The longest `codex_check(action="poll")` holds a call, whatever `waitMs` asks
- * for and whatever the client tolerates.
- *
- * The client's own tool-call ceiling is what normally ends a wait — `PollWindow`
- * reads it and cuts the window to fit. This bound is the one the server keeps
- * on its own, so a caller that asks for a day cannot pin a waiter slot of the
- * session for one.
- */
-export const MAX_LONG_POLL_WAIT_MS = 3_600_000;
-/**
- * How often a held poll tells the client what the turn is doing.
- *
- * Two things need it. A person watching reads the line under the call rather
- * than a spinner, and a client watchdog that ends a call which said nothing —
- * Claude Code 2.1.250 cuts a silent stdio call at 1,800,000ms,
- * `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` — counts a progress notification as the
- * server speaking. `CODEX_MCP_PROGRESS_HEARTBEAT_MS` overrides it; 0 sends
- * heartbeats no more.
- */
-export const PROGRESS_HEARTBEAT_MS = 30_000;
-export const DEFAULT_APPROVAL_TIMEOUT_MS = 60_000;
-export const DEFAULT_IDLE_CLEANUP_MS = 30 * 60 * 1000;
-export const DEFAULT_RUNNING_CLEANUP_MS = 4 * 60 * 60 * 1000;
-export const DEFAULT_TERMINAL_CLEANUP_MS = 5 * 60 * 1000;
-export const CLEANUP_INTERVAL_MS = 60_000;

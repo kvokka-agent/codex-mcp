@@ -1,6 +1,6 @@
 /** What a session says while it runs: its event log, its activity line, its listeners. */
 
-import type { SessionEventType, SessionInfo } from "../../types.js";
+import type { SessionEventType, SessionInfo } from "../../types/index.js";
 import { ActivityMarkerScanner } from "../activity-marker.js";
 import type { EventSink } from "./core.js";
 

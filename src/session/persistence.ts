@@ -32,7 +32,7 @@ import type {
   SessionEventType,
   SessionInfo,
   SummaryMode,
-} from "../types.js";
+} from "../types/index.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_EFFORT_LEVEL } from "../src/types.js";
+import { DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_EFFORT_LEVEL } from "../src/types/index.js";
 import { resolveSessionDefaults, SESSION_DEFAULT_ENV } from "../src/utils/session-defaults.js";
 
 describe("resolveSessionDefaults", () => {

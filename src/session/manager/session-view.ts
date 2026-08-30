@@ -11,7 +11,7 @@ import {
   type SessionOwnership,
   type SessionStatus,
   type SessionWarning,
-} from "../../types.js";
+} from "../../types/index.js";
 import { normalizeOptionalString, readOneOf } from "./read.js";
 import {
   publicEffectiveSettings,

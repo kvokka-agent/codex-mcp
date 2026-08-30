@@ -25,7 +25,7 @@ import {
 } from "../src/session/activity-marker.js";
 import { SessionManager } from "../src/session/manager/session-manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
-import type { CheckResult } from "../src/types.js";
+import type { CheckResult } from "../src/types/index.js";
 
 /** Feed a whole message through the scanner, cut into chunks of `size` characters. */
 function scanInChunks(text: string, size: number): string[] {

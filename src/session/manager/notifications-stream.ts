@@ -1,5 +1,5 @@
 /** The notifications that carry a turn's stream rather than its lifecycle. */
-import type { SessionInfo } from "../../types.js";
+import type { SessionInfo } from "../../types/index.js";
 import {
   bufferingWarningMessage,
   displayText,

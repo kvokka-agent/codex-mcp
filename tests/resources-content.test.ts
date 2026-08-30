@@ -49,7 +49,7 @@ const {
   DEFAULT_IDLE_CLEANUP_MS,
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
-} = await import("../src/types.js");
+} = await import("../src/types/index.js");
 const { MIN_CODEX_CLI_VERSION } = await import("../src/utils/codex-version.js");
 
 const DEFAULT_SPAWN_IMPL = spawnState.impl;

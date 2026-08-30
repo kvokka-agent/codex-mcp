@@ -9,7 +9,7 @@ import {
   ErrorCode,
   type SessionInfo,
   type SessionStartResult,
-} from "../../types.js";
+} from "../../types/index.js";
 import { resolveAndValidateFilePath } from "../../utils/files.js";
 import { redactPaths } from "../../utils/redact.js";
 import { composeDeveloperInstructions } from "../activity-marker.js";

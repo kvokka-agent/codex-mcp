@@ -8,7 +8,7 @@ import {
   ErrorCode,
   type SessionInfo,
   type SessionStartResult,
-} from "../../types.js";
+} from "../../types/index.js";
 import { redactPaths } from "../../utils/redact.js";
 import type { SessionRuntime } from "./core.js";
 import { registerHandlers } from "./handlers.js";

@@ -1,4 +1,4 @@
-import { ErrorCode } from "../../types.js";
+import { ErrorCode } from "../../types/index.js";
 
 const ERROR_CODE_HINTS: Record<ErrorCode, string> = {
   [ErrorCode.INVALID_ARGUMENT]: "Input shape/value mismatch. Fix payload and retry.",

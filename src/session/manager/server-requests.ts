@@ -11,7 +11,7 @@ import {
   type RequestId,
   type UserInputRequestResponse,
 } from "../../app-server/wire/index.js";
-import type { PendingRequest, SessionInfo } from "../../types.js";
+import type { PendingRequest, SessionInfo } from "../../types/index.js";
 import {
   AUTH_REFRESH_UNSUPPORTED_CODE,
   AUTH_REFRESH_UNSUPPORTED_MESSAGE,

@@ -9,7 +9,7 @@ import type {
   Personality,
   SandboxMode,
   SummaryMode,
-} from "../types.js";
+} from "../types/index.js";
 import type { SessionDefaults } from "./session-defaults.js";
 
 export interface CodexToolParams {

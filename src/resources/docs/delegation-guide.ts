@@ -1,4 +1,4 @@
-import { ADVERTISED_EFFORT_LEVELS, MAX_LONG_POLL_WAIT_MS } from "../../types.js";
+import { ADVERTISED_EFFORT_LEVELS, MAX_LONG_POLL_WAIT_MS } from "../../types/index.js";
 import type { SessionDefaults } from "../../utils/session-defaults.js";
 import { SESSION_DEFAULT_ENV } from "../../utils/session-defaults.js";
 

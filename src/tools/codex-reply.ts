@@ -13,7 +13,7 @@ import type {
   SandboxMode,
   SessionStartResult,
   SummaryMode,
-} from "../types.js";
+} from "../types/index.js";
 import { startedTurnResult } from "../utils/execution.js";
 
 export interface CodexReplyParams {

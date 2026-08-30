@@ -1,7 +1,7 @@
 /**
  * Build codex app-server spawn arguments from tool parameters.
  */
-import type { ApprovalPolicy, SandboxMode } from "../types.js";
+import type { ApprovalPolicy, SandboxMode } from "../types/index.js";
 
 export interface AppServerSpawnOptions {
   profile?: string;

@@ -14,7 +14,7 @@ import { SessionManager } from "../src/session/manager/session-manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
 import { executeCodex } from "../src/tools/codex.js";
 import { executeCodexReply } from "../src/tools/codex-reply.js";
-import { APPROVALS_REVIEWERS } from "../src/types.js";
+import { APPROVALS_REVIEWERS } from "../src/types/index.js";
 import type { SessionDefaults } from "../src/utils/session-defaults.js";
 import { present } from "./helpers/present.js";
 

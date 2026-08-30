@@ -12,7 +12,7 @@ import type {
   SessionEventType,
   SessionInfo,
   SummaryMode,
-} from "../../types.js";
+} from "../../types/index.js";
 import type { SessionPersistence } from "../persistence.js";
 
 /**

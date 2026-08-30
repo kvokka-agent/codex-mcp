@@ -2,7 +2,7 @@
  * The stdout side of the app-server connection: the JSON-RPC messages the child
  * wrote, each handed to whoever answers it.
  */
-import { ErrorCode } from "../../types.js";
+import { ErrorCode } from "../../types/index.js";
 import { LineReader } from "../child-stdio.js";
 import type {
   JsonRpcMessage,

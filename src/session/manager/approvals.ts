@@ -1,6 +1,6 @@
 /** The caller's answer to a request the session holds open. */
 import type { UserInputRequestResponse } from "../../app-server/wire/index.js";
-import { ErrorCode, type PendingRequest, type SessionInfo } from "../../types.js";
+import { ErrorCode, type PendingRequest, type SessionInfo } from "../../types/index.js";
 import { assertApprovalDecision, buildApprovalResponse } from "./approval-decisions.js";
 import { loggableAnswers, sendPendingRequestResponseOrThrow } from "./approval-io.js";
 import type { ApprovalExtra, SessionRuntime } from "./core.js";

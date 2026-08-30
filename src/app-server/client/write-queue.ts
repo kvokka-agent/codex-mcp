@@ -3,7 +3,7 @@
  * what is held while the pipe is full, and what a refused write does.
  */
 import type { Writable } from "node:stream";
-import { ErrorCode } from "../../types.js";
+import { ErrorCode } from "../../types/index.js";
 
 const MAX_WRITE_QUEUE_BYTES = 5 * 1024 * 1024; // 5MB
 

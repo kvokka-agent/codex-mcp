@@ -7,7 +7,7 @@ import type {
   SensitiveSessionInfo,
   SessionSignal,
   TurnResult,
-} from "../../types.js";
+} from "../../types/index.js";
 import {
   interactionStateForStatus,
   recommendedNextActionForStatus,

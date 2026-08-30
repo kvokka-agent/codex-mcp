@@ -7,7 +7,7 @@ import {
   ErrorCode,
   type SessionInfo,
   type SteerResult,
-} from "../../types.js";
+} from "../../types/index.js";
 import type { SessionRuntime } from "./core.js";
 import { recordEvent } from "./events.js";
 import { messageOf } from "./read.js";

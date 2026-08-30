@@ -8,7 +8,7 @@ import {
   type RequestId,
   type UserInputRequestResponse,
 } from "../../app-server/wire/index.js";
-import { ErrorCode, type PendingRequest } from "../../types.js";
+import { ErrorCode, type PendingRequest } from "../../types/index.js";
 import { describeError, isRecord, normalizeOptionalString } from "./read.js";
 
 export const AUTH_REFRESH_UNSUPPORTED_CODE = -32000;

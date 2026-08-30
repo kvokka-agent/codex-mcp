@@ -12,7 +12,7 @@ import {
   ErrorCode,
   type SandboxMode,
   type SessionInfo,
-} from "../../types.js";
+} from "../../types/index.js";
 import { resolveAndValidateCwd } from "../../utils/cwd.js";
 import {
   buildEffortFallbackWarning,

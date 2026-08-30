@@ -9,7 +9,7 @@ import {
   FILE_CHANGE_DECISIONS,
   type NetworkPolicyAmendment,
   type PendingRequest,
-} from "../../types.js";
+} from "../../types/index.js";
 import type { ApprovalExtra } from "./core.js";
 import { isRecord } from "./read.js";
 

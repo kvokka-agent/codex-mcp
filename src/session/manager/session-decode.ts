@@ -24,7 +24,7 @@ import {
   type SessionStatus,
   type SummaryMode,
   type TurnResult,
-} from "../../types.js";
+} from "../../types/index.js";
 import type { CreateSessionAdvanced } from "./core.js";
 import { extractTokens } from "./progress.js";
 import { isRecord, normalizeOptionalString, readNonEmptyString, readOneOf } from "./read.js";

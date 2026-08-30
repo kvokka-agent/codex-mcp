@@ -7,7 +7,7 @@ import {
   type PendingRequest,
   type SessionInfo,
   type SessionStatus,
-} from "../../types.js";
+} from "../../types/index.js";
 import type { SessionRuntime } from "./core.js";
 import { recordEvent } from "./events.js";
 import { clearSessionPendingRequests, respondCancelled } from "./pending-requests.js";

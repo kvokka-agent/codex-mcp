@@ -11,7 +11,7 @@ import {
   DEFAULT_IDLE_CLEANUP_MS,
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
-} from "../src/types.js";
+} from "../src/types/index.js";
 import { advanceAsync } from "./helpers/clock.js";
 import { present } from "./helpers/present.js";
 

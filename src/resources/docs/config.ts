@@ -5,7 +5,7 @@ import {
   DEFAULT_EFFORT_LEVEL,
   MAX_LONG_POLL_WAIT_MS,
   SANDBOX_MODES,
-} from "../../types.js";
+} from "../../types/index.js";
 import type { SessionDefaults } from "../../utils/session-defaults.js";
 import { SESSION_DEFAULT_ENV } from "../../utils/session-defaults.js";
 

@@ -6,7 +6,7 @@ import {
   type RecoveredSession,
   readOwner,
 } from "../../persistence/index.js";
-import { ErrorCode, type SessionInfo, type SessionOwnership } from "../../types.js";
+import { ErrorCode, type SessionInfo, type SessionOwnership } from "../../types/index.js";
 import type { PidDetails } from "../persistence.js";
 import type { SessionRuntime } from "./core.js";
 import { setEventSink } from "./events.js";

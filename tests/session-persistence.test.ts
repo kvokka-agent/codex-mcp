@@ -62,7 +62,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SCHEMA_VERSION } from "../src/persistence/index.js";
 import { SessionPersistence, startDiskPersistence } from "../src/session/persistence.js";
-import type { SessionInfo } from "../src/types.js";
+import type { SessionInfo } from "../src/types/index.js";
 
 let root: string;
 let persistence: SessionPersistence | null = null;

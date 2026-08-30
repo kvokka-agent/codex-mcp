@@ -1,6 +1,6 @@
 /** Where each notification of a thread and its turns is acted on. */
 import { Methods } from "../../app-server/wire/index.js";
-import type { SessionEventType, SessionInfo } from "../../types.js";
+import type { SessionEventType, SessionInfo } from "../../types/index.js";
 import { redactPaths } from "../../utils/redact.js";
 import { stripActivityMarkers, stripActivityMarkersFromTurn } from "../activity-marker.js";
 import type { SessionRuntime } from "./core.js";

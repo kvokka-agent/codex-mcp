@@ -11,7 +11,7 @@ import {
   MAX_LONG_POLL_WAIT_MS,
   type NetworkPolicyAmendment,
   type SessionSignal,
-} from "../types.js";
+} from "../types/index.js";
 import { PollWindow } from "../utils/poll-window.js";
 import {
   activityLine,
