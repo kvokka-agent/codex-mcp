@@ -4,12 +4,15 @@ import { join } from "node:path";
 // @ts-expect-error -- the release rules are plain ESM, shared with the workflow that runs them.
 import {
   applyVersion,
+  CHANGELOG,
   currentVersion,
   nextVersion,
   pluginTag,
   ROOT,
   releaseLevel,
+  rotateChangelog,
   TARGETS,
+  today,
 } from "../scripts/release.mjs";
 
 type Target = { path: string; pattern: RegExp; count: number };
@@ -119,5 +122,118 @@ describe("pluginTag", () => {
     const raised = nextVersion(currentVersion(), "major") as string;
     expect(pluginTag(raised)).toBe(`codex-mcp--v${raised}`);
     expect(pluginTag(raised)).not.toBe(pluginTag(currentVersion()));
+  });
+});
+
+describe("rotateChangelog", () => {
+  const doc = [
+    "# Changelog",
+    "",
+    "## [Unreleased]",
+    "",
+    "### Added",
+    "",
+    "- a thing the release ships",
+    "",
+    "## [2.2.0] - 2026-08-26",
+    "",
+    "### Added",
+    "",
+    "- what 2.2.0 shipped",
+    "",
+  ].join("\n");
+
+  it("moves the whole Unreleased block under the version being cut", () => {
+    expect(rotateChangelog(doc, "2.3.0", "2026-08-30")).toBe(
+      [
+        "# Changelog",
+        "",
+        "## [Unreleased]",
+        "",
+        "## [2.3.0] - 2026-08-30",
+        "",
+        "### Added",
+        "",
+        "- a thing the release ships",
+        "",
+        "## [2.2.0] - 2026-08-26",
+        "",
+        "### Added",
+        "",
+        "- what 2.2.0 shipped",
+        "",
+      ].join("\n")
+    );
+  });
+
+  it("leaves an empty Unreleased behind for the next pull request to write into", () => {
+    const rotated = rotateChangelog(doc, "2.3.0", "2026-08-30") as string;
+    const unreleased = rotated.slice(
+      rotated.indexOf("## [Unreleased]") + "## [Unreleased]".length,
+      rotated.indexOf("## [2.3.0]")
+    );
+    expect(unreleased.trim()).toBe("");
+  });
+
+  it("carries a release that wrote no entry as a heading and nothing under it", () => {
+    const empty = "# Changelog\n\n## [Unreleased]\n\n## [2.2.0] - 2026-08-26\n\n- old\n";
+    expect(rotateChangelog(empty, "2.2.1", "2026-08-30")).toBe(
+      "# Changelog\n\n## [Unreleased]\n\n## [2.2.1] - 2026-08-30\n\n## [2.2.0] - 2026-08-26\n\n- old\n"
+    );
+  });
+
+  it("refuses a changelog with no Unreleased heading", () => {
+    expect(() =>
+      rotateChangelog("# Changelog\n\n## [2.2.0] - 2026-08-26\n", "2.3.0", "2026-08-30")
+    ).toThrow(/carries no ## \[Unreleased\] heading/);
+  });
+
+  it("refuses to write a version the changelog already carries", () => {
+    expect(() => rotateChangelog(doc, "2.2.0", "2026-08-30")).toThrow(
+      /already carries a section for 2\.2\.0/
+    );
+  });
+
+  it("dates the section in UTC, the day the tag carries", () => {
+    expect(today(new Date("2026-08-30T23:30:00Z"))).toBe("2026-08-30");
+  });
+});
+
+describe("CHANGELOG.md", () => {
+  const content = read(CHANGELOG as string);
+  const headings = content.split("\n").filter((line) => line.startsWith("## ["));
+
+  it("opens with Unreleased, so a pull request has one place to write into", () => {
+    expect(headings[0]).toBe("## [Unreleased]");
+  });
+
+  it("gives every released version its own dated section", () => {
+    for (const heading of headings.slice(1)) {
+      expect(heading).toMatch(/^## \[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2}$/);
+    }
+  });
+
+  it("holds the sections newest first", () => {
+    const rank = (heading: string) => {
+      const [major, minor, patch] = heading
+        .slice(heading.indexOf("[") + 1, heading.indexOf("]"))
+        .split(".")
+        .map(Number);
+      return major * 1_000_000 + minor * 1_000 + patch;
+    };
+    const order = headings.slice(1).map(rank);
+    expect(order).toEqual([...order].sort((a, b) => b - a));
+  });
+
+  it("carries a section for the version the package declares", () => {
+    expect(headings.some((heading) => heading.startsWith(`## [${currentVersion()}] -`))).toBe(true);
+  });
+
+  it("rotates into a file the next release can rotate again", () => {
+    const raised = nextVersion(currentVersion(), "minor") as string;
+    const rotated = rotateChangelog(content, raised, today()) as string;
+    expect(rotated).toContain(`## [Unreleased]\n\n## [${raised}] - ${today()}`);
+    expect(rotated).toContain(`## [${currentVersion()}] -`);
+    expect(() => rotateChangelog(rotated, raised, today())).toThrow(/already carries/);
   });
 });

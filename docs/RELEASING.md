@@ -31,9 +31,10 @@ merge an empty follow-up pull request carrying the label you meant.
 1. **prepare** reads the labels of the pull request whose merge produced the commit,
    through `repos/{repo}/commits/{sha}/pulls`. With no release label the job ends
    here and the three below it are skipped. With one it runs
-   `bun scripts/release.mjs bump <level>` on the tip of `master`, commits the
-   version files as `chore(release): vX.Y.Z` and pushes that commit to a branch of
-   its own, `release-candidate/<run id>-<attempt>`. `master` does not move.
+   `bun scripts/release.mjs bump <level>` on the tip of `master`, which raises the
+   version files and moves the changelog's `## [Unreleased]` block under the new
+   version, commits them as `chore(release): vX.Y.Z` and pushes that commit to a branch
+   of its own, `release-candidate/<run id>-<attempt>`. `master` does not move.
 2. **verify** calls `.github/workflows/ci.yml` on the candidate commit — the same
    matrix of six runners the pull request went through, plus the markdown lint. It
    checks the tree that ships, the raised version files included.
@@ -143,8 +144,29 @@ an equality check and fails until it names the file.
 
 ## The CHANGELOG
 
-`CHANGELOG.md` is written by hand, in the pull request that carries the label. The
-release run does not touch it.
+A pull request writes what it changes under `## [Unreleased]` in `CHANGELOG.md`, in the
+Keep a Changelog section it belongs to — `Added`, `Changed`, `Fixed`, `Removed`. That
+block is the one place a change is written by hand, and it holds what has landed on
+`master` and not shipped.
+
+`bun scripts/release.mjs bump <level>` moves the whole block under `## [X.Y.Z] - <date>`
+and leaves `## [Unreleased]` empty for the next pull request. The date is the day the
+release runs, in UTC, which is the day the tag carries. Every section below it stays as
+it was: a released version reads as what that version shipped, and an entry rewritten
+later is a new entry in the version that rewrote it.
+
+The rotation runs inside `prepare`, in the same commit as the version files, so the
+changelog the matrix checks and the tag carries is the released one. It refuses a
+changelog with no `## [Unreleased]` heading, and one that already carries a section for
+the version being cut.
+
+A pull request that changes nothing a reader of the changelog acts on — a refactor, a
+test, a workflow — writes no entry, and the release it is part of gets a heading with
+nothing under it.
+
+`tests/release.test.ts` reads `CHANGELOG.md` and fails when `## [Unreleased]` is not the
+first section, when a version section carries no date, when the sections are not newest
+first, or when the version `package.json` declares has no section.
 
 ## When a run stops halfway
 

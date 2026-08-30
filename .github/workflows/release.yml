@@ -76,8 +76,9 @@ jobs:
           version=$(bun scripts/release.mjs bump "$LEVEL")
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Only the version files changed, and the bump refuses to run on a tree where
-          # one of them no longer carries the version.
+          # The version files and CHANGELOG.md changed, and nothing else: the bump refuses
+          # to run on a tree where a version file no longer carries the version, or where
+          # the changelog carries no `## [Unreleased]` block to move.
           git commit -am "chore(release): v$version"
           git push origin "HEAD:refs/heads/$BRANCH"
           {
