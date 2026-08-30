@@ -17,6 +17,12 @@ export interface CodexSessionParams {
   prompt?: string;
 }
 
+/** What one action answers, given the call and the manager it runs against. */
+type SessionActionHandler = (
+  args: CodexSessionParams,
+  sessionManager: SessionManager
+) => Promise<unknown> | unknown;
+
 /** What an action that works on one session answers when the caller named none. */
 function missingSessionId(action: SessionAction): { error: string; isError: true } {
   return {
@@ -25,16 +31,79 @@ function missingSessionId(action: SessionAction): { error: string; isError: true
   };
 }
 
+/**
+ * An action that works on one session: the guard answers the caller who named
+ * no sessionId, so the manager is reached only with an id in hand.
+ */
+function onSession(
+  run: (
+    sessionId: string,
+    args: CodexSessionParams,
+    sessionManager: SessionManager
+  ) => Promise<unknown> | unknown
+): SessionActionHandler {
+  return (args, sessionManager) =>
+    args.sessionId ? run(args.sessionId, args, sessionManager) : missingSessionId(args.action);
+}
+
+/** `list` — every session of the state directory, not only the ones in memory. */
+const listAction: SessionActionHandler = (_args, sessionManager) => ({
+  sessions: sessionManager.listAllSessions(),
+});
+
+/** `resume` — the manager re-attaches to a session it already tracks. */
+const resumeAction = onSession((sessionId, _args, sessionManager) =>
+  sessionManager.resumeSession(sessionId)
+);
+
+/** `get` — one session as the manager holds it. */
+const getAction = onSession((sessionId, args, sessionManager) =>
+  sessionManager.getSession(sessionId, args.includeSensitive)
+);
+
+/** `cancel` — the session stops, and the answer names the session it stopped. */
+const cancelAction = onSession(async (sessionId, _args, sessionManager) => {
+  await sessionManager.cancelSession(sessionId);
+  return { success: true, message: `Session ${sessionId} cancelled` };
+});
+
+/** `interrupt` — the running turn stops, the session stays. */
+const interruptAction = onSession(async (sessionId, _args, sessionManager) => {
+  await sessionManager.interruptSession(sessionId);
+  return { success: true, message: `Session ${sessionId} interrupted` };
+});
+
+/** `steer` — a prompt joins the turn, so a call naming none is refused. */
+const steerAction = onSession((sessionId, args, sessionManager) => {
+  if (!args.prompt) {
+    return {
+      error: `Error [${ErrorCode.INVALID_ARGUMENT}]: prompt required for '${args.action}'`,
+      isError: true,
+    };
+  }
+  return sessionManager.steerSession(sessionId, args.prompt);
+});
+
+/** `fork` — a second session off the same thread. */
+const forkAction = onSession((sessionId, _args, sessionManager) =>
+  sessionManager.forkSession(sessionId)
+);
+
+/** `clean` — the sweep the caller's filters describe. */
+const cleanAction: SessionActionHandler = (args, sessionManager) =>
+  sessionManager.cleanSessions({
+    statuses: args.statuses,
+    olderThanMs: args.olderThanMs,
+    dryRun: args.dryRun,
+    includeDisk: args.includeDisk,
+  });
+
 /** The two background-terminal actions. Both answer `backgroundTerminals`. */
-async function backgroundTerminalAction(
-  args: CodexSessionParams,
-  sessionManager: SessionManager
-): Promise<unknown> {
-  if (!args.sessionId) return missingSessionId(args.action);
+const backgroundTerminalAction = onSession(async (sessionId, args, sessionManager) => {
   if (args.action === "clean_background_terminals") {
     return {
-      sessionId: args.sessionId,
-      backgroundTerminals: await sessionManager.cleanBackgroundTerminals(args.sessionId),
+      sessionId,
+      backgroundTerminals: await sessionManager.cleanBackgroundTerminals(sessionId),
     };
   }
   if (!args.processId) {
@@ -44,71 +113,40 @@ async function backgroundTerminalAction(
     };
   }
   return {
-    sessionId: args.sessionId,
+    sessionId,
     backgroundTerminals: await sessionManager.terminateBackgroundTerminal(
-      args.sessionId,
+      sessionId,
       args.processId
     ),
   };
-}
+});
+
+/** Every action the tool answers, and the branch that answers it. */
+const sessionActions: Record<SessionAction, SessionActionHandler> = {
+  list: listAction,
+  resume: resumeAction,
+  get: getAction,
+  cancel: cancelAction,
+  interrupt: interruptAction,
+  steer: steerAction,
+  fork: forkAction,
+  clean: cleanAction,
+  clean_background_terminals: backgroundTerminalAction,
+  terminate_background_terminal: backgroundTerminalAction,
+};
 
 export async function executeCodexSession(
   args: CodexSessionParams,
   sessionManager: SessionManager
 ): Promise<unknown> {
-  switch (args.action) {
-    case "list":
-      return { sessions: sessionManager.listAllSessions() };
-
-    case "resume":
-      if (!args.sessionId) return missingSessionId(args.action);
-      return await sessionManager.resumeSession(args.sessionId);
-
-    case "get":
-      if (!args.sessionId) return missingSessionId(args.action);
-      return sessionManager.getSession(args.sessionId, args.includeSensitive);
-
-    case "cancel":
-      if (!args.sessionId) return missingSessionId(args.action);
-      await sessionManager.cancelSession(args.sessionId);
-      return { success: true, message: `Session ${args.sessionId} cancelled` };
-
-    case "interrupt":
-      if (!args.sessionId) return missingSessionId(args.action);
-      await sessionManager.interruptSession(args.sessionId);
-      return { success: true, message: `Session ${args.sessionId} interrupted` };
-
-    case "steer": {
-      if (!args.sessionId) return missingSessionId(args.action);
-      if (!args.prompt) {
-        return {
-          error: `Error [${ErrorCode.INVALID_ARGUMENT}]: prompt required for '${args.action}'`,
-          isError: true,
-        };
-      }
-      return await sessionManager.steerSession(args.sessionId, args.prompt);
-    }
-
-    case "fork":
-      if (!args.sessionId) return missingSessionId(args.action);
-      return await sessionManager.forkSession(args.sessionId);
-
-    case "clean":
-      return await sessionManager.cleanSessions({
-        statuses: args.statuses,
-        olderThanMs: args.olderThanMs,
-        dryRun: args.dryRun,
-        includeDisk: args.includeDisk,
-      });
-
-    case "clean_background_terminals":
-    case "terminate_background_terminal":
-      return await backgroundTerminalAction(args, sessionManager);
-
-    default:
-      return {
-        error: `Error [${ErrorCode.INVALID_ARGUMENT}]: Unknown action '${args.action}'`,
-        isError: true,
-      };
+  // A caller off the schema names an action the record has no key for, which
+  // the key type alone does not admit: the lookup answers undefined there.
+  const handler: SessionActionHandler | undefined = sessionActions[args.action];
+  if (!handler) {
+    return {
+      error: `Error [${ErrorCode.INVALID_ARGUMENT}]: Unknown action '${args.action}'`,
+      isError: true,
+    };
   }
+  return await handler(args, sessionManager);
 }
