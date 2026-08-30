@@ -1,0 +1,28 @@
+{
+  // The per-file ceilings `bun scripts/fallow-gate.mjs` enforces over what
+  // fallow measured. Every threshold fallow gates on itself — CRAP, cyclomatic
+  // and cognitive complexity, unit size, duplication — lives in
+  // `.fallowrc.jsonc` instead.
+  "include": ["src/**/*.ts", "scripts/**/*.mjs", "plugins/**/*.mjs"],
+  // Tests state what the code under them does; their size, their coupling and
+  // their churn follow the code and say nothing on their own. The vendored
+  // Codex JSON schemas are not hand-written.
+  "exclude": ["tests/**", "codex-schema/**"],
+  "churn": {
+    "since": "6m",
+    // Every file, not just one with three commits behind it: the combined
+    // fallow run drops the rest, and a file added whole in one commit is
+    // exactly the case the ceiling is for.
+    "minCommits": 1
+  },
+  "ceilings": {
+    "lines": 500,
+    "fanOut": 15,
+    "complexityDensity": 0.7,
+    "churn": 1000
+  },
+  // Each entry names the file, the ceiling it stands over, the ceiling it is
+  // held to instead, and why. An entry that no longer holds back a violation
+  // fails the run, so the list stays as short as the code makes it.
+  "exceptions": []
+}

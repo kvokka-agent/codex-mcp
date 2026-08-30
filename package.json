@@ -39,7 +39,8 @@
     "smoke:mcp": "bun scripts/mcp-smoke.mjs",
     "lint": "biome check",
     "lint:md": "rumdl check .",
-    "lint:fallow": "bun run coverage && fallow",
+    "lint:fallow": "bun run coverage && bun run gate",
+    "gate": "fallow dead-code && fallow dupes && fallow health && bun scripts/fallow-gate.mjs",
     "format": "biome format --write"
   },
   "keywords": [

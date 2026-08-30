@@ -9,15 +9,18 @@ repos:
         entry: bunx biome check --write --no-errors-on-unmatched
         language: system
         files: \.(ts|mjs|js|jsonc?)$
-      # The fallow analysis that reads the sources alone. Its CRAP gate needs the
-      # coverage a test run writes, which is what `bun run lint:fallow` does in
-      # the check gate and in CI; this hook answers before the commit instead.
+      # The whole quality gate, and the reason a commit takes half a minute: the
+      # CRAP thresholds of `.fallowrc.jsonc` are only as true as the coverage
+      # report behind them, so the suite runs first and fallow reads what it
+      # measured. Each fallow analysis is called by name — the combined `fallow`
+      # run exits 0 in every machine-readable format, so a gate built on it
+      # passes whatever it found.
       - id: fallow
         name: fallow
-        entry: bunx fallow dead-code
+        entry: bun run lint:fallow
         language: system
         pass_filenames: false
-        files: \.(ts|mjs|js)$
+        files: \.(ts|mjs|js|jsonc?)$
       - id: rumdl
         name: rumdl
         entry: bunx rumdl check
