@@ -237,6 +237,7 @@ describe("executeCodexCheck", () => {
           "result",
           "sessionId",
           "status",
+          "warnings",
         ]);
         const serialized = JSON.stringify(res);
         expect(serialized).not.toContain("chunk-");

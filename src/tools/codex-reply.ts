@@ -7,6 +7,7 @@
 import type { SessionManager } from "../session/manager.js";
 import type {
   ApprovalPolicy,
+  ApprovalsReviewer,
   EffortLevel,
   Personality,
   SandboxMode,
@@ -20,6 +21,8 @@ export interface CodexReplyParams {
   prompt: string;
   model?: string;
   approvalPolicy?: ApprovalPolicy;
+  approvalsReviewer?: ApprovalsReviewer;
+  permissions?: string;
   effort?: EffortLevel;
   summary?: SummaryMode;
   personality?: Personality;
@@ -37,6 +40,8 @@ export async function executeCodexReply(
   const startResult = await sessionManager.replyToSession(args.sessionId, args.prompt, {
     model: args.model,
     approvalPolicy: args.approvalPolicy,
+    approvalsReviewer: args.approvalsReviewer,
+    permissions: args.permissions,
     effort: args.effort,
     summary: args.summary,
     personality: args.personality,

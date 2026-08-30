@@ -49,7 +49,7 @@ export const RESOURCE_URIS = {
 
 type RuntimeMetadataProvider = Pick<
   SessionManager,
-  "getActiveSessionCount" | "getObservedDefaultModel"
+  "getActiveSessionCount" | "getCodexDefaultModel"
 >;
 
 export interface ResourceDeps {
@@ -161,9 +161,16 @@ function configTopLevelLines(defaults: SessionDefaults): string[] {
   return [
     "## Top-level parameters (`codex`)",
     "",
-    `- Required: ${["`prompt`", defaults.approvalPolicy ? "" : "`approvalPolicy`", defaults.sandbox ? "" : "`sandbox`"].filter(Boolean).join(", ")}.`,
-    `- Optional: ${defaults.approvalPolicy ? `\`approvalPolicy\` (default \`${defaults.approvalPolicy}\`), ` : ""}${defaults.sandbox ? `\`sandbox\` (default \`${defaults.sandbox}\`), ` : ""}\`effort\` (default \`${defaults.effort}\`), \`cwd\` (default server cwd), \`model\` (default ${defaults.model ? `\`${defaults.model}\`` : "config.toml"}), \`profile\` (default CLI profile), \`advanced\`.`,
+    `- Required: ${["`prompt`", defaults.approvalPolicy ? "" : "`approvalPolicy`"].filter(Boolean).join(", ")}.`,
+    `- Optional: ${defaults.approvalPolicy ? `\`approvalPolicy\` (default \`${defaults.approvalPolicy}\`), ` : ""}\`sandbox\`${defaults.sandbox ? ` (default \`${defaults.sandbox}\`)` : ""}, \`permissions\`, \`approvalsReviewer\` (default \`user\`), \`effort\` (default \`${defaults.effort}\`), \`cwd\` (default server cwd), \`model\` (default ${defaults.model ? `\`${defaults.model}\`` : "config.toml"}), \`profile\` (default CLI profile), \`advanced\`.`,
+    defaults.sandbox
+      ? "- Name `sandbox` or `permissions`, never both. A call that names neither starts on the sandbox `" +
+        defaults.sandbox +
+        "`."
+      : "- Name `sandbox` or `permissions`: the call carries one of the two, and never both.",
+    "- `permissions`: a named profile id such as `:read-only` or `:workspace`, from a `[permissions.<id>]` table of the Codex config. It carries the sandbox and the approval policy the profile sets, and `codex_setup` lists the ids this machine offers. An id it does not offer is refused before the thread starts, with the list of the ids it does.",
     "- Prefer passing `cwd` explicitly to avoid accidental server-cwd execution.",
+    `- \`approvalsReviewer\`: who decides an approval the turn raises. \`user\` reports it in \`codex_check.actions[]\` for you to answer; \`auto_review\` hands it to a Codex subagent that decides it inside Codex, and a review that denies an action arrives as \`progress.activity\` and as an \`approval_result\` record in the session's event log.`,
     "",
     "## `advanced.*` guide",
     "",
@@ -191,19 +198,20 @@ function configMappingLines(): string[] {
     "- `codex.model` -> `-c model=...`",
     "- `codex.approvalPolicy` -> `-c approval_policy=...`",
     "- `codex.sandbox` -> `-c sandbox_mode=...`",
+    "- `codex.permissions` -> `thread/start.permissions`; no `-c` flag, and no `-c sandbox_mode=` is sent with it",
     "- `codex.effort` -> turn-level reasoning effort (do not encode in `advanced.config`)",
     "- `codex.profile` -> `-p ...`",
     "",
     "## `codex_reply` differences",
     "",
     "- `codex_reply.outputSchema` is top-level; `codex` takes the same schema as `advanced.outputSchema`.",
-    "- `codex_reply` can override `model`, `approvalPolicy`, `sandbox`, `effort`, `summary`, `personality`, and `cwd`.",
+    "- `codex_reply` can override `model`, `approvalPolicy`, `approvalsReviewer`, `sandbox` or `permissions`, `effort`, `summary`, `personality`, and `cwd`.",
     "- `codex_reply` only works when session state is `idle` or `error`; otherwise returns `SESSION_BUSY`.",
     "- All `codex_reply` override fields default to no override when omitted.",
     "",
     "## Override persistence (`codex_reply`)",
     "",
-    "- `model`, `approvalPolicy`, `sandbox`, and `cwd` update in-memory session defaults for later turns.",
+    "- `model`, `approvalPolicy`, `approvalsReviewer`, `sandbox`, `permissions`, and `cwd` update in-memory session defaults for later turns.",
     "- `effort`, `summary`, `personality`, and `outputSchema` apply to the submitted turn payload.",
     "",
   ];
@@ -264,9 +272,9 @@ function buildGotchasText(defaults: SessionDefaults): string {
     "## Checking a session",
     "",
     '- Sessions are async. Check `codex_check(action="poll")` until status is `idle`/`error`/`cancelled`.',
-    "- Every action answers with the same payload: `{ sessionId, status, progress, actions[], result?, interactionState, recommendedNextAction }`.",
+    "- Every action answers with the same payload: `{ sessionId, status, progress, actions[], warnings[], result?, interactionState, recommendedNextAction }`.",
     "- No event stream reaches the caller. Codex writes the turn's own history to its rollout log under `~/.codex/sessions/`, and codex-mcp does not repeat it.",
-    `- \`waitMs\` (max ${MAX_LONG_POLL_WAIT_MS}) holds the call until the status changes, an action arrives, the turn ends, or Codex says it is working on something new. Reasoning, command output and token counters do not end the wait.`,
+    `- \`waitMs\` (max ${MAX_LONG_POLL_WAIT_MS}) holds the call until the status changes, an action arrives, the turn ends, a new warning arrives, or Codex says it is working on something new. Reasoning, command output and token counters do not end the wait.`,
     "- **Check frequency guidance**: pass `waitMs: 300000` and call again with the same arguments. Each answer carries the whole state, so nothing is carried between rounds. Without `waitMs` the call answers at once and you are polling on a timer, which spends a round trip per tick.",
     "- **A round that answers with nothing new** held the call for the whole window — `waitedMs` says so — and means the turn is still on the same line, not that the poll was too long.",
     "- **A caller nobody can see**: `notifications/progress` reaches the MCP client, and a client renders it under the call it made itself, so a call made inside a subagent shows the person watching nothing. Such a caller writes the line itself after every round — the new `progress.activity`, or the standing one with `progress.activityStandingMs` in minutes — under a marker its own delegator can pick out of the output.",
@@ -286,6 +294,7 @@ function buildGotchasText(defaults: SessionDefaults): string {
     "- The app-server `Turn` carries no text field: `result.turn` holds `turn.status` and `turn.error`, and the answer stays in `result.text`.",
     "- `progress` normalizes the current phase, the pending action count, the time of the last event, the active turn id and the token totals the backend has reported.",
     "- `progress.activity` is one line in Codex's own words saying what it is doing right now — `\"Разбираю падение теста в session-manager\"`. The server tells every thread it starts to mark such a line as `%%%ACTIVITY: ...%%%`, lifts it out of the agent-message stream and overwrites the previous one. It is a heading, not a percentage: it says nothing about how much is done, it is absent until the turn's first marker, and it is cut out of `result.text`.",
+    "- `warnings[]` says why a turn is producing no output: a backend `warning` or `guardianWarning`, a `model/safetyBuffering/updated` naming the reasons the model's output is held back, or a hook of the user's own codex config that blocked, failed or was stopped. `progress.activity` is what the turn is doing; a warning is what stands in its way. The five newest are kept, and a hook that wrote a display line stands in `progress.activity` while the turn has written no marker.",
     "- A retryable interruption keeps the session `running` and shows up as a phase that does not advance; a failure the backend will not retry moves the session to `error`, where `result.error` says what happened.",
     "",
     "## Windows shell/profile issues",
@@ -361,6 +370,7 @@ function quickstartCheckLines(defaults: SessionDefaults): string[] {
     "",
     "- The answer is the session state — status, progress, actions, and the final result once the turn ends. It never carries the turn's events; those are in the Codex rollout log under `~/.codex/sessions/`.",
     "- `waitMs` holds the call until the status changes, an action arrives, the turn ends, or Codex says it is working on something new. 300000 is the round the driver is written for: long enough that a quiet turn costs twelve calls an hour, short enough that a silent stretch still gets reported.",
+    "- Write every new `warnings[]` entry out too: it is what a turn that is answering nothing says about itself, and the activity line stays where it was while one stands.",
     "- Write `progress.activity` out after every round that came back with the turn still running, then call again. `progress.activityStandingMs` says how long that same line has stood, so a repeat reads `compiling the workspace — 15 min` rather than the same sentence twice.",
     "- Without `waitMs`, use `pollInterval` as a minimum delay: `running` >=120000ms (and usually longer for big tasks).",
     "- `waiting_approval` is the exception: poll/answer around 1000ms to avoid timeout.",
@@ -482,6 +492,8 @@ function delegationTaskLines(): string[] {
     "",
     "**Key rule:** `read-only` sandbox already prevents writes, so `approvalPolicy: 'never'` is safe with it. Avoid `untrusted` + `read-only` — every read command triggers approval for no safety gain.",
     "",
+    "A `permissions` profile id replaces the `sandbox` column: it carries the sandbox and the approval policy its `[permissions.<id>]` table sets. Name one or the other, never both. `codex_setup` lists the ids this machine offers.",
+    "",
   ];
 }
 
@@ -502,6 +514,12 @@ function delegationPolicyLines(defaults: SessionDefaults): string[] {
     "- `never`: no interactive prompts, and no escalation either — a command that needs approval is refused with `approval required by policy, but AskForApproval is set to Never`. Pair it with a sandbox that already permits the work: `read-only` for review, `danger-full-access` for an unattended run.",
     "- `on-request`: Codex works inside the sandbox and asks when it wants to step outside it. The pragmatic choice for implementation work, and it needs a human or outer agent polling to answer.",
     "- `untrusted`: strictest interactive mode; expect frequent prompts and higher timeout sensitivity.",
+    "",
+    "## Who answers an approval (`approvalsReviewer`)",
+    "",
+    "- `user` (the default) routes every approval to you: `codex_check` reports it in `actions[]` and `respond_permission` answers it. It needs a caller polling, and an unanswered request auto-declines.",
+    "- `auto_review` routes it to a Codex subagent that gathers context and applies a risk-based decision framework. Pair it with `on-request` for a run nobody watches: the turn can step outside its sandbox where the review approves, instead of being refused the way `never` refuses it.",
+    '- A review that denies an action becomes `progress.activity` — "Approval auto-review denied an action of this turn" — so the next poll says why the turn did what it did.',
     `- Default approval timeout is ${defaults.approvalTimeoutMs}ms. If interactive approvals are possible, raise \`advanced.approvalTimeoutMs\` to at least 300000 so requests do not expire between normal running-session polls.`,
     "",
     "## The loop",
@@ -611,7 +629,6 @@ function buildCompatReport(deps: ResourceDeps, codexCliVersion: string | null): 
 }
 
 function buildServerInfoJson(deps: ResourceDeps, getCodexCliVersion: () => string | null): string {
-  const observedModel = deps.sessionManager.getObservedDefaultModel();
   return JSON.stringify(
     {
       name: "codex-mcp",
@@ -626,8 +643,10 @@ function buildServerInfoJson(deps: ResourceDeps, getCodexCliVersion: () => strin
       supportedSandboxModes: SANDBOX_MODES,
       advertisedEffortLevels: ADVERTISED_EFFORT_LEVELS,
       activeSessions: deps.sessionManager.getActiveSessionCount(),
-      defaultModel: observedModel,
-      defaultModelSource: observedModel ? "session-default" : "unknown",
+      // The model Codex answered a `thread/start` that named none with, and
+      // null while no start has measured it. It carries no source field: this
+      // is the one place it comes from, and null already says unknown.
+      defaultModel: deps.sessionManager.getCodexDefaultModel(),
       resources: RESOURCE_CATALOG.map((entry) => ({
         uri: RESOURCE_URIS[entry.key],
         title: entry.title,

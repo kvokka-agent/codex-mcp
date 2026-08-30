@@ -31,6 +31,21 @@ class MockClient extends EventEmitter {
   threadFork = jest.fn(async () => ({ thread: { id: "thread_forked" } }));
   threadResume = jest.fn(async () => ({ thread: { id: "thread_forked" } }));
   threadBackgroundTerminalsClean = jest.fn(async (_params: { threadId: string }) => ({}));
+  /** The pages `thread/backgroundTerminals/list` answers, in order. */
+  backgroundTerminalPages: { data: unknown[]; nextCursor?: string | null }[] = [{ data: [] }];
+  threadBackgroundTerminalsList = jest.fn(
+    async (_params: { threadId: string; cursor?: string }) => {
+      const page = this.backgroundTerminalPages.shift() ?? { data: [] };
+      return page as { data: never[]; nextCursor?: string | null };
+    }
+  );
+  /** What terminate answers per processId; anything unnamed dies. */
+  terminateAnswers = new Map<string, boolean>();
+  threadBackgroundTerminalsTerminate = jest.fn(
+    async (params: { threadId: string; processId: string }) => ({
+      terminated: this.terminateAnswers.get(params.processId) ?? true,
+    })
+  );
   turnStart = jest.fn(async (_params: unknown) => this.turnStartResult);
   turnInterrupt = jest.fn(async () => {});
   respondToServer = jest.fn((_id: number, _result: unknown) => {});
@@ -490,37 +505,164 @@ describe("SessionManager session operations", () => {
     jest.restoreAllMocks();
   });
 
-  it("cleans background terminals and records the request as an event", async () => {
-    const started = await manager.createSession("hi", workspace, {}, "medium");
+  const terminal = (processId: string) => ({
+    command: `sleep ${processId}`,
+    cwd: workspace,
+    itemId: `item_${processId}`,
+    processId,
+    osPid: 4242,
+  });
 
-    await manager.cleanBackgroundTerminals(started.sessionId);
+  it("reports a thread with no background terminals as terminating none", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.backgroundTerminalPages = [{ data: [] }, { data: [] }];
+
+    const report = await manager.cleanBackgroundTerminals(started.sessionId);
+
+    expect(report).toEqual({
+      threadId: present(started.threadId, "the thread id"),
+      terminals: [],
+      truncated: false,
+      survivors: [],
+    });
+    expect(client.threadBackgroundTerminalsTerminate).not.toHaveBeenCalled();
+    expect(client.threadBackgroundTerminalsClean).not.toHaveBeenCalled();
+  });
+
+  it("terminates every listed background terminal and measures that they are gone", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.backgroundTerminalPages = [
+      { data: [terminal("proc_1")], nextCursor: "page_2" },
+      { data: [terminal("proc_2")], nextCursor: null },
+      { data: [] },
+    ];
+
+    const report = await manager.cleanBackgroundTerminals(started.sessionId);
+
+    expect(client.threadBackgroundTerminalsTerminate.mock.calls.map(([p]) => p.processId)).toEqual([
+      "proc_1",
+      "proc_2",
+    ]);
+    expect(report.terminals.map((t) => [t.processId, t.terminated, t.gone])).toEqual([
+      ["proc_1", true, true],
+      ["proc_2", true, true],
+    ]);
+    expect(report.terminals[0]?.command).toBe("sleep proc_1");
+    expect(report.survivors).toEqual([]);
+    expect(report.truncated).toBe(false);
+
+    const recorded = present(
+      events(started.sessionId).find(
+        (event) => event.data?.method === Methods.THREAD_BACKGROUND_TERMINALS_TERMINATE
+      ),
+      "the background-terminal event"
+    );
+    expect(recorded.data.terminals).toBe(2);
+    expect(recorded.data.gone).toBe(2);
+    expect(recorded.data.surviving).toBe(0);
+  });
+
+  it("reports the terminal that survived the clean", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.terminateAnswers.set("proc_2", false);
+    client.backgroundTerminalPages = [
+      { data: [terminal("proc_1"), terminal("proc_2")] },
+      { data: [terminal("proc_2")] },
+    ];
+
+    const report = await manager.cleanBackgroundTerminals(started.sessionId);
+
+    expect(report.terminals.map((t) => [t.processId, t.terminated, t.gone])).toEqual([
+      ["proc_1", true, true],
+      ["proc_2", false, false],
+    ]);
+    expect(report.survivors?.map((t) => t.processId)).toEqual(["proc_2"]);
+  });
+
+  it("carries a failed terminate into the report instead of throwing", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.backgroundTerminalPages = [
+      { data: [terminal("proc_1")] },
+      { data: [terminal("proc_1")] },
+    ];
+    client.threadBackgroundTerminalsTerminate = jest.fn(async () => {
+      throw new Error("Error [INTERNAL]: terminate refused");
+    });
+
+    const report = await manager.cleanBackgroundTerminals(started.sessionId);
+
+    expect(report.terminals[0]?.terminated).toBeUndefined();
+    expect(report.terminals[0]?.error).toContain("terminate refused");
+    expect(report.terminals[0]?.gone).toBe(false);
+  });
+
+  it("stops at the page bound and says the listing was cut short", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    let page = 0;
+    client.threadBackgroundTerminalsList = jest.fn(async () => {
+      page += 1;
+      return { data: [terminal(`proc_${page}`)], nextCursor: `page_${page + 1}` };
+    });
+
+    const report = await manager.cleanBackgroundTerminals(started.sessionId);
+
+    // MAX_BACKGROUND_TERMINAL_PAGES pages, then the pass stops with the cursor standing.
+    expect(report.truncated).toBe(true);
+    expect(report.terminals).toHaveLength(20);
+    expect(report.terminals.at(-1)?.processId).toBe("proc_20");
+    expect(report.listError).toBeUndefined();
+  });
+
+  it("sweeps with clean and calls the state unknown when the listing fails", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.threadBackgroundTerminalsList = jest.fn(async () => {
+      throw new Error("Error [INTERNAL]: unknown method thread/backgroundTerminals/list");
+    });
+
+    const report = await manager.cleanBackgroundTerminals(started.sessionId);
 
     expect(client.threadBackgroundTerminalsClean).toHaveBeenCalledWith({
       threadId: started.threadId,
     });
-    const cleaned = events(started.sessionId).find(
-      (event) => event.data?.method === Methods.THREAD_BACKGROUND_TERMINALS_CLEAN
-    );
-    expect(cleaned).toBeDefined();
-    const cleanEvent = present(cleaned, "the thread/backgroundTerminals/clean event");
-    expect(cleanEvent.data.status).toBe("requested");
+    expect(report.terminals).toEqual([]);
+    expect(report.cleanCalled).toBe(true);
+    expect(report.survivors).toBeUndefined();
+    expect(report.listError?.stage).toBe("before");
+    expect(report.listError?.message).toContain("thread/backgroundTerminals/list");
   });
 
-  it("pushes no event when the client refuses to clean background terminals", async () => {
+  it("leaves the fate of each terminal unknown when the second listing fails", async () => {
     const started = await manager.createSession("hi", workspace, {}, "medium");
-    client.threadBackgroundTerminalsClean = jest.fn(async () => {
-      throw new Error("Error [INTERNAL]: thread/backgroundTerminals/clean refused");
+    let listed = 0;
+    client.threadBackgroundTerminalsList = jest.fn(async () => {
+      listed += 1;
+      if (listed > 1) throw new Error("Error [INTERNAL]: list refused");
+      return { data: [terminal("proc_1")], nextCursor: null };
     });
 
-    await expect(manager.cleanBackgroundTerminals(started.sessionId)).rejects.toThrow(
-      "thread/backgroundTerminals/clean refused"
-    );
+    const report = await manager.cleanBackgroundTerminals(started.sessionId);
 
-    expect(
-      events(started.sessionId).some(
-        (event) => event.data?.method === Methods.THREAD_BACKGROUND_TERMINALS_CLEAN
-      )
-    ).toBe(false);
+    expect(report.terminals[0]?.terminated).toBe(true);
+    expect(report.terminals[0]?.gone).toBeUndefined();
+    expect(report.survivors).toBeUndefined();
+    expect(report.listError).toEqual({ stage: "after", message: "Error [INTERNAL]: list refused" });
+  });
+
+  it("answers terminated:false for one terminal that would not die", async () => {
+    const started = await manager.createSession("hi", workspace, {}, "medium");
+    client.terminateAnswers.set("proc_9", false);
+
+    const report = await manager.terminateBackgroundTerminal(started.sessionId, "proc_9");
+
+    expect(client.threadBackgroundTerminalsTerminate).toHaveBeenCalledWith({
+      threadId: started.threadId,
+      processId: "proc_9",
+    });
+    expect(report).toEqual({
+      threadId: present(started.threadId, "the thread id"),
+      terminals: [{ processId: "proc_9", terminated: false }],
+    });
+    expect(client.threadBackgroundTerminalsList).not.toHaveBeenCalled();
   });
 
   it("refuses to clean background terminals of a cancelled session", async () => {
@@ -529,9 +671,9 @@ describe("SessionManager session operations", () => {
 
     // The session exists and was cancelled — CANCELLED, never SESSION_NOT_FOUND.
     await expect(manager.cleanBackgroundTerminals(started.sessionId)).rejects.toThrow(
-      `Error [CANCELLED]: Session '${started.sessionId}' has been cancelled and cannot be cleaned`
+      `Error [CANCELLED]: Session '${started.sessionId}' has been cancelled and its background terminals cannot be reached`
     );
-    expect(client.threadBackgroundTerminalsClean).not.toHaveBeenCalled();
+    expect(client.threadBackgroundTerminalsList).not.toHaveBeenCalled();
   });
 
   it("refuses to interrupt a cancelled session", async () => {
@@ -574,7 +716,7 @@ describe("SessionManager session operations", () => {
     internalSession(manager, started.sessionId).threadId = undefined;
 
     await expect(manager.cleanBackgroundTerminals(started.sessionId)).rejects.toThrow(
-      "has no threadId, cannot clean background terminals"
+      "has no threadId, so it has no background terminals to reach"
     );
   });
 
@@ -610,8 +752,10 @@ describe("SessionManager session operations", () => {
   });
 
   it("keeps no active turn when turn/start puts the id outside `turn`", async () => {
-    // turn/steer is the one response of the bundle answering a bare `turnId`
-    // (codex-schema/v2/TurnSteerResponse.json), and this server never sends it.
+    // A bare `turnId` is the shape `turn/steer` answers
+    // (codex-schema/v2/TurnSteerResponse.json), and that id names a turn already
+    // running — `turn/start` naming its id that way starts nothing this server
+    // can address.
     client.turnStartResult = { turnId: "turn_v1" };
     const started = await manager.createSession("hi", workspace, {}, "medium");
 
@@ -765,14 +909,6 @@ describe("SessionManager session operations", () => {
       }
     }
     expect(manager.getPendingActionTypes(started.sessionId)).toEqual([]);
-  });
-
-  it("ignores cancelled and model-less sessions when guessing the default model", async () => {
-    const first = await manager.createSession("hi", workspace, { model: "gpt-a" }, "medium");
-    await manager.cancelSession(first.sessionId, "by test");
-    await manager.createSession("hi", workspace, {}, "medium");
-
-    expect(manager.getObservedDefaultModel()).toBeNull();
   });
 
   it("writes session metadata once per status change", async () => {

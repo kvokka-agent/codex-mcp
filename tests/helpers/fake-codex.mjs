@@ -55,21 +55,38 @@ let threadId = null;
 let turnCounter = 0;
 let activeTurnId = null;
 
+/**
+ * The settings block every thread response carries. The real app-server answers
+ * what the thread ended up running with; this one answers the same values every
+ * time, so a test reads a fixed answer rather than its own request echoed back.
+ */
+const THREAD_SETTINGS = {
+  model: "fake-default-model",
+  modelProvider: "fake-provider",
+  approvalPolicy: "on-request",
+  sandbox: { type: "workspaceWrite", networkAccess: false },
+  reasoningEffort: "medium",
+};
+
+function threadReply(id) {
+  return { ...THREAD_SETTINGS, cwd: process.cwd(), thread: { id, status: { type: "idle" } } };
+}
+
 function startThread(msg) {
   threadId = `thr_${randomUUID()}`;
-  reply(msg.id, { thread: { id: threadId, status: { type: "idle" } } });
+  reply(msg.id, threadReply(threadId));
   notify("thread/started", { threadId, thread: { id: threadId, status: { type: "idle" } } });
 }
 
 function resumeThread(msg) {
   threadId = msg.params?.threadId ?? threadId;
-  reply(msg.id, { thread: { id: threadId, status: { type: "idle" } } });
+  reply(msg.id, threadReply(threadId));
   notify("thread/started", { threadId, thread: { id: threadId, status: { type: "idle" } } });
 }
 
 function forkThread(msg) {
   const forked = `thr_${randomUUID()}`;
-  reply(msg.id, { thread: { id: forked, status: { type: "idle" } } });
+  reply(msg.id, threadReply(forked));
 }
 
 function interruptTurn(msg) {

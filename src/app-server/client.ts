@@ -15,6 +15,8 @@ import type { ICodexClient } from "./client-interface.js";
 import { resolveCodexInvocation } from "./codex-bin.js";
 import { type AppServerSpawnOptions, buildAppServerArgs } from "./lifecycle.js";
 import {
+  type GetAccountParams,
+  type GetAccountResult,
   type InitializeParams,
   type InitializeResult,
   type JsonRpcMessage,
@@ -22,8 +24,14 @@ import {
   type JsonRpcRequest,
   type JsonRpcResponse,
   Methods,
+  type PermissionProfileListParams,
+  type PermissionProfileListResult,
   type RequestId,
   type ThreadBackgroundTerminalsCleanParams,
+  type ThreadBackgroundTerminalsListParams,
+  type ThreadBackgroundTerminalsListResult,
+  type ThreadBackgroundTerminalsTerminateParams,
+  type ThreadBackgroundTerminalsTerminateResult,
   type ThreadDeleteParams,
   type ThreadForkParams,
   type ThreadForkResult,
@@ -34,6 +42,9 @@ import {
   type TurnInterruptParams,
   type TurnStartParams,
   type TurnStartResult,
+  type TurnSteerParams,
+  type TurnSteerResult,
+  type WindowsSandboxReadinessResult,
 } from "./protocol.js";
 
 declare const __PKG_VERSION__: string;
@@ -225,8 +236,41 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
     return this.request<Record<string, never>>(Methods.THREAD_BACKGROUND_TERMINALS_CLEAN, params);
   }
 
+  async threadBackgroundTerminalsList(
+    params: ThreadBackgroundTerminalsListParams
+  ): Promise<ThreadBackgroundTerminalsListResult> {
+    return this.request<ThreadBackgroundTerminalsListResult>(
+      Methods.THREAD_BACKGROUND_TERMINALS_LIST,
+      params
+    );
+  }
+
+  async threadBackgroundTerminalsTerminate(
+    params: ThreadBackgroundTerminalsTerminateParams
+  ): Promise<ThreadBackgroundTerminalsTerminateResult> {
+    return this.request<ThreadBackgroundTerminalsTerminateResult>(
+      Methods.THREAD_BACKGROUND_TERMINALS_TERMINATE,
+      params
+    );
+  }
+
   async threadDelete(params: ThreadDeleteParams): Promise<Record<string, never>> {
     return this.request<Record<string, never>>(Methods.THREAD_DELETE, params);
+  }
+
+  async permissionProfileList(
+    params: PermissionProfileListParams
+  ): Promise<PermissionProfileListResult> {
+    return this.request<PermissionProfileListResult>(Methods.PERMISSION_PROFILE_LIST, params);
+  }
+
+  async accountRead(params: GetAccountParams = {}): Promise<GetAccountResult> {
+    return this.request<GetAccountResult>(Methods.ACCOUNT_READ, params);
+  }
+
+  async windowsSandboxReadiness(): Promise<WindowsSandboxReadinessResult> {
+    // The schema types this method's params as null, not as an object.
+    return this.request<WindowsSandboxReadinessResult>(Methods.WINDOWS_SANDBOX_READINESS, null);
   }
 
   async turnStart(
@@ -238,6 +282,10 @@ export class AppServerClient extends EventEmitter implements ICodexClient {
 
   async turnInterrupt(params: TurnInterruptParams): Promise<void> {
     await this.request<void>(Methods.TURN_INTERRUPT, params);
+  }
+
+  async turnSteer(params: TurnSteerParams): Promise<TurnSteerResult> {
+    return this.request<TurnSteerResult>(Methods.TURN_STEER, params);
   }
 
   // ── Low-level JSON-RPC ─────────────────────────────────────────

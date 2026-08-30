@@ -7,8 +7,9 @@ How the five tools are used together. Each tool's inputs are in
 
 ```text
 1. codex(prompt=…, approvalPolicy=…, sandbox=…)   → { sessionId, status: "running" }
-2. codex_check(action="poll", waitMs=300000)      → status, progress, actions[]
-3. write progress.activity out where the person waiting reads it
+2. codex_check(action="poll", waitMs=300000)      → status, progress, actions[], warnings[]
+3. write progress.activity and every new warnings[] entry out where the person
+   waiting reads them
 4. answer every entry of actions[]                → respond_permission / respond_user_input
 5. repeat 2 until status is idle, error or cancelled
 6. read result from the check that first saw the terminal status
@@ -17,15 +18,17 @@ How the five tools are used together. Each tool's inputs are in
 
 A start never blocks for the result, so step 2 is the only place the caller
 waits. `codex_session(action="interrupt")` stops the current turn without ending
-the session.
+the session, and `codex_session(action="steer", prompt=…)` corrects it without
+stopping it — the turn carries on and answers once, at its end.
 
 ## Checking
 
 `codex_check(action="poll")` answers at once. With `waitMs` it holds the call
-until the status changes, an action arrives, the turn ends, or Codex says it is
-working on something new — one call covering a stretch that would otherwise be
-dozens of round trips. Message deltas, reasoning, command output and token
-counters move nothing the caller reports and do not end the wait.
+until the status changes, an action arrives, the turn ends, a new warning
+arrives, or Codex says it is working on something new — one call covering a
+stretch that would otherwise be dozens of round trips. Message deltas,
+reasoning, command output and token counters move nothing the caller reports and
+do not end the wait.
 
 `waitedMs` says how long the call was held, and `progress.activityStandingMs` how
 long the session has been on the line it answers with. A caller that polls in
@@ -88,6 +91,27 @@ Every extracted line is also appended to the session's `events.jsonl` as an
 `activity` record, so a reader of the state directory gets the sequence of what
 a session was doing without reading the raw stream around it.
 
+### When it is doing nothing
+
+A turn can be quiet because it is blocked rather than because it is thinking, and
+the marker cannot say so — a model writing nothing writes no marker either. What
+the backend says instead arrives in `warnings[]`, each entry
+`{ method, message, at }`:
+
+- `warning` and `guardianWarning` — free text the backend wrote for the person.
+- `model/safetyBuffering/updated` — the model's output is being held back, with
+  the reasons the backend named.
+- `hook/completed` — a hook of the user's own `~/.codex` config blocked, failed
+  or was stopped, with whatever the hook said about it.
+
+A `hook/started` or `hook/completed` that carries a `statusMessage` its author
+wrote for display — "Loading the engineering rules" — also stands in
+`progress.activity`, but only while the turn has written no marker of its own.
+Codex's own words always win, and the next turn starts the hooks speaking again.
+
+The five newest warnings are kept and the backend repeating one adds no entry, so
+a hook that fires per tool call costs one line, not one per call.
+
 ### While the call is still held
 
 A caller that put `_meta.progressToken` on its `tools/call` is sent, for as long
@@ -129,8 +153,48 @@ Answering several open actions at once is allowed, and a response that arrives
 after the request was already resolved answers `REQUEST_NOT_FOUND`. Answering
 them one at a time avoids that entirely.
 
+`approvalsReviewer: "auto_review"` moves the decision inside Codex: a subagent
+gathers context and decides, and nothing arrives in `actions[]` for the caller
+to answer. What the caller reads is the outcome. A review that denies, times out
+or is aborted overwrites `progress.activity` — "Approval auto-review denied an
+action of this turn" — and lands in the session's event log as an
+`approval_result` record carrying its `reviewId` and its status, so the next
+poll says why the turn did what it did. An approved review leaves the activity
+line the turn wrote alone.
+
 `denyMessage` is recorded in the event log for the person reading it later; it
 is not sent to Codex.
+
+## What a session runs with
+
+Two sets of settings, and `codex_session(action="get")` answers both.
+
+`model`, `approvalPolicy`, `sandbox`, `permissions`, `approvalsReviewer` and the
+rest are what the call asked for. `effective` is what Codex answered the thread
+call with — `model`, `modelProvider`, `reasoningEffort`, `approvalPolicy`,
+`sandbox`, `approvalsReviewer`, `activePermissionProfile`, and `cwd` with
+`includeSensitive: true` — and that is what the session runs with. A `codex`
+call naming no model leaves `model` absent and reads the model Codex picked from
+`config.toml` in `effective.model`; a call whose model the backend swapped reads
+the swap there too.
+
+`effective.activePermissionProfile` is `{ id, extends }` — the profile Codex
+derived the active permissions from, and `extends` only where that profile names
+a parent. It is where a session started on `permissions` reads its permission
+level: such a call sends no sandbox, so `sandbox` beside it is empty and
+`effective.sandbox` is the policy object the profile produced.
+`effective.approvalsReviewer` is who Codex routes this thread's approval
+requests to, which a call naming no reviewer reads here and nowhere else; the
+backend also answers the legacy spelling `guardian_subagent` for `auto_review`,
+and the session reports what it answered.
+
+An answer that did not carry a field leaves it out of `effective`, which says
+unknown. Nothing is filled in from the request: the request is already reported
+beside it.
+
+A resume replaces the whole block. `thread/resume` restores the thread from
+Codex's rollout log, so a session picked up by another server reports what that
+log says it runs with, including settings no `meta.json` ever recorded.
 
 ## Permission model
 
@@ -139,8 +203,13 @@ Three layers, and the first two are the caller's to set on every `codex` call.
 | Layer | What it is | Values |
 | --- | --- | --- |
 | Approval policy | How often Codex asks before acting | `untrusted`, `on-request`, `never` |
-| Sandbox | What Codex may touch | `read-only`, `workspace-write`, `danger-full-access` |
-| Arbitration | Who answers each request | the caller, through `codex_check`, within `approvalTimeoutMs` |
+| Sandbox | What Codex may touch | `read-only`, `workspace-write`, `danger-full-access`, or a `permissions` profile id in place of one |
+| Arbitration | Who answers each request | `approvalsReviewer: "user"` — the caller, through `codex_check`, within `approvalTimeoutMs`; `"auto_review"` — a Codex subagent, and the caller reads the outcome |
+
+A `permissions` profile is the third form of the second layer: it names a
+`[permissions.<id>]` table of the user's own Codex config, which carries the
+sandbox and the approval policy the profile sets. A call names `sandbox` or
+`permissions`, never both, and `codex_setup` lists the ids this machine offers.
 
 ## Who holds a session
 
@@ -214,6 +283,32 @@ directory a live server owns is skipped whatever its age.
 `codex_session(action="clean")` does the same on demand, filtered by `statuses`
 and `olderThanMs`, previewable with `dryRun`, and leaving the disk alone with
 `includeDisk: false`.
+
+## Steering a turn that is going the wrong way
+
+`codex_session(action="steer", sessionId, prompt)` adds to the turn already
+running: another task, a constraint, a directory it should not touch. Nothing
+already done is thrown away and no turn starts — the answer's `turnId` is the
+turn the steer joined.
+
+Codex reads the added text at the turn's next model round trip, so a steer sent
+as the turn ends misses it and answers `SESSION_NOT_RUNNING` rather than
+reporting a steer that landed. Steer as soon as a poll shows the turn going
+wrong, and read the answer.
+[TOOLS.md](TOOLS.md#steering-the-turn-that-is-running) is the field list.
+
+## Background terminals
+
+A turn can leave a command running in the background of its thread.
+`codex_session(action="clean_background_terminals", sessionId)` lists them,
+terminates each by its `processId`, and lists again, so the answer says which
+were there, which are gone and which are still running. Kill one instead of all
+with `action="terminate_background_terminal"` and the `processId` the clean
+reported. [TOOLS.md](TOOLS.md#the-background-terminals-of-a-thread) is the field
+list.
+
+Read `survivors` before calling the clean done: a process that ignored the
+terminate is in it, and so is one that started while the pass was running.
 
 ## When a session ends badly
 

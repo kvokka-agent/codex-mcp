@@ -152,27 +152,11 @@ const UNMODELED_SERVER_METHODS: Record<string, string> = {
   "serverRequest/resolved":
     "tells one client that another answered a shared server request; codex-mcp is the only client of the app-server it spawned",
 
-  // The auto_review approvals reviewer, which codex-mcp never selects.
-  "item/autoApprovalReview/started":
-    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
-  "item/autoApprovalReview/completed":
-    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
-  "autoApprovalReview/strictReviewRequired":
-    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
-  guardianWarning:
-    "the auto_review approvals reviewer; codex-mcp leaves approvalsReviewer at the schema default user",
-
   // Advisory payloads with no field in this server's tool output.
   "model/verification": "model-side verification metadata; codex-mcp reports the turn's answer",
-  "model/safetyBuffering/updated": "drives a buffering UI; codex-mcp renders none",
   "turn/moderationMetadata": "moderation metadata for a UI; codex-mcp reports the turn's answer",
-  warning:
-    "free-text display warning; the tool output carries errors and the compat warnings codex-mcp produced itself, and no field for a server warning",
   "item/fileChange/patchUpdated":
     "an updated patch preview for a file-change item; codex-mcp answers the approval from the request params and reports the item off item/completed",
-  "hook/started": "hooks from the user's own codex config; codex-mcp reports the turn around them",
-  "hook/completed":
-    "hooks from the user's own codex config; codex-mcp reports the turn around them",
 
   // Account and catalogue state owned by the codex CLI.
   "account/updated": "account management is done in the codex CLI, not through this server",
@@ -236,7 +220,10 @@ const MODELLED_TYPES: Record<string, string> = {
   ThreadResumeParams: "ThreadResumeParams",
   ThreadForkParams: "ThreadForkParams",
   ThreadBackgroundTerminalsCleanParams: "ThreadBackgroundTerminalsCleanParams",
+  ThreadBackgroundTerminalsListParams: "ThreadBackgroundTerminalsListParams",
+  ThreadBackgroundTerminalsTerminateParams: "ThreadBackgroundTerminalsTerminateParams",
   ThreadDeleteParams: "ThreadDeleteParams",
+  GetAccountParams: "GetAccountParams",
   TurnStartParams: "TurnStartParams",
   TurnSteerParams: "TurnSteerParams",
   TurnInterruptParams: "TurnInterruptParams",
@@ -263,6 +250,17 @@ const MODELLED_TYPES: Record<string, string> = {
   ReasoningTextDeltaNotification: "ReasoningDeltaParams",
   TurnStartedNotification: "TurnNotificationParams",
   TurnCompletedNotification: "TurnNotificationParams",
+  WarningNotification: "WarningNotificationParams",
+  GuardianWarningNotification: "GuardianWarningNotificationParams",
+  ModelSafetyBufferingUpdatedNotification: "ModelSafetyBufferingUpdatedNotificationParams",
+  HookStartedNotification: "HookNotificationParams",
+  HookCompletedNotification: "HookNotificationParams",
+  HookRunSummary: "HookRunSummary",
+  HookOutputEntry: "HookOutputEntry",
+  PermissionProfileListParams: "PermissionProfileListParams",
+  ItemGuardianApprovalReviewStartedNotification: "AutoApprovalReviewStartedParams",
+  ItemGuardianApprovalReviewCompletedNotification: "AutoApprovalReviewCompletedParams",
+  StrictReviewRequiredNotification: "StrictReviewRequiredParams",
 };
 
 /**
@@ -304,6 +302,12 @@ function findDefinition(name: string): JsonObject {
  * A response is read and never constructed, so protocol.ts models only what a
  * caller uses: field existence is checked one way, every field protocol.ts
  * declares against the schema, at every level.
+ *
+ * The three thread responses declare more than the id because a session reports
+ * the settings it runs with, and those are what Codex answered rather than what
+ * the call asked for. They share one type, `ThreadSettingsResult`: the schema
+ * gives the three files the same required block, so a field that drifts in one
+ * of them fails here for all three.
  */
 const MODELLED_RESULTS: Record<string, string> = {
   InitializeResult: "v1/InitializeResponse.json",
@@ -311,6 +315,11 @@ const MODELLED_RESULTS: Record<string, string> = {
   ThreadForkResult: "v2/ThreadForkResponse.json",
   ThreadResumeResult: "v2/ThreadResumeResponse.json",
   TurnStartResult: "v2/TurnStartResponse.json",
+  ThreadBackgroundTerminalsListResult: "v2/ThreadBackgroundTerminalsListResponse.json",
+  ThreadBackgroundTerminalsTerminateResult: "v2/ThreadBackgroundTerminalsTerminateResponse.json",
+  PermissionProfileListResult: "v2/PermissionProfileListResponse.json",
+  GetAccountResult: "v2/GetAccountResponse.json",
+  WindowsSandboxReadinessResult: "v2/WindowsSandboxReadinessResponse.json",
 };
 
 /**

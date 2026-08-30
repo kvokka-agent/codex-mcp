@@ -5,6 +5,12 @@
  * TypeScript types can derive from the same source of truth.
  */
 
+import type {
+  ApprovalsReviewer as AnsweredApprovalsReviewer,
+  AskForApproval,
+  SandboxPolicy,
+} from "./app-server/protocol.js";
+
 // ── Constants ──────────────────────────────────────────────────────
 
 export const APPROVAL_POLICIES = ["untrusted", "on-request", "never"] as const;
@@ -15,6 +21,18 @@ export type SandboxMode = (typeof SANDBOX_MODES)[number];
 
 export const PERSONALITIES = ["none", "friendly", "pragmatic"] as const;
 export type Personality = (typeof PERSONALITIES)[number];
+
+/**
+ * Who decides an approval request the turn raises.
+ *
+ * `user` routes it to the caller, which answers through `codex_check`.
+ * `auto_review` hands it to a Codex subagent that gathers context and applies a
+ * risk-based decision framework. The schema also accepts `guardian_subagent`,
+ * the legacy spelling of `auto_review`; this server neither publishes nor sends
+ * it.
+ */
+export const APPROVALS_REVIEWERS = ["user", "auto_review"] as const;
+export type ApprovalsReviewer = (typeof APPROVALS_REVIEWERS)[number];
 
 /**
  * The reasoning efforts every model of Codex CLI 0.150.1 answered `model/list`
@@ -36,9 +54,11 @@ export const SESSION_ACTIONS = [
   "resume",
   "cancel",
   "interrupt",
+  "steer",
   "fork",
   "clean",
   "clean_background_terminals",
+  "terminate_background_terminal",
 ] as const;
 export type SessionAction = (typeof SESSION_ACTIONS)[number];
 
@@ -74,6 +94,51 @@ export interface NetworkPolicyAmendment {
 }
 
 // ── Session Types ──────────────────────────────────────────────────
+
+/**
+ * The settings Codex answered the session's thread call with: what the session
+ * runs with, whatever the call asked for.
+ *
+ * A field is absent when the answer did not carry it in the shape
+ * `codex-schema/v2/ThreadStartResponse.json` gives it. Absent means unknown —
+ * the argument the call sent is never copied in to stand for the answer, and
+ * the session reports that argument under its own field.
+ */
+export interface EffectiveSettings {
+  model?: string;
+  modelProvider?: string;
+  /** The response omits it for a model that advertises no reasoning effort. */
+  reasoningEffort?: EffortLevel;
+  /** A policy preset, or the granular object naming each approval channel. */
+  approvalPolicy?: AskForApproval;
+  /** The sandbox policy object the thread runs under, as Codex answered it. */
+  sandbox?: SandboxPolicy;
+  cwd?: string;
+  /**
+   * Who Codex routes this thread's approval requests to. The legacy spelling
+   * `guardian_subagent` is carried through as answered.
+   */
+  approvalsReviewer?: AnsweredApprovalsReviewer;
+  /**
+   * The profile that produced the active permissions, which is what says where
+   * `sandbox` came from. Absent where the answer named none.
+   */
+  activePermissionProfile?: EffectivePermissionProfile;
+}
+
+/**
+ * The permission profile a session reports, read off the answer's
+ * `activePermissionProfile`.
+ */
+export interface EffectivePermissionProfile {
+  /** A built-in such as `:workspace`, or a `[permissions.<id>]` profile of the user's config. */
+  id: string;
+  /** The parent this profile extends. The answer's null names none, and is reported as absent. */
+  extends?: string;
+}
+
+/** The effective settings a redacted view carries: `cwd` is a path and stays out. */
+export type PublicEffectiveSettings = Omit<EffectiveSettings, "cwd">;
 
 /**
  * Where a session stands.
@@ -160,6 +225,22 @@ export interface ProgressInfo {
   activityStandingMs?: number;
 }
 
+/**
+ * One thing the backend said about a turn that is producing no output.
+ *
+ * The message is free text this server did not write — a backend warning, a
+ * named safety-buffering reason, a hook that blocked the turn — so it is
+ * path-redacted before it leaves the process. It says why the session is quiet;
+ * `progress.activity` says what the session is doing.
+ */
+export interface SessionWarning {
+  /** The app-server method that carried it, so a caller can tell the kinds apart. */
+  method: string;
+  message: string;
+  /** When it arrived. A repeat of the standing line refreshes this and adds no entry. */
+  at: string;
+}
+
 export type SessionEventType =
   | "output"
   | "progress"
@@ -214,6 +295,18 @@ export interface SessionInfo {
   profile?: string;
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
+  /**
+   * Named permission profile of this thread, from a `[permissions.<id>]` table
+   * of the user's Codex config. It replaces `sandbox`, which cannot be combined
+   * with it, and the same profile is restored on a fork and on a resume.
+   */
+  permissions?: string;
+  /**
+   * Who reviews the approval requests of this thread. Thread state: `thread/start`
+   * sets it, and `thread/fork` and `thread/resume` carry it so a forked or
+   * resumed session keeps the reviewer it ran under.
+   */
+  approvalsReviewer?: ApprovalsReviewer;
   personality?: Personality;
   /** Reasoning effort of the session's turns: `turn/start` carries it on every turn, and a turn that omits it falls back to config.toml. */
   effort?: EffortLevel;
@@ -232,9 +325,27 @@ export interface SessionInfo {
     activity?: string;
     /** When that line arrived, which is how long the session has been on it. */
     activityAt?: string;
+    /**
+     * The standing line came from a hook, not from an activity marker.
+     *
+     * A marker overwrites a hook line and a hook line never overwrites a marker,
+     * so the turn's own words win for as long as it writes any.
+     */
+    activityFromHook?: boolean;
   };
+  /** The newest warnings, oldest first, capped at `MAX_SESSION_WARNINGS`. */
+  warnings?: SessionWarning[];
+  /** How many warnings this session has recorded, which is what wakes a long poll. */
+  warningSeq?: number;
   /** Developer instructions the thread was started with, reused when it is forked or resumed. */
   developerInstructions?: string;
+  /**
+   * What Codex answered the last `thread/start`, `thread/fork` or
+   * `thread/resume` of this session with. Absent until one answers something
+   * readable, and each answer replaces the whole block: two answers merged
+   * would report a set of settings that never ran together.
+   */
+  effective?: EffectiveSettings;
 }
 
 /** Which server holds a session, as a listing reports it. */
@@ -255,6 +366,13 @@ export interface PublicSessionInfo {
   model?: string;
   approvalPolicy?: ApprovalPolicy;
   sandbox?: SandboxMode;
+  /**
+   * The permission profile id the call named in place of a sandbox. It names a
+   * permission level the same way `sandbox` does, so it is reported beside it.
+   */
+  permissions?: string;
+  /** Who the call asked to review its approval requests. */
+  approvalsReviewer?: ApprovalsReviewer;
   pendingRequestCount: number;
   /**
    * The last line the session said it was doing. On an abandoned session it is
@@ -271,6 +389,12 @@ export interface PublicSessionInfo {
   lastTurn?: LastTurnInfo;
   /** Absent when no server holds the session, which is what makes it resumable. */
   owner?: SessionOwnership;
+  /**
+   * The settings Codex answered with, which are what the session runs with.
+   * `model`, `approvalPolicy`, `sandbox`, `permissions` and `approvalsReviewer`
+   * above are what the call asked for.
+   */
+  effective?: PublicEffectiveSettings;
 }
 
 /** The end of a turn, as the session reports it after the fact. */
@@ -291,6 +415,8 @@ export interface SensitiveSessionInfo extends PublicSessionInfo {
   cwd?: string;
   profile?: string;
   config?: Record<string, unknown>;
+  /** The full block, `cwd` included. */
+  effective?: EffectiveSettings;
 }
 
 // ── Result Types ───────────────────────────────────────────────────
@@ -317,6 +443,59 @@ export interface TurnResult {
   turnError?: unknown;
   error?: string;
   completedAt: string;
+}
+
+/** One background terminal, and what the call did to it. */
+export interface BackgroundTerminalOutcome {
+  processId: string;
+  /**
+   * The rest of what `thread/backgroundTerminals/list` answered about it. Absent
+   * for `terminate_background_terminal`, which names a process and lists nothing.
+   */
+  itemId?: string;
+  command?: string;
+  cwd?: string;
+  osPid?: number | null;
+  cpuPercent?: number | null;
+  rssKb?: number | null;
+  /** What `thread/backgroundTerminals/terminate` answered. Absent when that call failed. */
+  terminated?: boolean;
+  /** Why the terminate call failed, when it did. */
+  error?: string;
+  /** Absent from the listing taken after the pass. Absent when that listing failed. */
+  gone?: boolean;
+}
+
+/** What a background-terminal call of `codex_session` measured. */
+export interface BackgroundTerminalsReport {
+  threadId: string;
+  /** Every terminal the call acted on. */
+  terminals: BackgroundTerminalOutcome[];
+  /** The listing taken after the pass. Absent when that listing failed. */
+  survivors?: BackgroundTerminalOutcome[];
+  /** The listing stopped at the page bound with a cursor still to follow. */
+  truncated?: boolean;
+  /** `thread/backgroundTerminals/clean` swept the thread; it reports nothing about what it swept. */
+  cleanCalled?: boolean;
+  /** The listing failed at this stage, so what stands afterwards is unknown. */
+  listError?: { stage: "before" | "after"; message: string };
+}
+
+/**
+ * What a steer came to.
+ *
+ * `turn/steer` adds input to the turn that is already running rather than
+ * starting one, so `turnId` names that turn and `status` is the status the
+ * session was already on.
+ */
+export interface SteerResult {
+  sessionId: string;
+  threadId: string;
+  /** The turn the steer joined — the running one, which Codex answered with. */
+  turnId: string;
+  status: SessionStatus;
+  /** What happened, in the terms a caller expecting a new turn needs to read. */
+  message: string;
 }
 
 export interface SessionStartResult {
@@ -364,6 +543,13 @@ export interface CheckResult {
   recommendedNextAction: RecommendedNextAction;
   /** What the caller must answer. Empty while the turn needs nothing. */
   actions: PendingAction[];
+  /**
+   * Why the turn is producing no output, newest last. Empty while nothing said so.
+   *
+   * A caller writes these out beside `progress.activity`: the activity line is
+   * what the turn is doing, and a warning is what is standing in its way.
+   */
+  warnings: SessionWarning[];
   /** The final answer of the turn, carried by the first check that sees it. */
   result?: TurnResult;
   /**

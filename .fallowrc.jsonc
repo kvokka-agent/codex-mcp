@@ -5,13 +5,14 @@
   "ignorePatterns": ["codex-schema/**"],
   "includeEntryExports": true,
   "duplicates": {
-    // 71 lines, 0.6% of lines today, in three groups: the two approval builders
+    // 86 lines, 0.6% of lines today, in four groups: the two approval builders
     // of `src/session/manager.ts` that already delegate to
-    // `awaitPendingRequest`, and the required and all-optional zod shapes of the
-    // same session fields in `src/server.ts`. Each pair carries something its
-    // twin does not — the shape of the MCP output schema, the decline path of a
-    // live approval — so they stay, and this budget leaves ten lines before a
-    // fourth group fails.
+    // `awaitPendingRequest`, the required and all-optional zod shapes of the
+    // same session fields in `src/server.ts`, and the listing entry against the
+    // flattened `codex_session` answer in the same file. Each pair carries
+    // something its twin does not — the shape of the MCP output schema, the
+    // decline path of a live approval — so they stay, and this budget leaves
+    // about a dozen lines before a fifth group fails.
     "threshold": 0.7
   },
   "health": {
