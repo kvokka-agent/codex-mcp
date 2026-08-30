@@ -36,6 +36,19 @@ The server needs `bun`, which starts it, the Codex CLI on `PATH`, and an OpenAI
 login. Where a session will not start, the subagent runs `codex_setup` and
 reports what it said.
 
+A plugin that depends on this one holds it at a range, and every release carries
+the `codex-mcp--v<version>` tag that a range resolves against:
+
+```json
+{
+  "dependencies": [{ "name": "codex-mcp", "marketplace": "codex-mcp", "version": "^3.0" }]
+}
+```
+
+The marketplace hosting that plugin lists `codex-mcp` under
+`allowCrossMarketplaceDependenciesOn`, which is what lets Claude Code install
+this one alongside it.
+
 ## Use
 
 Spawn the subagent and hand it the work:

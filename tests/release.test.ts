@@ -6,6 +6,7 @@ import {
   applyVersion,
   currentVersion,
   nextVersion,
+  pluginTag,
   ROOT,
   releaseLevel,
   TARGETS,
@@ -101,5 +102,22 @@ describe("the files that carry the version", () => {
     expect(() => applyVersion("{}", target, raised)).toThrow(
       /package\.json holds 0 version reference\(s\)/
     );
+  });
+});
+
+describe("pluginTag", () => {
+  it("names the tag Claude Code resolves a dependency range against", () => {
+    expect(pluginTag("3.2.1")).toBe("codex-mcp--v3.2.1");
+  });
+
+  it("takes the plugin name from the manifest that ships it", () => {
+    const manifest = JSON.parse(read("plugins/codex-mcp/.claude-plugin/plugin.json"));
+    expect(pluginTag(manifest.version)).toBe(`${manifest.name}--v${manifest.version}`);
+  });
+
+  it("tags the version the release is cutting, not the one on disk", () => {
+    const raised = nextVersion(currentVersion(), "major") as string;
+    expect(pluginTag(raised)).toBe(`codex-mcp--v${raised}`);
+    expect(pluginTag(raised)).not.toBe(pluginTag(currentVersion()));
   });
 });
