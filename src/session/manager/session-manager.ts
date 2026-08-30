@@ -2,7 +2,7 @@
  * SessionManager — the surface a tool call reaches. It owns one `SessionRuntime`
  * and the cleanup timer, and every method is the module function that does the work.
  */
-import { AppServerClient } from "../../app-server/client.js";
+import { AppServerClient } from "../../app-server/client/index.js";
 import type { AppServerSpawnOptions } from "../../app-server/lifecycle.js";
 import type { RecoveredSession } from "../../persistence/index.js";
 import {

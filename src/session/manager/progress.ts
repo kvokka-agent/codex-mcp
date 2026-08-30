@@ -1,5 +1,5 @@
 /** What a session reports about the turn it is running. */
-import { Methods } from "../../app-server/protocol.js";
+import { Methods } from "../../app-server/wire/index.js";
 import {
   DEFAULT_POLL_INTERVAL,
   type ProgressInfo,

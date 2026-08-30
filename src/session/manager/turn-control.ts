@@ -1,6 +1,6 @@
 /** Acting on the turn a session is running, and on the terminals it left behind. */
 import type { ICodexClient } from "../../app-server/client-interface.js";
-import { Methods, type TurnSteerResult } from "../../app-server/protocol.js";
+import { Methods, type TurnSteerResult } from "../../app-server/wire/index.js";
 import {
   type BackgroundTerminalOutcome,
   type BackgroundTerminalsReport,

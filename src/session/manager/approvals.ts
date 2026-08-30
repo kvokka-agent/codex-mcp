@@ -1,5 +1,5 @@
 /** The caller's answer to a request the session holds open. */
-import type { UserInputRequestResponse } from "../../app-server/protocol.js";
+import type { UserInputRequestResponse } from "../../app-server/wire/index.js";
 import { ErrorCode, type PendingRequest, type SessionInfo } from "../../types.js";
 import { assertApprovalDecision, buildApprovalResponse } from "./approval-decisions.js";
 import { loggableAnswers, sendPendingRequestResponseOrThrow } from "./approval-io.js";

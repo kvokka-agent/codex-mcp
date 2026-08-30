@@ -61,10 +61,24 @@ src/
 ├── server.ts           tool registration and the zod schemas
 ├── types.ts            shared constants, statuses, defaults
 ├── app-server/         the backend and the wire protocol
-│   ├── client.ts             app-server JSON-RPC over stdio
+│   ├── client/               app-server JSON-RPC over stdio
+│   │   ├── index.ts              `AppServerClient`, which owns the child
+│   │   ├── pending-requests.ts   the requests waiting for an answer
+│   │   ├── write-queue.ts        stdin, and what is held while it is full
+│   │   └── message-router.ts     stdout, routed by the shape of each message
+│   ├── wire/                 the message types, by what a message is about
+│   │   ├── index.ts              the whole model an importer reads
+│   │   ├── jsonrpc.ts            the envelope, and the handshake
+│   │   ├── common.ts             what a thread and a turn are both configured with
+│   │   ├── thread.ts             start, fork, resume, delete
+│   │   ├── turn.ts               start, steer, and the requests sent back mid-turn
+│   │   ├── account.ts            the credential, and the Windows sandbox
+│   │   ├── notifications.ts      what the server says unasked
+│   │   └── methods.ts            every method name
 │   ├── client-interface.ts   what a backend must implement
 │   ├── codex-bin.ts          how to spawn it on this platform
-│   ├── protocol.ts           method names and message types
+│   ├── child-stdio.ts        line framing, and the child's stderr
+│   ├── child-shutdown.ts     waiting for the child to exit
 │   └── lifecycle.ts
 ├── persistence/        the state directory
 │   ├── index.ts
@@ -198,8 +212,8 @@ These are the patterns a change keeps, each of them written after it was broken:
   it runs in. `executeCodexCheck` builds its `PollWindow` from `process.env`
   when the caller names none, and a shell exporting `MCP_TOOL_TIMEOUT=500` left
   seven long-poll tests with no window to wait in and nothing to wake from.
-- `tests/protocol-schema.test.ts` holds `protocol.ts` against `codex-schema/`
-  and fails on drift. A new protocol field gets a check there.
+- `tests/protocol-schema.test.ts` holds `src/app-server/wire/` against
+  `codex-schema/` and fails on drift. A new protocol field gets a check there.
 - `tests/server-lifecycle.e2e.test.ts` drives the built server as a child
   process against `tests/helpers/fake-codex.mjs`, and skips itself on Windows —
   the stand-in is a `.mjs` and Windows spawns by extension. What it measures

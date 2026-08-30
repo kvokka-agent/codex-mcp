@@ -9,7 +9,7 @@ import type {
   ApprovalsReviewer as AnsweredApprovalsReviewer,
   AskForApproval,
   SandboxPolicy,
-} from "./app-server/protocol.js";
+} from "./app-server/wire/index.js";
 
 // ── Constants ──────────────────────────────────────────────────────
 

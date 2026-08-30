@@ -2,7 +2,7 @@
 import type {
   CommandApprovalResponse,
   FileChangeApprovalResponse,
-} from "../../app-server/protocol.js";
+} from "../../app-server/wire/index.js";
 import {
   COMMAND_DECISIONS,
   ErrorCode,

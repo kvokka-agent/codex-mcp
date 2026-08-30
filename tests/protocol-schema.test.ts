@@ -1,9 +1,9 @@
 /**
- * Conformance of src/app-server/protocol.ts with the vendored codex-schema bundle.
+ * Conformance of src/app-server/wire/index.ts with the vendored codex-schema bundle.
  *
  * Both sides of every assertion are read, not written here: method names and
  * parameter shapes come from codex-schema/*.json, and the TypeScript side comes
- * from the compiler's view of protocol.ts. Regenerating the bundle with a newer
+ * from the compiler's view of wire/index.ts. Regenerating the bundle with a newer
  * `codex` CLI therefore fails this file wherever the model drifted.
  */
 
@@ -14,7 +14,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import type { AppServerSpawnOptions } from "../src/app-server/lifecycle.js";
-import { Methods } from "../src/app-server/protocol.js";
+import { Methods, SANDBOX_POLICY_TYPES, toSandboxPolicy } from "../src/app-server/wire/index.js";
+import { SANDBOX_MODES } from "../src/types.js";
 import { mockModule } from "./helpers/mock.js";
 
 const spawnMock = jest.fn();
@@ -27,7 +28,7 @@ mockModule("child_process", realModule1, () => {
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SCHEMA_DIR = resolve(REPO_ROOT, "codex-schema");
-const PROTOCOL_PATH = resolve(REPO_ROOT, "src/app-server/protocol.ts");
+const PROTOCOL_PATH = resolve(REPO_ROOT, "src/app-server/wire/index.ts");
 
 /** The four bundle files that enumerate every method of the wire protocol. */
 const ENVELOPE_FILES = [
@@ -190,7 +191,7 @@ function loadProtocolInterfaces(): {
   const sourceFile = program.getSourceFile(PROTOCOL_PATH);
   expect(sourceFile, `${PROTOCOL_PATH} must be loadable by the TypeScript compiler`).toBeDefined();
   const moduleSymbol = checker.getSymbolAtLocation(sourceFile as ts.SourceFile);
-  expect(moduleSymbol, "protocol.ts must be a module with exports").toBeDefined();
+  expect(moduleSymbol, "wire/index.ts must be a module with exports").toBeDefined();
 
   const interfaces = new Map<string, TsInterface>();
   for (const exported of checker.getExportsOfModule(moduleSymbol as ts.Symbol)) {
@@ -210,7 +211,7 @@ function loadProtocolInterfaces(): {
 const { checker, interfaces: TS_INTERFACES } = loadProtocolInterfaces();
 
 /**
- * Schema definition name → protocol.ts type that models it.
+ * Schema definition name → wire/index.ts type that models it.
  * Only the pairs this codebase actually sends or receives are listed; the wiring
  * is the mapping, while every field compared below is read from either side.
  */
@@ -264,7 +265,7 @@ const MODELLED_TYPES: Record<string, string> = {
 };
 
 /**
- * Methods whose params protocol.ts leaves as `unknown`: the session manager reads
+ * Methods whose params wire/index.ts leaves as `unknown`: the session manager reads
  * a handful of fields off them and never constructs one, so a named type would
  * only restate the schema.
  */
@@ -295,12 +296,12 @@ function findDefinition(name: string): JsonObject {
 }
 
 /**
- * protocol.ts result type → the bundle file whose root object is that response.
+ * wire/index.ts result type → the bundle file whose root object is that response.
  * The bundle binds no response to a method name, so the pairing is the wiring;
  * every field compared below is read from one side or the other.
  *
- * A response is read and never constructed, so protocol.ts models only what a
- * caller uses: field existence is checked one way, every field protocol.ts
+ * A response is read and never constructed, so wire/index.ts models only what a
+ * caller uses: field existence is checked one way, every field wire/index.ts
  * declares against the schema, at every level.
  *
  * The three thread responses declare more than the id because a session reports
@@ -396,14 +397,14 @@ function assertFieldMatches(
   const name = prop.getName();
   expect(
     known,
-    `${path}.${name} is declared in protocol.ts but ${file} defines no such field`
+    `${path}.${name} is declared in wire/index.ts but ${file} defines no such field`
   ).toContain(name);
   const optional = Boolean(prop.flags & ts.SymbolFlags.Optional);
   expect(
     optional,
     required.has(name)
-      ? `${path}.${name} is required by ${file} but optional in protocol.ts`
-      : `${path}.${name} is optional in ${file} but non-optional in protocol.ts`
+      ? `${path}.${name} is required by ${file} but optional in wire/index.ts`
+      : `${path}.${name} is optional in ${file} but non-optional in wire/index.ts`
   ).toBe(!required.has(name));
 }
 
@@ -456,7 +457,7 @@ async function captureInitializeParams(): Promise<JsonObject> {
   const proc = new MockProc();
   spawnMock.mockReset();
   spawnMock.mockReturnValue(proc);
-  const { AppServerClient } = await import("../src/app-server/client.js");
+  const { AppServerClient } = await import("../src/app-server/client/index.js");
   const client = new AppServerClient();
   const started = client.start({} as AppServerSpawnOptions);
 
@@ -559,12 +560,12 @@ describe("parameter shapes against the schema", () => {
   });
 
   it.each(Object.entries(MODELLED_TYPES))(
-    "%s: protocol.ts declares every schema property",
+    "%s: wire/index.ts declares every schema property",
     (definitionName, tsName) => {
       const definition = findDefinition(definitionName);
       const schemaProperties = Object.keys((definition.properties ?? {}) as JsonObject);
       const tsInterface = TS_INTERFACES.get(tsName);
-      expect(tsInterface, `protocol.ts must export type ${tsName}`).toBeDefined();
+      expect(tsInterface, `wire/index.ts must export type ${tsName}`).toBeDefined();
       const declared = [...(tsInterface as TsInterface).properties.keys()];
       for (const property of schemaProperties) {
         expect(
@@ -576,7 +577,7 @@ describe("parameter shapes against the schema", () => {
   );
 
   it.each(Object.entries(MODELLED_TYPES))(
-    "%s: protocol.ts marks every required schema property non-optional",
+    "%s: wire/index.ts marks every required schema property non-optional",
     (definitionName, tsName) => {
       const definition = findDefinition(definitionName);
       const required = (definition.required ?? []) as string[];
@@ -584,13 +585,13 @@ describe("parameter shapes against the schema", () => {
       for (const property of required) {
         expect(
           properties.get(property),
-          `${tsName}.${property} is required by schema ${definitionName} but optional in protocol.ts`
+          `${tsName}.${property} is required by schema ${definitionName} but optional in wire/index.ts`
         ).toBe(false);
       }
     }
   );
 
-  it("keeps every optional schema property optional in protocol.ts", () => {
+  it("keeps every optional schema property optional in wire/index.ts", () => {
     const wronglyRequired: string[] = [];
     for (const [definitionName, tsName] of Object.entries(MODELLED_TYPES)) {
       const definition = findDefinition(definitionName);
@@ -656,8 +657,8 @@ describe("AskForApproval union", () => {
       expect(
         optional,
         required.has(name)
-          ? `${key}.${name} is required by the schema but optional in protocol.ts`
-          : `${key}.${name} is optional in the schema but non-optional in protocol.ts`
+          ? `${key}.${name} is required by the schema but optional in wire/index.ts`
+          : `${key}.${name} is optional in the schema but non-optional in wire/index.ts`
       ).toBe(!required.has(name));
     }
   });
@@ -720,7 +721,21 @@ describe("response shapes against the schema", () => {
   it.each(Object.entries(MODELLED_RESULTS))("%s declares only fields of %s", (tsName, file) => {
     const doc = readSchema(file);
     const tsInterface = TS_INTERFACES.get(tsName);
-    expect(tsInterface, `protocol.ts must export type ${tsName}`).toBeDefined();
+    expect(tsInterface, `wire/index.ts must export type ${tsName}`).toBeDefined();
     assertDeclaredFieldsExist((tsInterface as TsInterface).type, doc, doc, file, tsName);
+  });
+});
+
+describe("toSandboxPolicy", () => {
+  it.each(SANDBOX_MODES)("maps %s onto a policy type the schema names", (mode) => {
+    const policy = toSandboxPolicy(mode);
+    expect(policy, `${mode} maps to no sandbox policy`).toBeDefined();
+    expect(SANDBOX_POLICY_TYPES).toContain((policy as { type: string }).type);
+  });
+
+  it("answers no policy for a mode the schema does not name", () => {
+    // The turn then carries no `sandboxPolicy` at all, rather than one built
+    // around a discriminator codex-schema never defined.
+    expect(toSandboxPolicy("read-write")).toBeUndefined();
   });
 });

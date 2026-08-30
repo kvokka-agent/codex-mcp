@@ -8,10 +8,10 @@ when, and with which command.
 We commit it to git to:
 
 - Make protocol changes reviewable (schema diffs in PRs).
-- Keep `src/app-server/protocol.ts` and the session/approval logic aligned with a pinned protocol snapshot.
+- Keep `src/app-server/wire/index.ts` and the session/approval logic aligned with a pinned protocol snapshot.
 - Avoid “works on my machine” drift caused by different local `codex` versions.
 
-`tests/protocol-schema.test.ts` compares this bundle with `src/app-server/protocol.ts`: every method
+`tests/protocol-schema.test.ts` compares this bundle with `src/app-server/wire/index.ts`: every method
 constant, every parameter field and the `AskForApproval` union. A regenerated bundle fails that test
 wherever the TypeScript model no longer matches.
 
@@ -31,4 +31,4 @@ git status --short -- codex-schema
 
 3. Update `codex-schema/metadata.json`.
 4. Run `bun test tests/protocol-schema.test.ts` and resolve every reported difference — by
-   extending `src/app-server/protocol.ts`, or by recording the reason in that test's exception lists.
+   extending `src/app-server/wire/index.ts`, or by recording the reason in that test's exception lists.

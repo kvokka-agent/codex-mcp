@@ -3,7 +3,7 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ANSWERED_APPROVALS_REVIEWERS } from "./app-server/protocol.js";
+import { ANSWERED_APPROVALS_REVIEWERS } from "./app-server/wire/index.js";
 import { registerResources } from "./resources/index.js";
 import { SessionManager, type SessionManagerOptions } from "./session/manager/session-manager.js";
 import { executeCodex } from "./tools/codex.js";

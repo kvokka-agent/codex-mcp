@@ -10,7 +10,7 @@ import {
   Methods,
   type RequestId,
   type UserInputRequestResponse,
-} from "../../app-server/protocol.js";
+} from "../../app-server/wire/index.js";
 import type { PendingRequest, SessionInfo } from "../../types.js";
 import {
   AUTH_REFRESH_UNSUPPORTED_CODE,

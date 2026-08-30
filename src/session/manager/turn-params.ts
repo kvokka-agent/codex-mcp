@@ -5,7 +5,7 @@ import {
   type TurnStartParams,
   toSandboxPolicy,
   type UserInput,
-} from "../../app-server/protocol.js";
+} from "../../app-server/wire/index.js";
 import {
   type ApprovalPolicy,
   type EffortLevel,

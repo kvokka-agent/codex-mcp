@@ -8,7 +8,7 @@
  * it is sent, and the caller is told which ids exist instead.
  */
 import type { ICodexClient } from "../app-server/client-interface.js";
-import { Methods, type PermissionProfileSummary } from "../app-server/protocol.js";
+import { Methods, type PermissionProfileSummary } from "../app-server/wire/index.js";
 import { ErrorCode } from "../types.js";
 
 /**

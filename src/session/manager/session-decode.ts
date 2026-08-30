@@ -7,7 +7,7 @@ import {
   type AskForApprovalGranular,
   SANDBOX_POLICY_TYPES,
   type SandboxPolicy,
-} from "../../app-server/protocol.js";
+} from "../../app-server/wire/index.js";
 import type { RecoveredSession } from "../../persistence/index.js";
 import {
   APPROVAL_POLICIES,

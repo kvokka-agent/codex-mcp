@@ -1,13 +1,13 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { AppServerClient } from "../app-server/client.js";
+import { AppServerClient } from "../app-server/client/index.js";
 import type {
   Account,
   GetAccountResult,
   PermissionProfileSummary,
   WindowsSandboxReadiness,
-} from "../app-server/protocol.js";
+} from "../app-server/wire/index.js";
 import { listPermissionProfiles } from "../session/permission-profiles.js";
 import {
   type CodexExecutableInfo,

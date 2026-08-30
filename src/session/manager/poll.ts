@@ -194,10 +194,7 @@ export function pollStatus(runtime: SessionRuntime, sessionId: string): CheckRes
  * an empty result it then fills in from memory. Only the next turn replaces
  * it.
  */
-function terminalTurnResult(
-  runtime: SessionRuntime,
-  sessionId: string
-): TurnResult | undefined {
+function terminalTurnResult(runtime: SessionRuntime, sessionId: string): TurnResult | undefined {
   const session = getSessionOrThrow(runtime, sessionId);
   if (!TERMINAL_SESSION_STATUSES.has(session.status)) return undefined;
   return session.lastResult;

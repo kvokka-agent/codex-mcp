@@ -9,8 +9,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { EventEmitter } from "node:events";
-import type { AppServerClient } from "../src/app-server/client.js";
-import { Methods } from "../src/app-server/protocol.js";
+import type { AppServerClient } from "../src/app-server/client/index.js";
+import { Methods } from "../src/app-server/wire/index.js";
 import { createServer } from "../src/server.js";
 import { present } from "./helpers/present.js";
 

@@ -13,8 +13,8 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AppServerClient } from "../src/app-server/client.js";
-import { Methods } from "../src/app-server/protocol.js";
+import type { AppServerClient } from "../src/app-server/client/index.js";
+import { Methods } from "../src/app-server/wire/index.js";
 import {
   ACTIVITY_MARKER_INSTRUCTION,
   ActivityMarkerScanner,

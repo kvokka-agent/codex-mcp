@@ -7,7 +7,7 @@ import {
   Methods,
   type RequestId,
   type UserInputRequestResponse,
-} from "../../app-server/protocol.js";
+} from "../../app-server/wire/index.js";
 import { ErrorCode, type PendingRequest } from "../../types.js";
 import { describeError, isRecord, normalizeOptionalString } from "./read.js";
 
