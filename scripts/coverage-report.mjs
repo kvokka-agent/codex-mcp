@@ -7,5 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { writeIstanbulReport } from "./lib/lcov-istanbul.mjs";
 
-const { path, files } = writeIstanbulReport(join(dirname(fileURLToPath(import.meta.url)), ".."));
-console.error(`Wrote ${path} (${files} files).`);
+const { path, files, functions } = writeIstanbulReport(
+  join(dirname(fileURLToPath(import.meta.url)), "..")
+);
+console.error(`Wrote ${path} (${files} files, ${functions} functions).`);
