@@ -11,6 +11,8 @@ version it names — [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-08-30
+
 ## [3.0.0] - 2026-08-29
 
 ### Added
