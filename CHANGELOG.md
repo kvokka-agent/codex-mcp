@@ -11,6 +11,8 @@ version it names — [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+## [3.0.3] - 2026-08-30
+
 ### Added
 
 - **The README shows what the tests reach.** `docs/coverage-badge.json` is a second shields.io endpoint document beside the fallow one, drawn from the Istanbul report the coverage run already writes: the share of measured lines the tests entered and the share of matched functions, over `src/` and `scripts/` and without the helpers a test drags into the report. Both shares are floored, so the badge never reads 90 for a tree the 90% gate would fail, and the colour reads the lower of the two — brightgreen at 95, green at the gate, red below it.
