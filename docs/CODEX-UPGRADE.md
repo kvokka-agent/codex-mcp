@@ -84,10 +84,10 @@ answers them because a CLI still sends them.
 
 An interface change touches every one of these, or states why it does not:
 
-- `src/server.ts` — the tool input and output schemas
+- `src/mcp/schemas/` — the tool input and output schemas
 - `src/tools/*.ts`
 - `src/session/manager/`
-- `src/app-server/wire/`, `src/types.ts`
+- `src/app-server/wire/`, `src/types/`
 - `docs/TOOLS.md`, `docs/SESSIONS.md`, `docs/DESIGN.md`
 - `docs/E2E_LOCAL_TEST_PLAN.md`
 - `CHANGELOG.md`, under `## [Unreleased]`

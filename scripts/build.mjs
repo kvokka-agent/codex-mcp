@@ -24,7 +24,7 @@ const built = await Bun.build({
   target: "node",
   format: "esm",
   sourcemap: "linked",
-  // `src/server.ts` and `src/app-server/client/index.ts` read this to tell the MCP
+  // `src/mcp/index.ts` and `src/app-server/client/index.ts` read this to tell the MCP
   // client and the app-server which version is speaking to them.
   define: { __PKG_VERSION__: JSON.stringify(version) },
   banner: "#!/usr/bin/env bun",

@@ -58,8 +58,19 @@ lists the rest.
 ```text
 src/
 ├── index.ts            startup, shutdown, the transport
-├── server.ts           tool registration and the zod schemas
-├── types.ts            shared constants, statuses, defaults
+├── mcp/                the MCP server the client talks to
+│   ├── index.ts              `createServer`, and what it wires together
+│   ├── register-tools.ts     the five tools, each with its executor
+│   ├── tool-context.ts       what a registration reads out of one server
+│   ├── envelope.ts           the answer every tool call is wrapped in
+│   └── schemas/              the zod input and output of each tool
+│       ├── common.ts             what more than one tool answers with
+│       ├── codex.ts              `codex` and `codex_reply`
+│       ├── check.ts              `codex_check`
+│       ├── session.ts            `codex_session`
+│       ├── setup.ts              `codex_setup`
+│       └── issue-sink.ts         where a refinement puts a complaint
+├── types/              shared constants, statuses, defaults
 ├── app-server/         the backend and the wire protocol
 │   ├── client/               app-server JSON-RPC over stdio
 │   │   ├── index.ts              `AppServerClient`, which owns the child
@@ -131,7 +142,7 @@ src/
 
 - ESM and TypeScript. Local imports carry the `.js` suffix.
 - `unknown` plus narrowing, never `any`.
-- Validation lives in the zod schemas of `src/server.ts`.
+- Validation lives in the zod schemas of `src/mcp/schemas/`.
 - `src/session/manager/` keeps its state in one `SessionRuntime` and its
   behaviour in free functions over it. `SessionManager` is a facade of
   one-line delegates; a module states what it does as `f(runtime, …)`, and no
@@ -140,7 +151,7 @@ src/
 - Diagnostics go to `console.error`. stdout is the MCP channel and carries
   nothing but JSON-RPC.
 - `approvalPolicy` stays required on `codex`, and a `codex` call names exactly
-  one of `sandbox` and `permissions`. The zod schema of `src/server.ts` refuses
+  one of `sandbox` and `permissions`. `src/mcp/schemas/codex.ts` refuses
   both together and refuses neither, so the pair never reaches the backend.
 - Sensitive fields stay redacted unless the caller passes
   `includeSensitive: true`.

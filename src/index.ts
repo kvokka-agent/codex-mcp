@@ -7,8 +7,8 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createServer } from "./mcp/index.js";
 import type { RecoveredSession } from "./persistence/index.js";
-import { createServer } from "./server.js";
 import type { SessionManager } from "./session/manager/session-manager.js";
 import { reapOrphanProcesses } from "./session/orphan-reaper.js";
 import { type SessionPersistence, startDiskPersistence } from "./session/persistence.js";

@@ -31,7 +31,7 @@ mockModule("child_process", realModule1, () => {
   };
 });
 
-const { createServer } = await import("../src/server.js");
+const { createServer } = await import("../src/mcp/index.js");
 const { Methods } = await import("../src/app-server/wire/index.js");
 
 import type { SessionDefaults } from "../src/utils/session-defaults.js";

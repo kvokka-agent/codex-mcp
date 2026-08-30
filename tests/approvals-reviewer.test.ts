@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AppServerClient } from "../src/app-server/client/index.js";
 import { Methods } from "../src/app-server/wire/index.js";
-import { createServer } from "../src/server.js";
+import { createServer } from "../src/mcp/index.js";
 import { SessionManager } from "../src/session/manager/session-manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
 import { executeCodex } from "../src/tools/codex.js";

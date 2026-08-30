@@ -528,7 +528,7 @@ The tool surface is in [TOOLS.md](TOOLS.md) and the mechanism in
 - **`codex_check` answers with status, never with events.** `progress`,
   `actions[]`, `interactionState`, `recommendedNextAction` and the finished
   turn's `result`; `maxEvents`, `cursor` and `responseMode` are refused with a
-  message naming the replacement (`src/server.ts:365-373`). The transcript stays
+  message naming the replacement (`src/mcp/schemas/check.ts:93-104`). The transcript stays
   in Codex's rollout log. A long poll wakes only on `signalOf` — status, the
   open request ids, the result timestamp, the activity timestamp
   (`src/session/manager/session-view.ts`) — so deltas and token counters cost the caller
@@ -558,8 +558,8 @@ The tool surface is in [TOOLS.md](TOOLS.md) and the mechanism in
   `DEFAULT_APPROVAL_TIMEOUT_MS`, 60,000 ms, and the turn continues; a
   `waiting_approval` session advertises a 1,000 ms poll interval.
 - **A failed turn is a failed turn.** Every handler returns `isError: true` and
-  `Error [CODE]: message` over thirteen codes (`src/server.ts:36-50`, `:76-105`,
-  `src/types.ts:381-395`), and the terminal `result` keeps `outcome`, `error`
+  `Error [CODE]: message` over thirteen codes (`src/mcp/envelope.ts:9-68`,
+  `src/types/errors.ts:3-17`), and the terminal `result` keeps `outcome`, `error`
   and `turnError` readable on every later check.
 
 ## What codex-mcp does not do
