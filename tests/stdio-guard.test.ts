@@ -14,6 +14,28 @@ describe("stdio guard", () => {
     expect(mode.invalidRaw).toBe("banana");
   });
 
+  it("reads a blank env value as an unset one", () => {
+    expect(resolveStdioMode({ CODEX_MCP_STDIO_MODE: "   " })).toEqual({
+      mode: "auto",
+      source: "default",
+    });
+  });
+
+  it("notes the mode it could not read and runs the guard on auto", () => {
+    const out = runStdioPreflight({
+      platform: "linux",
+      env: { CODEX_MCP_STDIO_MODE: "banana" },
+      stdinIsTTY: true,
+      stdoutIsTTY: false,
+    });
+
+    expect(out.mode).toBe("auto");
+    expect(out.invalidMode).toBe("banana");
+    expect(out.notes[0]).toBe("Invalid CODEX_MCP_STDIO_MODE='banana'. Falling back to 'auto'.");
+    expect(out.notes[1]).toContain("terminal (TTY)");
+    expect(out.shouldBlock).toBe(false);
+  });
+
   it("keeps PowerShell risk as warning-only in strict mode", () => {
     const out = runStdioPreflight({
       platform: "win32",

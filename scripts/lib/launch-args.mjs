@@ -16,6 +16,39 @@ export function splitArgv(argv) {
 }
 
 /**
+ * @typedef {{ key: string, read: (raw: string) => unknown }} ValueFlag
+ * @typedef {{ kind: "help" }
+ *   | { kind: "reject" }
+ *   | { kind: "switch", key: string }
+ *   | { kind: "value", key: string, value: unknown }} FlagAction
+ */
+
+/**
+ * What one token of the command line asks for: the help, a switch to set, the next
+ * argument to take as a value, or a command line the script refuses.
+ *
+ * An unknown flag is refused the same way a declared value flag with nothing usable
+ * behind it is: neither names a value the script can act on.
+ *
+ * @param {string} flag
+ * @param {string | undefined} next - the token behind `flag`, which a value flag reads
+ * @param {Record<string, string>} switches
+ * @param {Record<string, ValueFlag>} values
+ * @returns {FlagAction}
+ */
+function readFlagAction(flag, next, switches, values) {
+  if (flag === "--help" || flag === "-h") return { kind: "help" };
+
+  const switchKey = switches[flag];
+  if (switchKey !== undefined) return { kind: "switch", key: switchKey };
+
+  const value = values[flag];
+  const read = value !== undefined && next ? value.read(next) : undefined;
+  if (read === undefined) return { kind: "reject" };
+  return { kind: "value", key: value.key, value: read };
+}
+
+/**
  * Parses the shared flags plus the ones the calling script declares.
  *
  * `switches` maps a flag to the key it sets to `true`. `values` maps a flag to
@@ -28,7 +61,7 @@ export function splitArgv(argv) {
  * @param {{
  *   defaults?: Record<string, unknown>,
  *   switches?: Record<string, string>,
- *   values?: Record<string, { key: string, read: (raw: string) => unknown }>,
+ *   values?: Record<string, ValueFlag>,
  *   usage: (exitCode: number) => void,
  * }} spec
  */
@@ -46,25 +79,14 @@ export function parseLaunchArgs(argv, spec) {
 
   const { main, tail } = splitArgv(argv);
   for (let i = 0; i < main.length; i++) {
-    const flag = main[i];
-    if (flag === "--help" || flag === "-h") {
-      usage(0);
-      continue;
+    const action = readFlagAction(main[i], main[i + 1], knownSwitches, knownValues);
+    if (action.kind === "help") usage(0);
+    else if (action.kind === "reject") usage(2);
+    else if (action.kind === "switch") out[action.key] = true;
+    else {
+      out[action.key] = action.value;
+      i++;
     }
-    const switchKey = knownSwitches[flag];
-    if (switchKey !== undefined) {
-      out[switchKey] = true;
-      continue;
-    }
-    const value = knownValues[flag];
-    const raw = value === undefined ? undefined : main[i + 1];
-    const read = raw ? value.read(raw) : undefined;
-    if (read === undefined) {
-      usage(2);
-      continue;
-    }
-    out[value.key] = read;
-    i++;
   }
 
   if (tail.length > 0) {

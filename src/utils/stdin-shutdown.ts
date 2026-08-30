@@ -27,3 +27,47 @@ export function decideStdinShutdown(params: {
   if (params.elapsedMs >= params.maxWaitMs) return "shutdown_timeout";
   return "reschedule";
 }
+
+/**
+ * A stdin that can deliver no further frame.
+ *
+ * The three flags are read together because each of them alone is reached by a
+ * different end: `destroyed` by a teardown, `readableEnded` by an EOF the stream
+ * already delivered, `readable` by one it has yet to report.
+ */
+export function stdinIsUnavailable(stdin: {
+  destroyed: boolean;
+  readableEnded: boolean;
+  readable: boolean;
+}): boolean {
+  return stdin.destroyed || stdin.readableEnded || !stdin.readable;
+}
+
+/** What a stdin shutdown says on stderr, and the reason it is recorded under. */
+interface StdinShutdownOrder {
+  message: string;
+  reason: string;
+}
+
+/**
+ * The order a shutdown decision carries out: the line the operator reads, and the reason
+ * the shutdown is recorded under — the stdin event that started it, marked `_timeout`
+ * when the drain period ran out before the sessions ended.
+ */
+export function stdinShutdownOrder(
+  decision: "shutdown_now" | "shutdown_timeout",
+  closedReason: string | undefined,
+  maxWaitMs: number
+): StdinShutdownOrder {
+  const event = closedReason ?? "closed";
+  if (decision === "shutdown_timeout") {
+    return {
+      message: `[codex-mcp] stdin closed and drain period (${maxWaitMs}ms) elapsed — forcing shutdown`,
+      reason: `stdin_${event}_timeout`,
+    };
+  }
+  return {
+    message: "[codex-mcp] stdin closed with no active sessions — shutting down",
+    reason: `stdin_${event}`,
+  };
+}

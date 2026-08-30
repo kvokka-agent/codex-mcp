@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { decideStdinShutdown } from "../src/utils/stdin-shutdown.js";
+import {
+  decideStdinShutdown,
+  stdinIsUnavailable,
+  stdinShutdownOrder,
+} from "../src/utils/stdin-shutdown.js";
 
 const base = {
   stdinUnavailable: true,
@@ -46,5 +50,42 @@ describe("decideStdinShutdown", () => {
         hasActiveSessions: true,
       })
     ).toBe("clear");
+  });
+});
+
+describe("stdinIsUnavailable", () => {
+  const open = { destroyed: false, readableEnded: false, readable: true };
+
+  it("reads a stream that is still readable as available", () => {
+    expect(stdinIsUnavailable(open)).toBe(false);
+  });
+
+  it("reads each of the three ends of a stream as unavailable", () => {
+    expect(stdinIsUnavailable({ ...open, destroyed: true })).toBe(true);
+    expect(stdinIsUnavailable({ ...open, readableEnded: true })).toBe(true);
+    expect(stdinIsUnavailable({ ...open, readable: false })).toBe(true);
+  });
+});
+
+describe("stdinShutdownOrder", () => {
+  it("records the stdin event that started the shutdown", () => {
+    expect(stdinShutdownOrder("shutdown_now", "end", 10_000)).toEqual({
+      message: "[codex-mcp] stdin closed with no active sessions — shutting down",
+      reason: "stdin_end",
+    });
+  });
+
+  it("marks the reason and the line with the drain period that ran out", () => {
+    expect(stdinShutdownOrder("shutdown_timeout", "close", 10_000)).toEqual({
+      message: "[codex-mcp] stdin closed and drain period (10000ms) elapsed — forcing shutdown",
+      reason: "stdin_close_timeout",
+    });
+  });
+
+  it("names the event `closed` when no stdin event was recorded", () => {
+    expect(stdinShutdownOrder("shutdown_now", undefined, 10_000).reason).toBe("stdin_closed");
+    expect(stdinShutdownOrder("shutdown_timeout", undefined, 10_000).reason).toBe(
+      "stdin_closed_timeout"
+    );
   });
 });

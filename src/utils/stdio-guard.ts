@@ -52,15 +52,63 @@ export function resolveStdioMode(env: NodeJS.ProcessEnv = process.env): StdioMod
   return { mode: "auto", source: "env_invalid", invalidRaw: raw };
 }
 
-export function runStdioPreflight(opts: StdioPreflightOptions = {}): StdioPreflightResult {
-  const platform = opts.platform ?? process.platform;
-  const env = opts.env ?? process.env;
-  const stdinIsTTY = opts.stdinIsTTY ?? Boolean(process.stdin.isTTY);
-  const stdoutIsTTY = opts.stdoutIsTTY ?? Boolean(process.stdout.isTTY);
+interface PreflightInputs {
+  platform: NodeJS.Platform;
+  env: NodeJS.ProcessEnv;
+  stdinIsTTY: boolean;
+  stdoutIsTTY: boolean;
+}
 
-  const modeResolution = resolveStdioMode(env);
+/** What the preflight measures: whatever the caller named, and this process for the rest. */
+function resolvePreflightInputs(opts: StdioPreflightOptions): PreflightInputs {
+  return {
+    platform: opts.platform ?? process.platform,
+    env: opts.env ?? process.env,
+    stdinIsTTY: opts.stdinIsTTY ?? Boolean(process.stdin.isTTY),
+    stdoutIsTTY: opts.stdoutIsTTY ?? Boolean(process.stdout.isTTY),
+  };
+}
+
+interface StdoutRisks {
+  /** Every reason stdout may already carry text; one of them makes the risk elevated. */
+  reasons: string[];
+  /** The subset strict mode refuses to start under. */
+  blocking: string[];
+  /** The reasons stated on their own line, whatever the risk level comes out as. */
+  notes: string[];
+}
+
+/**
+ * What raises the risk of text on stdout before the MCP handshake.
+ *
+ * A PowerShell profile prints its banner before this process starts, so it is reported
+ * and nothing more. A TTY on either end says the client launched the server without
+ * piping stdio, which is the condition strict mode refuses to start under.
+ */
+function surveyStdoutRisks(inputs: PreflightInputs): StdoutRisks {
+  const risks: StdoutRisks = { reasons: [], blocking: [], notes: [] };
+
+  if (inputs.platform === "win32" && looksLikePowerShell(inputs.env)) {
+    risks.reasons.push(
+      "PowerShell environment detected on Windows; shell profiles can print banner text to stdout."
+    );
+  }
+
+  if (inputs.stdinIsTTY || inputs.stdoutIsTTY) {
+    const ttyRisk =
+      "STDIO appears attached to a terminal (TTY). MCP clients should launch codex-mcp with piped stdio.";
+    risks.notes.push(ttyRisk);
+    risks.reasons.push(ttyRisk);
+    risks.blocking.push(ttyRisk);
+  }
+
+  return risks;
+}
+
+export function runStdioPreflight(opts: StdioPreflightOptions = {}): StdioPreflightResult {
+  const inputs = resolvePreflightInputs(opts);
+  const modeResolution = resolveStdioMode(inputs.env);
   const notes: string[] = [];
-  const riskReasons: string[] = [];
 
   if (modeResolution.source === "env_invalid" && modeResolution.invalidRaw) {
     notes.push(
@@ -73,35 +121,19 @@ export function runStdioPreflight(opts: StdioPreflightOptions = {}): StdioPrefli
     return guardDisabledResult(modeResolution, notes);
   }
 
-  const blockingReasons: string[] = [];
-
-  if (platform === "win32" && looksLikePowerShell(env)) {
-    riskReasons.push(
-      "PowerShell environment detected on Windows; shell profiles can print banner text to stdout."
-    );
-  }
-
-  if (stdinIsTTY || stdoutIsTTY) {
-    const ttyRisk =
-      "STDIO appears attached to a terminal (TTY). MCP clients should launch codex-mcp with piped stdio.";
-    notes.push(ttyRisk);
-    riskReasons.push(ttyRisk);
-    blockingReasons.push(ttyRisk);
-  }
-
-  const riskLevel: StdioPreflightResult["riskLevel"] = riskReasons.length > 0 ? "elevated" : "low";
-  const shouldBlock = modeResolution.mode === "strict" && blockingReasons.length > 0;
+  const risks = surveyStdoutRisks(inputs);
+  const elevated = risks.reasons.length > 0;
 
   return {
     mode: modeResolution.mode,
     modeSource: modeResolution.source,
     invalidMode: modeResolution.invalidRaw,
-    riskLevel,
-    riskReasons,
-    blockingReasons,
-    notes,
-    suggestions: riskReasons.length > 0 ? buildFixSuggestions(platform) : [],
-    shouldBlock,
+    riskLevel: elevated ? "elevated" : "low",
+    riskReasons: risks.reasons,
+    blockingReasons: risks.blocking,
+    notes: [...notes, ...risks.notes],
+    suggestions: elevated ? buildFixSuggestions(inputs.platform) : [],
+    shouldBlock: modeResolution.mode === "strict" && risks.blocking.length > 0,
   };
 }
 
