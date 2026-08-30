@@ -9,6 +9,16 @@ on:
         description: Commit to check. Defaults to the commit that triggered the run.
         type: string
         required: false
+    # The two README badges, measured by the run that checked the commit. The
+    # release commits what it reads here rather than measuring again: measuring
+    # means running the whole suite under coverage, which this run just did.
+    outputs:
+      fallow-badge:
+        description: The shields.io endpoint document for the fallow health badge.
+        value: ${{ jobs.check.outputs.fallow-badge }}
+      coverage-badge:
+        description: The shields.io endpoint document for the coverage badge.
+        value: ${{ jobs.check.outputs.coverage-badge }}
   workflow_dispatch:
   push:
     branches: [main, master]
@@ -20,6 +30,9 @@ jobs:
   # Every gate that answers the same on any host, run once.
   check:
     runs-on: ubuntu-latest
+    outputs:
+      fallow-badge: ${{ steps.badges.outputs.fallow-badge }}
+      coverage-badge: ${{ steps.badges.outputs.coverage-badge }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -28,7 +41,7 @@ jobs:
           # hotspot penalty, which fallow reads out of the commits of the last
           # six months. The default depth of 1 carries none of them, so a
           # shallow checkout scores this tree 95 where the full history scores
-          # it 85 — above the badge the release measures.
+          # it 85 — and the badge step below would publish that 95.
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
@@ -44,6 +57,12 @@ jobs:
       # Runs the tests once, with coverage, and hands that coverage to fallow,
       # which needs it for exact CRAP scores.
       - run: bun run lint:fallow
+      # Both badges, out of the coverage `lint:fallow` just wrote and the health
+      # score fallow read from it — the same measurement, no second suite. The
+      # documents go to stdout as `$GITHUB_OUTPUT` lines and what changed on
+      # disk to stderr, and `promote` of release.yml is what commits them.
+      - id: badges
+        run: bun run badge >> "$GITHUB_OUTPUT"
       - run: bun run lint:md
 
   # What the published server does on the bun versions and the platforms it

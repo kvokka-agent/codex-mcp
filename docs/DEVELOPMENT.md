@@ -172,17 +172,35 @@ short as the code makes it. The same for a function over a fallow threshold:
 `health.thresholdOverrides` in `.fallowrc.jsonc` carries the files and the
 reason. `bunx fallow explain <issue-type>` says what a rule means.
 
-The README's fallow badge is drawn by shields.io from `docs/fallow-badge.json`,
-which `bun run badge` writes out of `fallow health --hotspots --score` — the
-same coverage report behind it, so `bun run coverage` runs first. `--hotspots`
-is what makes the score the one `fallow health` prints: ten points of it are the
-hotspot penalty, which fallow weighs only when asked and reads out of the last
-six months of commits, so the run needs the whole history as well. `bun run
-badge` refuses a report missing either. The `badge` job of
-`.github/workflows/release.yml` runs the pair over the commit each release
-shipped and pushes the file when the score moved
-([RELEASING.md](RELEASING.md#what-the-merge-does)), so the badge shows the last
-released tree rather than whatever `master` carries now.
+## The README badges
+
+Two of the README's badges are drawn by shields.io from documents in this
+repository: the fallow health score from `docs/fallow-badge.json`, and the
+coverage from `docs/coverage-badge.json`. `bun run badge` writes both out of one
+coverage run, so `bun run coverage` — or `bun run lint:fallow`, which starts
+with it — runs first.
+
+The score comes from `fallow health --hotspots --score`, over the coverage
+report `.fallowrc.jsonc` names. `--hotspots` is what makes it the score
+`fallow health` prints: ten points of it are the hotspot penalty, which fallow
+weighs only when asked and reads out of the last six months of commits, so the
+run needs the whole history as well. `bun run badge` refuses a report missing
+either.
+
+The coverage badge counts the same Istanbul report file by file — the share of
+measured lines the tests entered, and the share of matched functions — leaving
+out `tests/**`, which is the helpers a test dragged into the report and which
+`.fallowrc.jsonc` leaves out of the health score for the same reason. Both
+shares are floored, so the badge never reads 90 for a tree the 90% gate would
+fail. The colour reads the lower of the two: brightgreen at 95, green at the
+gate, red below it.
+
+The `check` job of `.github/workflows/ci.yml` measures both off the coverage it
+already ran and answers with the two documents; `promote` of
+`.github/workflows/release.yml` commits them onto the release branch
+([RELEASING.md](RELEASING.md#what-the-merge-does)). So the badges show the last
+released tree rather than whatever `master` carries now, and no release runs the
+suite a second time to draw them.
 
 ## The plugin from the working tree
 
