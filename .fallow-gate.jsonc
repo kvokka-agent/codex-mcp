@@ -24,5 +24,12 @@
   // Each entry names the file, the ceiling it stands over, the ceiling it is
   // held to instead, and why. An entry that no longer holds back a violation
   // fails the run, so the list stays as short as the code makes it.
-  "exceptions": []
+  "exceptions": [
+    {
+      "path": "src/session/orphan-reaper.ts",
+      "metric": "churn",
+      "limit": 1300,
+      "reason": "the file was written and reworked inside four days of the 3.0.0 orphan-reaping work — 1256 lines over seven commits on a 270-line file — so this is the writing of it rather than a file that keeps changing. It leaves the six-month window at the start of March 2027, and this entry fails the run once it does."
+    }
+  ]
 }
