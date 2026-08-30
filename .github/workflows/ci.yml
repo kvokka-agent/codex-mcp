@@ -24,6 +24,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
+          # Ten points of the health score `bun run lint:fallow` prints are the
+          # hotspot penalty, which fallow reads out of the commits of the last
+          # six months. The default depth of 1 carries none of them, so a
+          # shallow checkout scores this tree 95 where the full history scores
+          # it 85 — above the badge the release measures.
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0

@@ -3,7 +3,7 @@
  */
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
-import { ErrorCode } from "../types.js";
+import { ErrorCode } from "../types/index.js";
 
 export function resolveAndValidateFilePath(
   inputPath: string,

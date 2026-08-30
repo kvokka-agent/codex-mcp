@@ -10,7 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { EventEmitter } from "node:events";
 import type { AppServerSpawnOptions } from "../src/app-server/lifecycle.js";
-import { Methods } from "../src/app-server/protocol.js";
+import { Methods } from "../src/app-server/wire/index.js";
 import { advanceAsync } from "./helpers/clock.js";
 import { mockModule } from "./helpers/mock.js";
 import { present } from "./helpers/present.js";
@@ -62,7 +62,7 @@ describe("AppServerClient JSON-RPC", () => {
   let proc: MockProc;
   let killSpy: ReturnType<typeof jest.spyOn>;
   let errorLog: ReturnType<typeof jest.spyOn>;
-  let AppServerClient: typeof import("../src/app-server/client.js").AppServerClient;
+  let AppServerClient: typeof import("../src/app-server/client/index.js").AppServerClient;
 
   beforeEach(async () => {
     proc = new MockProc();
@@ -70,7 +70,7 @@ describe("AppServerClient JSON-RPC", () => {
     spawnMock.mockReturnValue(proc);
     killSpy = jest.spyOn(process, "kill").mockImplementation(() => true);
     errorLog = jest.spyOn(console, "error").mockImplementation(() => {});
-    ({ AppServerClient } = await import("../src/app-server/client.js"));
+    ({ AppServerClient } = await import("../src/app-server/client/index.js"));
   });
 
   afterEach(() => {

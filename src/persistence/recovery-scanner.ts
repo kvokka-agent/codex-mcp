@@ -77,6 +77,24 @@ interface EventLogScan {
   lastActivity?: string;
 }
 
+/** The fields the scan reads out of one record of events.jsonl. */
+interface EventLogRecord {
+  seq?: unknown;
+  type?: unknown;
+  data?: { activity?: unknown };
+}
+
+/**
+ * What one readable record adds to the scan: a sequence number higher than any seen so
+ * far, and the activity, when the record is the session saying what it was doing.
+ */
+function applyEventRecord(scan: EventLogScan, record: EventLogRecord): void {
+  if (typeof record.seq === "number" && record.seq > scan.lastSeq) scan.lastSeq = record.seq;
+  if (record.type === "activity" && typeof record.data?.activity === "string") {
+    scan.lastActivity = record.data.activity;
+  }
+}
+
 /**
  * Read events.jsonl for the sequence number the next run continues from.
  *
@@ -93,27 +111,20 @@ interface EventLogScan {
  */
 function scanEventsJsonl(filePath: string): EventLogScan {
   if (!existsSync(filePath)) return { lastSeq: -1, corruptLines: 0 };
-  const raw = readFileSync(filePath, "utf-8");
-  const lines = raw.split("\n");
-  let lastSeq = -1;
-  let corruptLines = 0;
-  let lastActivity: string | undefined;
+  const lines = readFileSync(filePath, "utf-8").split("\n");
+  const scan: EventLogScan = { lastSeq: -1, corruptLines: 0 };
   for (const [i, line] of lines.entries()) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      const parsed = JSON.parse(trimmed);
-      if (typeof parsed.seq === "number" && parsed.seq > lastSeq) lastSeq = parsed.seq;
-      if (parsed.type === "activity" && typeof parsed.data?.activity === "string") {
-        lastActivity = parsed.data.activity;
-      }
+      applyEventRecord(scan, JSON.parse(trimmed));
     } catch {
       // The last element of the split holds text written after the final newline:
       // an unparsable one is the torn tail of an interrupted write.
-      if (i < lines.length - 1) corruptLines++;
+      if (i < lines.length - 1) scan.corruptLines++;
     }
   }
-  return { lastSeq, corruptLines, lastActivity };
+  return scan;
 }
 
 /** What one JSON file of a session directory turned out to be. */

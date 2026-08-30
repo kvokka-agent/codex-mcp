@@ -1,6 +1,7 @@
 import { describe, expect, it, jest } from "bun:test";
-import type { SessionManager } from "../src/session/manager.js";
+import type { SessionManager } from "../src/session/manager/session-manager.js";
 import { executeCodexSession } from "../src/tools/codex-session.js";
+import type { SessionAction } from "../src/types/index.js";
 
 describe("executeCodexSession", () => {
   it("lists every session of the state directory, not only the ones in memory", async () => {
@@ -131,6 +132,49 @@ describe("executeCodexSession", () => {
       })
     );
     expect(terminateBackgroundTerminal).not.toHaveBeenCalled();
+  });
+
+  it("hands the clean filters to SessionManager and answers with its report", async () => {
+    const cleanSessions = jest.fn(async () => ({
+      removed: [{ sessionId: "sess_old", status: "cancelled" as const, diskRemoved: true }],
+      kept: [],
+      dryRun: false,
+    }));
+    const sessionManager = { cleanSessions } as unknown as SessionManager;
+
+    await expect(
+      executeCodexSession(
+        {
+          action: "clean",
+          statuses: ["cancelled"],
+          olderThanMs: 600_000,
+          dryRun: false,
+          includeDisk: true,
+        },
+        sessionManager
+      )
+    ).resolves.toEqual({
+      removed: [{ sessionId: "sess_old", status: "cancelled", diskRemoved: true }],
+      kept: [],
+      dryRun: false,
+    });
+    expect(cleanSessions).toHaveBeenCalledWith({
+      statuses: ["cancelled"],
+      olderThanMs: 600_000,
+      dryRun: false,
+      includeDisk: true,
+    });
+  });
+
+  it("returns INVALID_ARGUMENT naming the action a caller off the schema asked for", async () => {
+    const sessionManager = {} as SessionManager;
+
+    await expect(
+      executeCodexSession({ action: "restart" as SessionAction }, sessionManager)
+    ).resolves.toEqual({
+      error: "Error [INVALID_ARGUMENT]: Unknown action 'restart'",
+      isError: true,
+    });
   });
 
   it("delegates get/cancel/interrupt/fork/clean_background_terminals actions to SessionManager", async () => {

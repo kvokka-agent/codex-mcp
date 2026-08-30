@@ -11,6 +11,10 @@ bun run check
 coverage with the fallow static analysis over them, the two runtime scripts, and
 the markdown lint. A pull request passes it before it is opened.
 
+`prek` runs `biome`, that same fallow gate and the markdown lint on commit, so a
+commit takes about half a minute: the CRAP thresholds are only as true as the
+coverage report behind them, and the suite runs first to write it.
+
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) sets up the loop that command does
 not cover: running your build inside a real Claude Code session, restarting the
 server after a rebuild, and reading its logs. [AGENTS.md](AGENTS.md) holds the

@@ -2,20 +2,108 @@
   "$schema": "./node_modules/fallow/schema.json",
   "entry": ["scripts/*.mjs"],
   "dynamicallyLoaded": ["plugins/codex-mcp/hooks/*.mjs", "tests/helpers/fake-codex.mjs"],
+  // The vendored Codex JSON schemas are not hand-written and nothing imports
+  // them; `tests/protocol-schema.test.ts` reads them off disk.
   "ignorePatterns": ["codex-schema/**"],
   "includeEntryExports": true,
   "duplicates": {
-    // 86 lines, 0.6% of lines today, in four groups: the two approval builders
-    // of `src/session/manager.ts` that already delegate to
-    // `awaitPendingRequest`, the required and all-optional zod shapes of the
-    // same session fields in `src/server.ts`, and the listing entry against the
-    // flattened `codex_session` answer in the same file. Each pair carries
-    // something its twin does not — the shape of the MCP output schema, the
-    // decline path of a live approval — so they stay, and this budget leaves
-    // about a dozen lines before a fifth group fails.
-    "threshold": 0.7
+    // A pair of like blocks is what a type and its schema, or an approval and
+    // its decline, look like; a third instance is a shape asking to be named.
+    // The percentage below still counts the pairs this hides from the report,
+    // so raising this relaxes nothing.
+    "minOccurrences": 3,
+    "threshold": 0.3
+  },
+  "rules": {
+    // None of these fires today, and each one is a way the dependency list and
+    // the module graph drift from what the code does.
+    "re-export-cycle": "error",
+    "type-only-dependencies": "error",
+    "test-only-dependencies": "error",
+    "dev-dependencies-in-production": "error",
+    "unused-dev-dependencies": "error",
+    "unused-optional-dependencies": "error",
+    "unused-dependency-overrides": "error",
+    // A suppression names what it silences and why, and stops silencing once
+    // the finding behind it is gone.
+    "require-suppression-reason": "error",
+    "stale-suppressions": "error",
+    // Off: the files it names are the launchers `bun run check` runs as their
+    // own processes — the build, the two runtime scripts, the coverage bridge
+    // and this gate. No unit test loads one, and what they decide lives in
+    // scripts/lib/, which the tests do reach.
+    "coverage-gaps": "off",
+    // Off: it asks for an export of every type an exported signature names,
+    // and unused-exports then reports each of those as an export nobody
+    // imports. The two rules cannot both be satisfied.
+    "private-type-leaks": "off"
   },
   "health": {
-    "coverage": "coverage/coverage-final.json"
+    "coverage": "coverage/coverage-final.json",
+    // CRAP is cyclomatic complexity weighted by how little of the function the
+    // tests reach, so 15 is a function of cyclomatic 15 fully covered, or of
+    // cyclomatic 3 covered halfway.
+    "maxCrap": 15,
+    "maxCyclomatic": 10,
+    "maxCognitive": 12,
+    // A test states what the code under it does. Its complexity and its churn
+    // follow that code and say nothing on their own, and fallow's own score
+    // reads better without them. They stay in the module graph, so an export
+    // only a test consumes is still a used export.
+    "ignore": ["tests/**"],
+    "thresholdOverrides": [
+      {
+        "files": ["scripts/*.mjs"],
+        "maxCrap": 60,
+        "reason": "these launchers run as their own processes in the check gate, never inside bun test, so no coverage report reaches them and their CRAP carries the full untested penalty; what they decide lives in scripts/lib/, which the tests do reach"
+      }
+    ]
+  },
+  // What may reach what. Each zone names the zones below it, so a dependency
+  // that runs the other way is a finding rather than a discovery made later.
+  // `allowTypeOnly` is where a shape is named but nothing is called: the value
+  // sets and the config reader spell out wire types they never construct.
+  "boundaries": {
+    "zones": [
+      { "name": "types", "patterns": ["src/types/**"] },
+      { "name": "utils", "patterns": ["src/utils/**"] },
+      { "name": "app-server", "patterns": ["src/app-server/**"] },
+      { "name": "persistence", "patterns": ["src/persistence/**"] },
+      { "name": "session", "patterns": ["src/session/**"] },
+      { "name": "resources", "patterns": ["src/resources/**"] },
+      { "name": "tools", "patterns": ["src/tools/**"] },
+      { "name": "mcp", "patterns": ["src/mcp/**"] },
+      { "name": "entrypoint", "patterns": ["src/index.ts"] }
+    ],
+    "rules": [
+      { "from": "types", "allow": [], "allowTypeOnly": ["app-server"] },
+      { "from": "utils", "allow": ["types"], "allowTypeOnly": ["app-server"] },
+      { "from": "app-server", "allow": ["types", "utils"] },
+      { "from": "persistence", "allow": ["types", "utils"] },
+      { "from": "session", "allow": ["types", "utils", "app-server", "persistence"] },
+      { "from": "resources", "allow": ["types", "utils", "session"] },
+      { "from": "tools", "allow": ["types", "utils", "app-server", "session"] },
+      {
+        "from": "mcp",
+        "allow": ["types", "utils", "app-server", "persistence", "session", "resources", "tools"]
+      },
+      {
+        "from": "entrypoint",
+        "allow": [
+          "types",
+          "utils",
+          "app-server",
+          "persistence",
+          "session",
+          "resources",
+          "tools",
+          "mcp"
+        ]
+      }
+    ],
+    "coverage": {
+      "requireAllFiles": true,
+      "allowUnmatched": ["tests/**", "scripts/**", "plugins/**", "biome-plugins/**"]
+    }
   }
 }

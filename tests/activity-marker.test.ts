@@ -13,8 +13,8 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AppServerClient } from "../src/app-server/client.js";
-import { Methods } from "../src/app-server/protocol.js";
+import type { AppServerClient } from "../src/app-server/client/index.js";
+import { Methods } from "../src/app-server/wire/index.js";
 import {
   ACTIVITY_MARKER_INSTRUCTION,
   ActivityMarkerScanner,
@@ -23,9 +23,9 @@ import {
   stripActivityMarkers,
   stripActivityMarkersFromTurn,
 } from "../src/session/activity-marker.js";
-import { SessionManager } from "../src/session/manager.js";
+import { SessionManager } from "../src/session/manager/session-manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
-import type { CheckResult } from "../src/types.js";
+import type { CheckResult } from "../src/types/index.js";
 
 /** Feed a whole message through the scanner, cut into chunks of `size` characters. */
 function scanInChunks(text: string, size: number): string[] {

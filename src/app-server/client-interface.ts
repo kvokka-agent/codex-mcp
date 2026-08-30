@@ -31,7 +31,7 @@ import type {
   TurnSteerParams,
   TurnSteerResult,
   WindowsSandboxReadinessResult,
-} from "./protocol.js";
+} from "./wire/index.js";
 
 export interface ICodexClient {
   readonly destroyed: boolean;

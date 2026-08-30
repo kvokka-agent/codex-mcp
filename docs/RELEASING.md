@@ -25,12 +25,12 @@ merge an empty follow-up pull request carrying the label you meant.
 
 ## What the merge does
 
-`.github/workflows/release.yml` runs on every push to `master` and holds four jobs.
+`.github/workflows/release.yml` runs on every push to `master` and holds five jobs.
 `master` moves in the third of them, after the matrix has passed.
 
 1. **prepare** reads the labels of the pull request whose merge produced the commit,
    through `repos/{repo}/commits/{sha}/pulls`. With no release label the job ends
-   here and the three below it are skipped. With one it runs
+   here and the four below it are skipped. With one it runs
    `bun scripts/release.mjs bump <level>` on the tip of `master`, which raises the
    version files and moves the changelog's `## [Unreleased]` block under the new
    version, commits them as `chore(release): vX.Y.Z` and pushes that commit to a branch
@@ -48,12 +48,18 @@ merge an empty follow-up pull request carrying the label you meant.
    The job runs in `kvokka/codex-mcp` and nowhere else: a fork that merges a
    labelled pull request raises its own version and tags its own copy, and its run
    reaches this job, skips it and ends green.
+5. **badge** measures the released commit — `bun install`, `bun run coverage`, then
+   `bun run badge`, which reads `fallow health --hotspots --score` — and pushes
+   `docs/fallow-badge.json` onto `master` as `chore(release): score vX.Y.Z [skip ci]`
+   when the score moved. The commit is a plain fast-forward of the tip **promote**
+   left, and the job says so and ends green where `master` moved on in between: the
+   next release measures the score again.
 
 A red matrix leaves `master`, the tags and npm as they were. The candidate branch is
 the only thing such a run wrote, and it holds the commit that failed.
 
-All four are one workflow run: the version, the tag and the published package come
-out of a single link in the Actions tab.
+All five are one workflow run: the version, the tag, the published package and the
+score the README badge shows come out of a single link in the Actions tab.
 
 The same workflow takes a `ref` by hand from the Actions tab. Given a tag it runs
 `publish` alone, which is how a tag that exists without its npm version reaches npm —
@@ -215,6 +221,10 @@ what the failed run would have published. Start it from `release.yml` and not fr
 
 A publish that failed because the version is already on npm needs nothing at all — the
 release is out.
+
+**badge failed.** The release is out — the tag, `master` and npm are what the run
+left, and `docs/fallow-badge.json` is the only thing behind. The next release measures
+the score again and pushes it.
 
 **The run published and then something failed.** npm versions cannot be replaced.
 Release the fix as a new patch.

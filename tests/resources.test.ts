@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_EFFORT_LEVEL } from "../src/types.js";
+import { DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_EFFORT_LEVEL } from "../src/types/index.js";
 import { mockModule } from "./helpers/mock.js";
 import { present } from "./helpers/present.js";
 
@@ -26,7 +26,7 @@ mockModule("child_process", realModule1, () => {
   };
 });
 
-const { registerResources, RESOURCE_URIS } = await import("../src/resources/register-resources.js");
+const { registerResources, RESOURCE_URIS } = await import("../src/resources/index.js");
 const { _resetForTesting } = await import("../src/utils/codex-executable.js");
 
 interface ReadResult {

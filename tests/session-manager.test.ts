@@ -3,12 +3,12 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { AppServerClient } from "../src/app-server/client.js";
-import { Methods, type TurnSteerParams } from "../src/app-server/protocol.js";
-import { SessionManager } from "../src/session/manager.js";
+import type { AppServerClient } from "../src/app-server/client/index.js";
+import { Methods, type TurnSteerParams } from "../src/app-server/wire/index.js";
+import { SessionManager } from "../src/session/manager/session-manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
 import { executeCodexCheck } from "../src/tools/codex-check.js";
-import { DEFAULT_POLL_INTERVAL, WAITING_APPROVAL_POLL_INTERVAL } from "../src/types.js";
+import { DEFAULT_POLL_INTERVAL, WAITING_APPROVAL_POLL_INTERVAL } from "../src/types/index.js";
 import { advanceAsync } from "./helpers/clock.js";
 import { present } from "./helpers/present.js";
 

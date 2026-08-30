@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { ProgressInfo } from "../src/types.js";
+import type { ProgressInfo } from "../src/types/index.js";
 import {
   coerceProgressForStatus,
   interactionStateForStatus,

@@ -4,7 +4,7 @@ import type {
   RecommendedNextAction,
   SessionStartResult,
   SessionStatus,
-} from "../types.js";
+} from "../types/index.js";
 
 const TERMINAL_STATUSES = new Set<SessionStatus>(["idle", "error", "cancelled", "abandoned"]);
 
@@ -26,6 +26,37 @@ export function recommendedNextActionForStatus(
   return "poll";
 }
 
+/**
+ * The phase a status forces on the progress reported with it. A status not named here
+ * leaves the phase the session itself reported.
+ */
+const PHASE_FOR_STATUS: Partial<Record<SessionStatus, ProgressInfo["phase"]>> = {
+  idle: "finished",
+  error: "error",
+  cancelled: "cancelled",
+  abandoned: "abandoned",
+  waiting_approval: "waiting_approval",
+};
+
+/**
+ * How many answers the caller still owes the session.
+ *
+ * A session waiting for approval owes at least what the caller counted for it, so the
+ * higher of the two stands; a running one owes what its progress holds; a session that
+ * reached an end owes nothing, whatever its progress was left holding.
+ */
+function pendingActionCountForStatus(
+  status: SessionStatus,
+  progress: ProgressInfo,
+  pendingActionCount: number | undefined
+): number {
+  if (status === "waiting_approval") {
+    return Math.max(progress.pendingActionCount, pendingActionCount ?? 0);
+  }
+  if (status === "running") return progress.pendingActionCount;
+  return 0;
+}
+
 export function coerceProgressForStatus(
   status: SessionStatus,
   progress: ProgressInfo | undefined,
@@ -33,23 +64,11 @@ export function coerceProgressForStatus(
 ): ProgressInfo | undefined {
   if (!progress) return undefined;
 
-  let phase = progress.phase;
-  if (status === "idle") phase = "finished";
-  else if (status === "error") phase = "error";
-  else if (status === "cancelled") phase = "cancelled";
-  else if (status === "abandoned") phase = "abandoned";
-  else if (status === "waiting_approval") phase = "waiting_approval";
-
   return {
     ...progress,
-    phase,
+    phase: PHASE_FOR_STATUS[status] ?? progress.phase,
     lastEventAt: options?.completedAt ?? progress.lastEventAt,
-    pendingActionCount:
-      status === "waiting_approval"
-        ? Math.max(progress.pendingActionCount, options?.pendingActionCount ?? 0)
-        : status === "running"
-          ? progress.pendingActionCount
-          : 0,
+    pendingActionCount: pendingActionCountForStatus(status, progress, options?.pendingActionCount),
   };
 }
 

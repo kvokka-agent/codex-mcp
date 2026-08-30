@@ -9,7 +9,7 @@ in the bun/TypeScript floor that moves a tool interface.
 
 1. The vendored schema — `codex-schema/`, `codex-schema/metadata.json`. It
    records what actually arrives on the wire.
-2. The implementation — `src/app-server/protocol.ts` and everything reading it.
+2. The implementation — `src/app-server/wire/` and everything reading it.
    It is this repository's model of the schema, and the model is the side that
    drifts.
 3. The documents.
@@ -84,10 +84,10 @@ answers them because a CLI still sends them.
 
 An interface change touches every one of these, or states why it does not:
 
-- `src/server.ts` — the tool input and output schemas
+- `src/mcp/schemas/` — the tool input and output schemas
 - `src/tools/*.ts`
-- `src/session/manager.ts`
-- `src/app-server/protocol.ts`, `src/types.ts`
+- `src/session/manager/`
+- `src/app-server/wire/`, `src/types/`
 - `docs/TOOLS.md`, `docs/SESSIONS.md`, `docs/DESIGN.md`
 - `docs/E2E_LOCAL_TEST_PLAN.md`
 - `CHANGELOG.md`, under `## [Unreleased]`
@@ -104,7 +104,7 @@ Then `bun run check`.
   153, server notifications from 41 to 79 and server-to-client requests from 7
   to 11; the `v1/` conversation API is down to `InitializeParams` and
   `InitializeResponse`, and `EventMsg.json` — the schema of the
-  `codex exec --json` event stream — is gone. `src/app-server/protocol.ts`, the
+  `codex exec --json` event stream — is gone. `src/app-server/wire/`, the
   tests and the documents followed in the same pull request.
 
 Each pass overwrites this section.

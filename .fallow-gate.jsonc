@@ -1,0 +1,20 @@
+{
+  // The per-file ceilings `bun scripts/fallow-gate.mjs` enforces over what
+  // fallow measured. Every threshold fallow gates on itself — CRAP, cyclomatic
+  // and cognitive complexity, unit size, duplication — lives in
+  // `.fallowrc.jsonc` instead.
+  "include": ["src/**/*.ts", "scripts/**/*.mjs", "plugins/**/*.mjs"],
+  // Tests state what the code under them does; their size and their coupling
+  // follow the code and say nothing on their own. The vendored Codex JSON
+  // schemas are not hand-written.
+  "exclude": ["tests/**", "codex-schema/**"],
+  "ceilings": {
+    "lines": 500,
+    "fanOut": 15,
+    "complexityDensity": 0.7
+  },
+  // Each entry names the file, the ceiling it stands over, the ceiling it is
+  // held to instead, and why. An entry that no longer holds back a violation
+  // fails the run, so the list stays as short as the code makes it.
+  "exceptions": []
+}

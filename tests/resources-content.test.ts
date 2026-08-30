@@ -31,13 +31,13 @@ mockModule("child_process", realModule1, () => {
   };
 });
 
-const { createServer } = await import("../src/server.js");
-const { Methods } = await import("../src/app-server/protocol.js");
+const { createServer } = await import("../src/mcp/index.js");
+const { Methods } = await import("../src/app-server/wire/index.js");
 
 import type { SessionDefaults } from "../src/utils/session-defaults.js";
 
-const { registerResources, RESOURCE_URIS } = await import("../src/resources/register-resources.js");
-const { SessionManager } = await import("../src/session/manager.js");
+const { registerResources, RESOURCE_URIS } = await import("../src/resources/index.js");
+const { SessionManager } = await import("../src/session/manager/session-manager.js");
 const {
   APPROVAL_POLICIES,
   SANDBOX_MODES,
@@ -49,7 +49,7 @@ const {
   DEFAULT_IDLE_CLEANUP_MS,
   DEFAULT_RUNNING_CLEANUP_MS,
   DEFAULT_TERMINAL_CLEANUP_MS,
-} = await import("../src/types.js");
+} = await import("../src/types/index.js");
 const { MIN_CODEX_CLI_VERSION } = await import("../src/utils/codex-version.js");
 
 const DEFAULT_SPAWN_IMPL = spawnState.impl;

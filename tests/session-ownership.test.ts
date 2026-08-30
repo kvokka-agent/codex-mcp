@@ -7,11 +7,11 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "../src/mcp/index.js";
 import { ownStartedAt } from "../src/persistence/process-identity.js";
-import { createServer } from "../src/server.js";
-import { SessionManager } from "../src/session/manager.js";
+import { SessionManager } from "../src/session/manager/session-manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
-import { ErrorCode } from "../src/types.js";
+import { ErrorCode } from "../src/types/index.js";
 import { present } from "./helpers/present.js";
 
 class MockClient extends EventEmitter {

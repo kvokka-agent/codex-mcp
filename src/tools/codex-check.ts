@@ -1,7 +1,7 @@
 /**
  * codex_check tool — report session status and answer what it waits for.
  */
-import type { SessionManager } from "../session/manager.js";
+import type { SessionManager } from "../session/manager/session-manager.js";
 import {
   ALL_DECISIONS,
   type ApprovalDecision,
@@ -11,7 +11,7 @@ import {
   MAX_LONG_POLL_WAIT_MS,
   type NetworkPolicyAmendment,
   type SessionSignal,
-} from "../types.js";
+} from "../types/index.js";
 import { PollWindow } from "../utils/poll-window.js";
 import {
   activityLine,

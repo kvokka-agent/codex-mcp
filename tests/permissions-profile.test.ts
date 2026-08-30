@@ -8,14 +8,14 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { AppServerClient } from "../src/app-server/client.js";
+import type { AppServerClient } from "../src/app-server/client/index.js";
 import type {
   PermissionProfileListParams,
   PermissionProfileListResult,
   PermissionProfileSummary,
-} from "../src/app-server/protocol.js";
-import { createServer } from "../src/server.js";
-import { SessionManager } from "../src/session/manager.js";
+} from "../src/app-server/wire/index.js";
+import { createServer } from "../src/mcp/index.js";
+import { SessionManager } from "../src/session/manager/session-manager.js";
 import { executeCodex } from "../src/tools/codex.js";
 import { executeCodexReply } from "../src/tools/codex-reply.js";
 import type { SessionDefaults } from "../src/utils/session-defaults.js";

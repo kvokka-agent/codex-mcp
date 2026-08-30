@@ -93,7 +93,7 @@ preference.
 One line per round, and nothing else:
 
 ```text
-**Progress summary**: reading src/session/manager.ts
+**Progress summary**: reading src/session/manager/store.ts
 **Progress summary**: running the test suite — 5 min
 **Progress summary**: running the test suite — 15 min
 ```

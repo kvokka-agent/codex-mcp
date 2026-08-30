@@ -7,16 +7,20 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createServer } from "./mcp/index.js";
 import type { RecoveredSession } from "./persistence/index.js";
-import { createServer } from "./server.js";
-import type { SessionManager } from "./session/manager.js";
+import type { SessionManager } from "./session/manager/session-manager.js";
 import { reapOrphanProcesses } from "./session/orphan-reaper.js";
 import { type SessionPersistence, startDiskPersistence } from "./session/persistence.js";
 import {
   checkDefaultCodexExecutableAvailability,
   getDefaultCodexExecutable,
 } from "./utils/codex-executable.js";
-import { decideStdinShutdown } from "./utils/stdin-shutdown.js";
+import {
+  decideStdinShutdown,
+  stdinIsUnavailable,
+  stdinShutdownOrder,
+} from "./utils/stdin-shutdown.js";
 import { runStdioPreflight } from "./utils/stdio-guard.js";
 
 const STDIN_SHUTDOWN_CHECK_MS = 750;
@@ -294,12 +298,10 @@ class ServerLifecycle {
   private readonly evaluateStdinTermination = () => {
     if (this.closing || this.stdinClosedAt === undefined) return;
 
-    const stdinUnavailable =
-      process.stdin.destroyed || process.stdin.readableEnded || !process.stdin.readable;
     const elapsedMs = Date.now() - this.stdinClosedAt;
     const active = this.hasActiveSessions();
     const decision = decideStdinShutdown({
-      stdinUnavailable,
+      stdinUnavailable: stdinIsUnavailable(process.stdin),
       elapsedMs,
       maxWaitMs: STDIN_SHUTDOWN_MAX_WAIT_MS,
       hasActiveSessions: active,
@@ -311,25 +313,19 @@ class ServerLifecycle {
       this.stdinClosedReason = undefined;
       return;
     }
-    if (decision === "shutdown_now") {
-      console.error("[codex-mcp] stdin closed with no active sessions — shutting down");
-      void this.shutdown(`stdin_${this.stdinClosedReason ?? "closed"}`);
+    if (decision === "reschedule") {
+      if (active) {
+        console.error(
+          `[codex-mcp] stdin closed; ${this.sessionManager.getActiveSessionCount()} active session(s) — waiting up to ${STDIN_SHUTDOWN_MAX_WAIT_MS}ms (elapsed: ${elapsedMs}ms)`
+        );
+      }
+      this.scheduleStdinTerminationCheck();
       return;
     }
-    if (decision === "shutdown_timeout") {
-      console.error(
-        `[codex-mcp] stdin closed and drain period (${STDIN_SHUTDOWN_MAX_WAIT_MS}ms) elapsed — forcing shutdown`
-      );
-      void this.shutdown(`stdin_${this.stdinClosedReason ?? "closed"}_timeout`);
-      return;
-    }
-    // decision === "reschedule": keep waiting
-    if (active) {
-      console.error(
-        `[codex-mcp] stdin closed; ${this.sessionManager.getActiveSessionCount()} active session(s) — waiting up to ${STDIN_SHUTDOWN_MAX_WAIT_MS}ms (elapsed: ${elapsedMs}ms)`
-      );
-    }
-    this.scheduleStdinTerminationCheck();
+
+    const order = stdinShutdownOrder(decision, this.stdinClosedReason, STDIN_SHUTDOWN_MAX_WAIT_MS);
+    console.error(order.message);
+    void this.shutdown(order.reason);
   };
 
   private handleStdinTerminated(event: "end" | "close"): void {

@@ -5,7 +5,7 @@
  * send function it was built with.
  */
 import { describe, expect, it, jest } from "bun:test";
-import { PROGRESS_HEARTBEAT_MS, type ProgressInfo } from "../src/types.js";
+import { PROGRESS_HEARTBEAT_MS, type ProgressInfo } from "../src/types/index.js";
 import {
   activityLine,
   formatDuration,

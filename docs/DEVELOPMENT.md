@@ -140,14 +140,49 @@ bun run lint:fallow
 ```
 
 Runs the tests with coverage, converts the lcov bun writes into the Istanbul
-report fallow reads, then runs fallow against it. Handed no report fallow
-estimates coverage instead, and every CRAP score comes out inflated.
+report fallow reads, then gates on it. `bun run gate` is the second half alone,
+over whatever coverage report is already on disk.
 
-`bun run check` calls this in place of a bare `bun test`, so the suite runs once
-and the analysis reads what it measured. fallow exits non-zero on any finding,
-so an unused export, a circular import, a function past the complexity threshold
-or fresh duplication fails the gate. `bunx fallow explain <issue-type>` says what
-a rule means, and `.fallowrc.jsonc` holds the configuration.
+The gate is what the pre-commit hook runs, so a finding stops the commit rather
+than being reported into the log. That is also why a commit takes about half a
+minute: the CRAP thresholds are only as true as the coverage behind them, so the
+suite runs first.
+
+Each analysis is called by name — `fallow dead-code`, `fallow dupes`,
+`fallow health`. The combined `fallow` run exits 0 in every machine-readable
+format whatever it found, so a gate built on it passes everything.
+
+`.fallowrc.jsonc` holds what fallow enforces itself: CRAP, cyclomatic and
+cognitive complexity, the duplication percentage, dead code and the dependency
+rules. `.fallow-gate.jsonc` holds the three per-file ceilings fallow measures
+and leaves to the reader — lines, fan-out and complexity density — which
+`scripts/fallow-gate.mjs` reads out of the report and fails on. Beside those,
+`fallow health` prints a hotspot table — commits and lines moved per file over
+six months — which the reader acts on and the gate reads nothing out of.
+
+One trap sits behind the coverage `.fallowrc.jsonc` names: bun's lcov carries no
+per-function record, so `scripts/lib/lcov-istanbul.mjs` rebuilds the Istanbul
+`fnMap` from the source; without it fallow matches no function and every CRAP
+score comes out as if nothing were tested.
+
+A file over a ceiling is either split or excepted in `.fallow-gate.jsonc` by an
+entry naming the metric, the limit it is held to instead and the reason. An
+exception that no longer holds anything back fails the run, so the list stays as
+short as the code makes it. The same for a function over a fallow threshold:
+`health.thresholdOverrides` in `.fallowrc.jsonc` carries the files and the
+reason. `bunx fallow explain <issue-type>` says what a rule means.
+
+The README's fallow badge is drawn by shields.io from `docs/fallow-badge.json`,
+which `bun run badge` writes out of `fallow health --hotspots --score` — the
+same coverage report behind it, so `bun run coverage` runs first. `--hotspots`
+is what makes the score the one `fallow health` prints: ten points of it are the
+hotspot penalty, which fallow weighs only when asked and reads out of the last
+six months of commits, so the run needs the whole history as well. `bun run
+badge` refuses a report missing either. The `badge` job of
+`.github/workflows/release.yml` runs the pair over the commit each release
+shipped and pushes the file when the score moved
+([RELEASING.md](RELEASING.md#what-the-merge-does)), so the badge shows the last
+released tree rather than whatever `master` carries now.
 
 ## The plugin from the working tree
 

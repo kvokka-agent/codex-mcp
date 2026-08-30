@@ -12,9 +12,9 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AppServerClient } from "../src/app-server/client.js";
-import { Methods } from "../src/app-server/protocol.js";
-import { SessionManager } from "../src/session/manager.js";
+import type { AppServerClient } from "../src/app-server/client/index.js";
+import { Methods } from "../src/app-server/wire/index.js";
+import { SessionManager } from "../src/session/manager/session-manager.js";
 import { SessionPersistence } from "../src/session/persistence.js";
 import {
   bufferingWarningMessage,
@@ -24,7 +24,7 @@ import {
   MAX_SESSION_WARNINGS,
   MAX_WARNING_MESSAGE_CHARS,
 } from "../src/session/warnings.js";
-import type { CheckResult } from "../src/types.js";
+import type { CheckResult } from "../src/types/index.js";
 
 /** One hook run, with the fields `HookRunSummary` requires and the overrides a test needs. */
 function hookRun(overrides: Record<string, unknown> = {}): Record<string, unknown> {

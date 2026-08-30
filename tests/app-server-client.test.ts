@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { Methods } from "../src/app-server/protocol.js";
+import { Methods } from "../src/app-server/wire/index.js";
 import { _resetForTesting } from "../src/utils/codex-executable.js";
 import { mockModule } from "./helpers/mock.js";
 
@@ -91,7 +91,7 @@ async function spawnAppServer(): Promise<[string, string[], Record<string, unkno
   const proc = createMockProcess();
   spawnMock.mockReturnValue(proc);
 
-  const mod = await import("../src/app-server/client.js");
+  const mod = await import("../src/app-server/client/index.js");
   const client = new mod.AppServerClient();
   const out = await client.start({ approvalPolicy: "never", sandbox: "read-only" });
   expect(out.userAgent).toBe("mock");
@@ -177,7 +177,7 @@ describe("AppServerClient spawn behavior", () => {
   });
 
   it("uses extended timeout for startup RPCs", async () => {
-    const mod = await import("../src/app-server/client.js");
+    const mod = await import("../src/app-server/client/index.js");
     const client = new mod.AppServerClient();
 
     const requestSpy = jest.fn(async () => ({}));
@@ -212,7 +212,7 @@ describe("AppServerClient spawn behavior", () => {
   });
 
   it("terminates process when queued writes are dropped because stdin is not writable", async () => {
-    const mod = await import("../src/app-server/client.js");
+    const mod = await import("../src/app-server/client/index.js");
     const client = new mod.AppServerClient();
 
     const internal = client as unknown as {
@@ -221,28 +221,27 @@ describe("AppServerClient spawn behavior", () => {
         pid: number;
         kill: (signal?: NodeJS.Signals | number) => boolean;
       } | null;
-      writeQueue: string[];
-      queuedBytes: number;
-      flushWriteQueue: () => void;
+      writes: { flush: () => void };
       terminate: (signal: NodeJS.Signals) => void;
     };
+    const held = internal.writes as unknown as { queue: string[]; queuedBytes: number };
 
     internal.process = {
       stdin: { writable: false },
       pid: 4242,
       kill: () => true,
     };
-    internal.writeQueue = ['{"jsonrpc":"2.0","id":1}\n'];
-    internal.queuedBytes = internal.writeQueue[0].length;
+    held.queue = ['{"jsonrpc":"2.0","id":1}\n'];
+    held.queuedBytes = held.queue[0].length;
 
     const terminateSpy = jest
       .spyOn(internal as unknown as { terminate: (signal: NodeJS.Signals) => void }, "terminate")
       .mockImplementation(() => {});
 
-    internal.flushWriteQueue();
+    internal.writes.flush();
 
     expect(terminateSpy).toHaveBeenCalledWith("SIGTERM");
-    expect(internal.writeQueue).toHaveLength(0);
-    expect(internal.queuedBytes).toBe(0);
+    expect(held.queue).toHaveLength(0);
+    expect(held.queuedBytes).toBe(0);
   });
 });

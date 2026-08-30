@@ -6,13 +6,13 @@
  * session are a property of the installation rather than of whatever the caller
  * happened to pass.
  */
-import type { ApprovalPolicy, EffortLevel, SandboxMode } from "../types.js";
+import type { ApprovalPolicy, EffortLevel, SandboxMode } from "../types/index.js";
 import {
   APPROVAL_POLICIES,
   DEFAULT_APPROVAL_TIMEOUT_MS,
   DEFAULT_EFFORT_LEVEL,
   SANDBOX_MODES,
-} from "../types.js";
+} from "../types/index.js";
 
 export const SESSION_DEFAULT_ENV = {
   model: "CODEX_MCP_DEFAULT_MODEL",

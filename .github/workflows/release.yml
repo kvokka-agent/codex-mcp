@@ -145,6 +145,60 @@ jobs:
             "refs/tags/v$VERSION" "refs/tags/$plugin_tag"
           git push origin ":refs/heads/$CANDIDATE"
 
+  # The health score the README badge shows, measured on the commit that shipped.
+  # No `if`: `needs` alone says the release happened, because a merge that cut no
+  # version and a hand-started publish both leave `promote` skipped, and a failed
+  # `promote` skips this too.
+  badge:
+    needs: [prepare, promote]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          # Two things need the whole history here. The badge commit is pushed as
+          # a fast-forward of the release branch, and git proves that from the
+          # history between the two — the same reason `promote` asks for it. And
+          # ten points of the score `bun run badge` writes are the hotspot
+          # penalty fallow reads out of the commits of the last six months; over
+          # a shallow checkout no file is a hotspot, the penalty comes out 0 and
+          # the badge would claim 95 for a tree that scores 85.
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      # `fallow health` scores against the Istanbul report `.fallowrc.jsonc` names
+      # and fails without it, so the suite runs under coverage first.
+      - run: bun run coverage
+      - run: bun run badge
+      - name: Push the score onto the release branch
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+        run: |
+          if git diff --quiet -- docs/fallow-badge.json; then
+            echo "v$VERSION scores what the badge already shows."
+            exit 0
+          fi
+          git fetch --no-tags origin "refs/heads/$RELEASE_BRANCH"
+          tip=$(git rev-parse FETCH_HEAD)
+          if [ "$tip" != "$SHA" ]; then
+            echo "$RELEASE_BRANCH moved to $tip after v$VERSION was tagged, so this badge" \
+                 "commit is no longer a fast-forward of it. The next release measures the" \
+                 "score again and pushes it; v$VERSION itself is tagged and published."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # `[skip ci]` keeps this commit from starting a second release run and a
+          # second matrix over a tree whose only change is the badge.
+          git commit -m "chore(release): score v$VERSION [skip ci]" -- docs/fallow-badge.json
+          git push origin "HEAD:refs/heads/$RELEASE_BRANCH"
+
   # npm carries one @kvokka/codex-mcp and this repository is where it comes from. A
   # fork that merges a labelled pull request raises its own version and tags its own
   # copy; the run reaches this job and skips it.

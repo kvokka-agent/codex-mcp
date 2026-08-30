@@ -58,13 +58,38 @@ lists the rest.
 ```text
 src/
 ├── index.ts            startup, shutdown, the transport
-├── server.ts           tool registration and the zod schemas
-├── types.ts            shared constants, statuses, defaults
+├── mcp/                the MCP server the client talks to
+│   ├── index.ts              `createServer`, and what it wires together
+│   ├── register-tools.ts     the five tools, each with its executor
+│   ├── tool-context.ts       what a registration reads out of one server
+│   ├── envelope.ts           the answer every tool call is wrapped in
+│   └── schemas/              the zod input and output of each tool
+│       ├── common.ts             what more than one tool answers with
+│       ├── codex.ts              `codex` and `codex_reply`
+│       ├── check.ts              `codex_check`
+│       ├── session.ts            `codex_session`
+│       ├── setup.ts              `codex_setup`
+│       └── issue-sink.ts         where a refinement puts a complaint
+├── types/              shared constants, statuses, defaults
 ├── app-server/         the backend and the wire protocol
-│   ├── client.ts             app-server JSON-RPC over stdio
+│   ├── client/               app-server JSON-RPC over stdio
+│   │   ├── index.ts              `AppServerClient`, which owns the child
+│   │   ├── pending-requests.ts   the requests waiting for an answer
+│   │   ├── write-queue.ts        stdin, and what is held while it is full
+│   │   └── message-router.ts     stdout, routed by the shape of each message
+│   ├── wire/                 the message types, by what a message is about
+│   │   ├── index.ts              the whole model an importer reads
+│   │   ├── jsonrpc.ts            the envelope, and the handshake
+│   │   ├── common.ts             what a thread and a turn are both configured with
+│   │   ├── thread.ts             start, fork, resume, delete
+│   │   ├── turn.ts               start, steer, and the requests sent back mid-turn
+│   │   ├── account.ts            the credential, and the Windows sandbox
+│   │   ├── notifications.ts      what the server says unasked
+│   │   └── methods.ts            every method name
 │   ├── client-interface.ts   what a backend must implement
 │   ├── codex-bin.ts          how to spawn it on this platform
-│   ├── protocol.ts           method names and message types
+│   ├── child-stdio.ts        line framing, and the child's stderr
+│   ├── child-shutdown.ts     waiting for the child to exit
 │   └── lifecycle.ts
 ├── persistence/        the state directory
 │   ├── index.ts
@@ -76,25 +101,62 @@ src/
 │   ├── retention.ts
 │   └── fs-errors.ts
 ├── session/
-│   ├── manager.ts            the state machine
+│   ├── manager/              the state machine
+│   │   ├── session-manager.ts    the facade every caller holds
+│   │   ├── core.ts               `SessionRuntime`, the state the rest act on
+│   │   ├── store.ts              the session index and its writes to disk
+│   │   ├── waiters.ts            the long poll
+│   │   ├── pending-requests.ts   the requests a session holds open
+│   │   ├── turns.ts              create and reply
+│   │   ├── fork-resume.ts        pick an existing thread back up
+│   │   ├── turn-control.ts       interrupt, steer, background terminals
+│   │   ├── cleanup.ts            cancel, clean, the timer sweep
+│   │   ├── notifications.ts      the notification router and the thread handlers
+│   │   ├── notifications-stream.ts  deltas, shell noise, warnings, hooks
+│   │   ├── server-requests.ts    approvals and questions the backend opens
+│   │   ├── approvals.ts          the caller's answer to one of them
+│   │   ├── approval-decisions.ts what a decision may be, and its wire shape
+│   │   ├── approval-io.ts        answering the backend, and what is logged
+│   │   ├── handlers.ts           what this server does with each backend message
+│   │   ├── poll.ts               what a caller reads without moving anything
+│   │   ├── events.ts             the event log, the activity line, the listeners
+│   │   ├── progress.ts           phase, tokens, the poll interval
+│   │   ├── session-decode.ts     a session read off Codex or off disk
+│   │   ├── session-view.ts       a session as a caller reads it, and its signal
+│   │   ├── turn-params.ts        what a turn is started with
+│   │   └── read.ts               reading a value out of foreign JSON
 │   ├── persistence.ts        the disk adapter
 │   ├── activity-marker.ts
 │   └── orphan-reaper.ts
-├── tools/              one file per tool
+├── tools/              one file per tool, one directory for `codex_setup`
+│   └── codex-setup/
+│       ├── index.ts              `executeCodexSetup`, and the answer it builds
+│       ├── probe.ts              what the machine answers about Codex
+│       ├── advice.ts             a warning and its next step, per condition
+│       └── result.ts             the shape of the answer
 ├── utils/
-└── resources/register-resources.ts
+└── resources/          the documents the server advertises as MCP resources
+    ├── index.ts              registration, and the reader behind each uri
+    ├── catalog.ts            the uris, the catalog entries, the read result
+    ├── deps.ts               what the readers are given
+    ├── server-info.ts        the two JSON documents
+    └── docs/                 one file per markdown document
 ```
 
 ## Conventions
 
 - ESM and TypeScript. Local imports carry the `.js` suffix.
 - `unknown` plus narrowing, never `any`.
-- Validation lives in the zod schemas of `src/server.ts`.
+- Validation lives in the zod schemas of `src/mcp/schemas/`.
+- `src/session/manager/` keeps its state in one `SessionRuntime` and its
+  behaviour in free functions over it. `SessionManager` is a facade of
+  one-line delegates; a module states what it does as `f(runtime, …)`, and no
+  module reads another's fields.
 - Tool responses stay MCP-safe: `{ content, structuredContent?, isError }`.
 - Diagnostics go to `console.error`. stdout is the MCP channel and carries
   nothing but JSON-RPC.
 - `approvalPolicy` stays required on `codex`, and a `codex` call names exactly
-  one of `sandbox` and `permissions`. The zod schema of `src/server.ts` refuses
+  one of `sandbox` and `permissions`. `src/mcp/schemas/codex.ts` refuses
   both together and refuses neither, so the pair never reaches the backend.
 - Sensitive fields stay redacted unless the caller passes
   `includeSensitive: true`.
@@ -166,8 +228,8 @@ These are the patterns a change keeps, each of them written after it was broken:
   it runs in. `executeCodexCheck` builds its `PollWindow` from `process.env`
   when the caller names none, and a shell exporting `MCP_TOOL_TIMEOUT=500` left
   seven long-poll tests with no window to wait in and nothing to wake from.
-- `tests/protocol-schema.test.ts` holds `protocol.ts` against `codex-schema/`
-  and fails on drift. A new protocol field gets a check there.
+- `tests/protocol-schema.test.ts` holds `src/app-server/wire/` against
+  `codex-schema/` and fails on drift. A new protocol field gets a check there.
 - `tests/server-lifecycle.e2e.test.ts` drives the built server as a child
   process against `tests/helpers/fake-codex.mjs`, and skips itself on Windows —
   the stand-in is a `.mjs` and Windows spawns by extension. What it measures
