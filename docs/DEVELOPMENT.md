@@ -172,6 +172,14 @@ short as the code makes it. The same for a function over a fallow threshold:
 `health.thresholdOverrides` in `.fallowrc.jsonc` carries the files and the
 reason. `bunx fallow explain <issue-type>` says what a rule means.
 
+The README's fallow badge is drawn by shields.io from `docs/fallow-badge.json`,
+which `bun run badge` writes out of `fallow health --score` — the same coverage
+report behind it, so `bun run coverage` runs first. The `badge` job of
+`.github/workflows/release.yml` runs the pair over the commit each release
+shipped and pushes the file when the score moved
+([RELEASING.md](RELEASING.md#what-the-merge-does)), so the badge shows the last
+released tree rather than whatever `master` carries now.
+
 ## The plugin from the working tree
 
 `plugins/codex-mcp/` ships the `codex` subagent and the `PreToolUse` hook
