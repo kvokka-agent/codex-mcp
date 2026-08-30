@@ -109,6 +109,10 @@ jobs:
           # default depth of 1 carries none of it, and the push is rejected as a
           # non-fast-forward however far ahead the candidate actually is.
           fetch-depth: 0
+      # `scripts/release.mjs` names the plugin tag, and bun is what runs it.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
       - name: Move the release branch to the verified commit and tag it
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -127,11 +131,17 @@ jobs:
             exit 1
           fi
           git tag "v$VERSION" "$SHA"
-          # One push, both refs: GitHub honours --atomic, so a branch update it rejects
-          # takes the tag down with it. The branch update is a plain fast-forward, which
+          # Claude Code resolves a plugin dependency's version range against
+          # `{plugin-name}--v{version}` tags alone, so the release carries that tag beside
+          # `v$VERSION` on the same commit.
+          plugin_tag=$(bun scripts/release.mjs tag "$VERSION")
+          git tag "$plugin_tag" "$SHA"
+          # One push, every ref: GitHub honours --atomic, so a branch update it rejects
+          # takes the tags down with it. The branch update is a plain fast-forward, which
           # is what rejects it when a commit reaches the branch between the check above
           # and this line.
-          git push --atomic origin "$SHA:refs/heads/$RELEASE_BRANCH" "refs/tags/v$VERSION"
+          git push --atomic origin "$SHA:refs/heads/$RELEASE_BRANCH" \
+            "refs/tags/v$VERSION" "refs/tags/$plugin_tag"
           git push origin ":refs/heads/$CANDIDATE"
 
   # npm carries one @kvokka/codex-mcp and this repository is where it comes from. A

@@ -83,6 +83,19 @@ export function applyVersion(content, target, version) {
   return content.replace(target.pattern, (hit) => hit.replace(VERSION_IN_TEXT, version));
 }
 
+// Claude Code resolves a plugin dependency's version range against tags named
+// `{plugin-name}--v{version}` on the repository hosting the plugin, and reads no other
+// form: `v{version}` alone leaves a dependent plugin at `no-matching-tag`. The release
+// therefore carries both tags on the same commit.
+export function pluginTag(version, root = ROOT) {
+  const manifest = join(root, "plugins", "codex-mcp", ".claude-plugin", "plugin.json");
+  const { name } = JSON.parse(readFileSync(manifest, "utf8"));
+  if (!name) {
+    throw new Error(`${manifest} carries no plugin name`);
+  }
+  return `${name}--v${version}`;
+}
+
 export function currentVersion(root = ROOT) {
   return JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 }
@@ -107,6 +120,10 @@ function main(argv) {
     }
     return;
   }
+  if (command === "tag") {
+    process.stdout.write(`${pluginTag(argument ?? currentVersion())}\n`);
+    return;
+  }
   if (command === "bump") {
     const version = nextVersion(currentVersion(), argument);
     writeVersion(version);
@@ -114,7 +131,8 @@ function main(argv) {
     return;
   }
   throw new Error(
-    `usage: release.mjs level '<labels as a json array>' | release.mjs bump <${LEVELS.join("|")}>`
+    `usage: release.mjs level '<labels as a json array>' | release.mjs bump <${LEVELS.join("|")}>` +
+      " | release.mjs tag [version]"
   );
 }
 

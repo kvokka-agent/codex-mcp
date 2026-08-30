@@ -9,7 +9,7 @@ const WORKFLOWS = join(dirname(fileURLToPath(import.meta.url)), "..", ".github",
 const LEVEL = { none: 0, read: 1, write: 2 } as const;
 type Scope = string;
 type Permissions = Record<Scope, keyof typeof LEVEL>;
-type Step = { run?: string };
+type Step = { run?: string; uses?: string; with?: Record<string, unknown> };
 type Job = { uses?: string; permissions?: Permissions; steps?: Step[] };
 type Workflow = { on: Record<string, unknown>; jobs: Record<string, Job> };
 
@@ -74,5 +74,35 @@ describe("the workflow npm sees", () => {
 
   it("gives release.yml the trigger that publishes a tag by hand", () => {
     expect(workflow("release.yml").on).toHaveProperty("workflow_dispatch");
+  });
+});
+
+// A plugin dependency's version range resolves against `{plugin-name}--v{version}` tags
+// and no other form, so a release that pushes `v{version}` alone leaves every dependent
+// plugin at `no-matching-tag`.
+describe("the release tags", () => {
+  const promote = workflow("release.yml").jobs.promote;
+  const step = promote.steps?.find((each) => each.run?.includes("git tag")) as Step;
+
+  it("carries the plugin tag beside the version tag", () => {
+    expect(step.run).toContain('git tag "v$VERSION" "$SHA"');
+    expect(step.run).toContain("bun scripts/release.mjs tag");
+    expect(step.run).toContain('git tag "$plugin_tag" "$SHA"');
+  });
+
+  it("pushes the branch and both tags in one atomic push", () => {
+    const push = (step.run as string)
+      .split("\n")
+      .join(" ")
+      .replace(/\\\s+/g, " ")
+      .split(" git ")
+      .find((command) => command.startsWith("push --atomic")) as string;
+
+    expect(push).toContain("refs/tags/v$VERSION");
+    expect(push).toContain("refs/tags/$plugin_tag");
+  });
+
+  it("gives the job the bun that names the tag", () => {
+    expect(promote.steps?.some((each) => each.uses?.startsWith("oven-sh/setup-bun@"))).toBe(true);
   });
 });
