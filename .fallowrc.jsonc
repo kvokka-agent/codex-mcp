@@ -14,6 +14,30 @@
     "minOccurrences": 3,
     "threshold": 0.3
   },
+  "rules": {
+    // None of these fires today, and each one is a way the dependency list and
+    // the module graph drift from what the code does.
+    "re-export-cycle": "error",
+    "type-only-dependencies": "error",
+    "test-only-dependencies": "error",
+    "dev-dependencies-in-production": "error",
+    "unused-dev-dependencies": "error",
+    "unused-optional-dependencies": "error",
+    "unused-dependency-overrides": "error",
+    // A suppression names what it silences and why, and stops silencing once
+    // the finding behind it is gone.
+    "require-suppression-reason": "error",
+    "stale-suppressions": "error",
+    // Off: the files it names are the launchers `bun run check` runs as their
+    // own processes — the build, the two runtime scripts, the coverage bridge
+    // and this gate. No unit test loads one, and what they decide lives in
+    // scripts/lib/, which the tests do reach.
+    "coverage-gaps": "off",
+    // Off: it asks for an export of every type an exported signature names,
+    // and unused-exports then reports each of those as an export nobody
+    // imports. The two rules cannot both be satisfied.
+    "private-type-leaks": "off"
+  },
   "health": {
     "coverage": "coverage/coverage-final.json",
     // CRAP is cyclomatic complexity weighted by how little of the function the
@@ -34,5 +58,52 @@
         "reason": "these launchers run as their own processes in the check gate, never inside bun test, so no coverage report reaches them and their CRAP carries the full untested penalty; what they decide lives in scripts/lib/, which the tests do reach"
       }
     ]
+  },
+  // What may reach what. Each zone names the zones below it, so a dependency
+  // that runs the other way is a finding rather than a discovery made later.
+  // `allowTypeOnly` is where a shape is named but nothing is called: the value
+  // sets and the config reader spell out wire types they never construct.
+  "boundaries": {
+    "zones": [
+      { "name": "types", "patterns": ["src/types/**"] },
+      { "name": "utils", "patterns": ["src/utils/**"] },
+      { "name": "app-server", "patterns": ["src/app-server/**"] },
+      { "name": "persistence", "patterns": ["src/persistence/**"] },
+      { "name": "session", "patterns": ["src/session/**"] },
+      { "name": "resources", "patterns": ["src/resources/**"] },
+      { "name": "tools", "patterns": ["src/tools/**"] },
+      { "name": "mcp", "patterns": ["src/mcp/**"] },
+      { "name": "entrypoint", "patterns": ["src/index.ts"] }
+    ],
+    "rules": [
+      { "from": "types", "allow": [], "allowTypeOnly": ["app-server"] },
+      { "from": "utils", "allow": ["types"], "allowTypeOnly": ["app-server"] },
+      { "from": "app-server", "allow": ["types", "utils"] },
+      { "from": "persistence", "allow": ["types", "utils"] },
+      { "from": "session", "allow": ["types", "utils", "app-server", "persistence"] },
+      { "from": "resources", "allow": ["types", "utils", "session"] },
+      { "from": "tools", "allow": ["types", "utils", "app-server", "session"] },
+      {
+        "from": "mcp",
+        "allow": ["types", "utils", "app-server", "persistence", "session", "resources", "tools"]
+      },
+      {
+        "from": "entrypoint",
+        "allow": [
+          "types",
+          "utils",
+          "app-server",
+          "persistence",
+          "session",
+          "resources",
+          "tools",
+          "mcp"
+        ]
+      }
+    ],
+    "coverage": {
+      "requireAllFiles": true,
+      "allowUnmatched": ["tests/**", "scripts/**", "plugins/**", "biome-plugins/**"]
+    }
   }
 }
