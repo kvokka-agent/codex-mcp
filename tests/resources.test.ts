@@ -26,7 +26,7 @@ mockModule("child_process", realModule1, () => {
   };
 });
 
-const { registerResources, RESOURCE_URIS } = await import("../src/resources/register-resources.js");
+const { registerResources, RESOURCE_URIS } = await import("../src/resources/index.js");
 const { _resetForTesting } = await import("../src/utils/codex-executable.js");
 
 interface ReadResult {

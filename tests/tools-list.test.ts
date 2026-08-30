@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { RESOURCE_URIS } from "../src/resources/register-resources.js";
+import { RESOURCE_URIS } from "../src/resources/index.js";
 import { createServer } from "../src/server.js";
 import { SESSION_DEFAULT_ENV } from "../src/utils/session-defaults.js";
 import { present } from "./helpers/present.js";

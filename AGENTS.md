@@ -82,7 +82,12 @@ src/
 │   └── orphan-reaper.ts
 ├── tools/              one file per tool
 ├── utils/
-└── resources/register-resources.ts
+└── resources/          the documents the server advertises as MCP resources
+    ├── index.ts              registration, and the reader behind each uri
+    ├── catalog.ts            the uris, the catalog entries, the read result
+    ├── deps.ts               what the readers are given
+    ├── server-info.ts        the two JSON documents
+    └── docs/                 one file per markdown document
 ```
 
 ## Conventions
