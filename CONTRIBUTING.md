@@ -20,8 +20,11 @@ code conventions and the implementation patterns this repository keeps.
 
 1. Branch from `master`.
 2. Make the change, and update the documents it makes wrong in the same branch.
-3. `bun run check`.
-4. Open the pull request against `kvokka/codex-mcp`; a fork only holds the
+3. Write what a user of the package would act on under `## [Unreleased]` in
+   `CHANGELOG.md`. The release moves that block under the version it cuts, so no
+   pull request writes a version heading.
+4. `bun run check`.
+5. Open the pull request against `kvokka/codex-mcp`; a fork only holds the
    branch.
 
 A `release:major`, `release:minor` or `release:patch` label cuts the release

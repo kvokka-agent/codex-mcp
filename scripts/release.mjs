@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
-// The rules of the label-driven release: which version follows the current one,
-// which label asks for it, and which files carry it. `.github/workflows/release.yml`
-// calls this file; `tests/release.test.ts` measures it against the files themselves.
+// The rules of the label-driven release: which version follows the current one, which
+// label asks for it, which files carry it, and how the changelog's `## [Unreleased]` block
+// becomes the section of the version being cut. `.github/workflows/release.yml` calls this
+// file; `tests/release.test.ts` measures it against the files themselves.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -11,6 +12,9 @@ export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const LEVELS = ["major", "minor", "patch"];
 const LABEL_PREFIX = "release:";
+
+export const CHANGELOG = "CHANGELOG.md";
+const UNRELEASED_HEADING = "## [Unreleased]";
 
 const VERSION = /^(\d+)\.(\d+)\.(\d+)$/;
 const VERSION_IN_TEXT = /\d+\.\d+\.\d+/;
@@ -96,19 +100,51 @@ export function pluginTag(version, root = ROOT) {
   return `${name}--v${version}`;
 }
 
+// The changelog is written into `## [Unreleased]` by the pull requests that land, and the
+// release moves that block whole under the version it cuts. `date` is the day the release
+// runs, in UTC, which is the day the tag carries.
+export function rotateChangelog(content, version, date) {
+  const lines = content.split("\n");
+  const start = lines.findIndex((line) => line.trim() === UNRELEASED_HEADING);
+  if (start === -1) {
+    throw new Error(`${CHANGELOG} carries no ${UNRELEASED_HEADING} heading to release`);
+  }
+  const heading = `## [${version}] - ${date}`;
+  if (lines.some((line) => line.startsWith(`## [${version}]`))) {
+    throw new Error(`${CHANGELOG} already carries a section for ${version}`);
+  }
+  const after = lines.findIndex((line, index) => index > start && line.startsWith("## ["));
+  const end = after === -1 ? lines.length : after;
+  const released = lines
+    .slice(start + 1, end)
+    .join("\n")
+    .trim();
+  const rest = lines.slice(end).join("\n");
+  const moved = released ? `${heading}\n\n${released}\n` : `${heading}\n`;
+  const before = lines.slice(0, start).join("\n");
+  return `${before}\n${UNRELEASED_HEADING}\n\n${moved}\n${rest}`;
+}
+
 export function currentVersion(root = ROOT) {
   return JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 }
 
-function writeVersion(version, root = ROOT) {
+// Every file the release rewrites is read and rewritten in memory before the first one
+// reaches disk, so a tree a bump refuses is the tree it found.
+function writeRelease(version, date, root = ROOT) {
+  const changelog = join(root, CHANGELOG);
   const written = TARGETS.map((target) => {
     const file = join(root, target.path);
     return [file, applyVersion(readFileSync(file, "utf8"), target, version)];
   });
+  written.push([changelog, rotateChangelog(readFileSync(changelog, "utf8"), version, date)]);
   for (const [file, content] of written) {
     writeFileSync(file, content);
   }
-  return TARGETS.map((target) => target.path);
+}
+
+export function today(now = new Date()) {
+  return now.toISOString().slice(0, 10);
 }
 
 function main(argv) {
@@ -126,7 +162,7 @@ function main(argv) {
   }
   if (command === "bump") {
     const version = nextVersion(currentVersion(), argument);
-    writeVersion(version);
+    writeRelease(version, today());
     process.stdout.write(`${version}\n`);
     return;
   }

@@ -187,6 +187,11 @@ These are the patterns a change keeps, each of them written after it was broken:
 - Open every pull request against `kvokka/codex-mcp`; a fork such as
   `kvokka-agent/codex-mcp` only holds the branch:
   `gh pr create --repo kvokka/codex-mcp --base master --head <fork-owner>:<branch>`.
+- A change a caller of the package would act on is written under
+  `## [Unreleased]` in `CHANGELOG.md`, in the pull request that makes it. Write no
+  version heading by hand: the release moves that block under the version it cuts,
+  and every section below stays as the version that shipped it left it —
+  [docs/RELEASING.md](docs/RELEASING.md#the-changelog).
 - A `release:major`, `release:minor` or `release:patch` label cuts the release
   when the pull request merges — [docs/RELEASING.md](docs/RELEASING.md).
 - Never commit `dist/`, `node_modules/` or `.env`.

@@ -90,7 +90,7 @@ An interface change touches every one of these, or states why it does not:
 - `src/app-server/protocol.ts`, `src/types.ts`
 - `docs/TOOLS.md`, `docs/SESSIONS.md`, `docs/DESIGN.md`
 - `docs/E2E_LOCAL_TEST_PLAN.md`
-- `CHANGELOG.md`
+- `CHANGELOG.md`, under `## [Unreleased]`
 - the matching `tests/*.test.ts`
 
 Then `bun run check`.
