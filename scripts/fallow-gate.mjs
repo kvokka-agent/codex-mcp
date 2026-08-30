@@ -51,33 +51,14 @@ function trackedFiles(include, exclude) {
 }
 
 const config = require(join(ROOT, ".fallow-gate.jsonc"));
-const { include, exclude, churn, ceilings, exceptions } = config;
-
-// `fallow health --hotspots` is asked on its own because the combined run
-// hard-codes `--min-commits 3`, which drops a file with fewer commits than that
-// out of the churn table entirely.
-const hotspotReport = runFallow([
-  "health",
-  "--hotspots",
-  "--since",
-  churn.since,
-  "--min-commits",
-  String(churn.minCommits),
-]);
+const { include, exclude, ceilings, exceptions } = config;
 
 const files = measuredFiles({
   paths: trackedFiles(include, exclude),
   scores: runFallow(["health", "--file-scores"]).file_scores,
-  hotspots: hotspotReport.hotspots,
-  hotspotSummary: hotspotReport.hotspot_summary,
   readSource: (path) => readFileSync(join(ROOT, path), "utf8"),
 });
 
-const findings = gateFindings({
-  files,
-  ceilings,
-  exceptions,
-  hotspotSummary: hotspotReport.hotspot_summary,
-});
-console.log(describeGate({ files, findings, ceilings, since: churn.since }));
+const findings = gateFindings({ files, ceilings, exceptions });
+console.log(describeGate({ files, findings, ceilings }));
 process.exit(gateFailed(findings) ? 1 : 0);

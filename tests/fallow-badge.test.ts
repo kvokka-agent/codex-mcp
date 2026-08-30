@@ -24,11 +24,20 @@ const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
 // D >= 40, F below.
 const GRADES = ["A", "B", "C", "D", "F"];
 
+// What `fallow health --hotspots --score --format json` answered over this
+// repository: the hotspot penalty is in `penalties` and the history behind it
+// was whole.
+const SCORED = {
+  kind: "health",
+  health_score: { score: 85.2, grade: "A", penalties: { hotspots: 10.0, coupling: 2.2 } },
+  hotspot_summary: { since: "6 months", min_commits: 3, files_analyzed: 43, shallow_clone: false },
+};
+
 describe("readHealthScore", () => {
   it("returns the score section of a health report", () => {
-    const health = readHealthScore({ kind: "health", health_score: { score: 95.2, grade: "A" } });
+    const health = readHealthScore(SCORED);
 
-    expect(health).toEqual({ score: 95.2, grade: "A" });
+    expect(health).toEqual(SCORED.health_score);
   });
 
   // `fallow health` scores against the coverage report `.fallowrc.jsonc` names
@@ -41,6 +50,27 @@ describe("readHealthScore", () => {
 
   it("refuses a report carrying no score at all", () => {
     expect(() => readHealthScore({ kind: "health" })).toThrow("no health_score");
+  });
+
+  // A run without `--hotspots` scores 95.2 here against the 85.2 the full
+  // analysis prints, and the only place it says so is the missing key.
+  it("refuses a score whose penalties never weighed the hotspots", () => {
+    expect(() =>
+      readHealthScore({
+        kind: "health",
+        health_score: { score: 95.2, grade: "A", penalties: { coupling: 2.2 } },
+      })
+    ).toThrow("ask for it with --hotspots");
+  });
+
+  it("refuses a hotspot penalty read out of a clone with no history", () => {
+    expect(() =>
+      readHealthScore({
+        ...SCORED,
+        health_score: { score: 95.2, grade: "A", penalties: { hotspots: 0.0, coupling: 2.2 } },
+        hotspot_summary: { ...SCORED.hotspot_summary, files_analyzed: 0, shallow_clone: true },
+      })
+    ).toThrow("shallow clone");
   });
 });
 

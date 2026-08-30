@@ -158,9 +158,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
-          # The badge commit is pushed as a fast-forward of the release branch, and
-          # git proves that from the history between the two — the same reason
-          # `promote` asks for the whole of it.
+          # Two things need the whole history here. The badge commit is pushed as
+          # a fast-forward of the release branch, and git proves that from the
+          # history between the two — the same reason `promote` asks for it. And
+          # ten points of the score `bun run badge` writes are the hotspot
+          # penalty fallow reads out of the commits of the last six months; over
+          # a shallow checkout no file is a hotspot, the penalty comes out 0 and
+          # the badge would claim 95 for a tree that scores 85.
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:

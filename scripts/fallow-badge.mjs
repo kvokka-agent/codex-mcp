@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // Writes the shields.io endpoint document the README badge is drawn from, out
-// of what `fallow health --score` measured. `scripts/lib/fallow-badge.mjs`
-// holds what it decides; this file gets fallow to speak and writes the file.
+// of what `fallow health --hotspots --score` measured.
+// `scripts/lib/fallow-badge.mjs` holds what it decides; this file gets fallow to
+// speak and writes the file.
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -25,7 +26,7 @@ function readCurrent(path) {
 
 // `fallow health` scores against the coverage report `.fallowrc.jsonc` names
 // and fails without it, so `bun run coverage` runs before this.
-const run = spawnSync("bunx", ["fallow", "health", "--score", "--format", "json"], {
+const run = spawnSync("bunx", ["fallow", "health", "--hotspots", "--score", "--format", "json"], {
   cwd: ROOT,
   encoding: "utf8",
   maxBuffer: 512 * 1024 * 1024,

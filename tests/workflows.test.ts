@@ -162,3 +162,18 @@ describe("the release badge job", () => {
     expect(badge.permissions?.contents).toBe("write");
   });
 });
+
+// Ten points of this repository's health score are the hotspot penalty, which fallow
+// reads out of the commits of the last six months. Over the default depth of 1 no file
+// is a hotspot, the penalty comes out 0, and the score the gate prints climbs to 95
+// against the 85 the badge carries.
+describe("the ci check job", () => {
+  const check = workflow("ci.yml").jobs.check;
+  const steps = check.steps ?? [];
+
+  it("checks the tree out with the history the health score is read from", () => {
+    const checkout = steps.find((step) => step.uses?.startsWith("actions/checkout@")) as Step;
+
+    expect(checkout.with?.["fetch-depth"]).toBe(0);
+  });
+});

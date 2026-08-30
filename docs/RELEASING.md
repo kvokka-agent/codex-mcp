@@ -49,7 +49,7 @@ merge an empty follow-up pull request carrying the label you meant.
    labelled pull request raises its own version and tags its own copy, and its run
    reaches this job, skips it and ends green.
 5. **badge** measures the released commit — `bun install`, `bun run coverage`, then
-   `bun run badge`, which reads `fallow health --score` — and pushes
+   `bun run badge`, which reads `fallow health --hotspots --score` — and pushes
    `docs/fallow-badge.json` onto `master` as `chore(release): score vX.Y.Z [skip ci]`
    when the score moved. The commit is a plain fast-forward of the tip **promote**
    left, and the job says so and ends green where `master` moved on in between: the

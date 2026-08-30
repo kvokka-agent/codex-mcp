@@ -154,16 +154,16 @@ format whatever it found, so a gate built on it passes everything.
 
 `.fallowrc.jsonc` holds what fallow enforces itself: CRAP, cyclomatic and
 cognitive complexity, the duplication percentage, dead code and the dependency
-rules. `.fallow-gate.jsonc` holds the four per-file ceilings fallow measures and
-leaves to the reader — lines, fan-out, complexity density and churn — which
-`scripts/fallow-gate.mjs` reads out of the report and fails on.
+rules. `.fallow-gate.jsonc` holds the three per-file ceilings fallow measures
+and leaves to the reader — lines, fan-out and complexity density — which
+`scripts/fallow-gate.mjs` reads out of the report and fails on. Beside those,
+`fallow health` prints a hotspot table — commits and lines moved per file over
+six months — which the reader acts on and the gate reads nothing out of.
 
-Two traps behind those two files. bun's lcov carries no per-function record, so
-`scripts/lib/lcov-istanbul.mjs` rebuilds the Istanbul `fnMap` from the source;
-without it fallow matches no function and every CRAP score comes out as if
-nothing were tested. And fallow keys churn by the path as it stands, following
-no rename, so splitting a file is what clears its churn and a facade left on the
-old path is not.
+One trap sits behind the coverage `.fallowrc.jsonc` names: bun's lcov carries no
+per-function record, so `scripts/lib/lcov-istanbul.mjs` rebuilds the Istanbul
+`fnMap` from the source; without it fallow matches no function and every CRAP
+score comes out as if nothing were tested.
 
 A file over a ceiling is either split or excepted in `.fallow-gate.jsonc` by an
 entry naming the metric, the limit it is held to instead and the reason. An
@@ -173,8 +173,12 @@ short as the code makes it. The same for a function over a fallow threshold:
 reason. `bunx fallow explain <issue-type>` says what a rule means.
 
 The README's fallow badge is drawn by shields.io from `docs/fallow-badge.json`,
-which `bun run badge` writes out of `fallow health --score` — the same coverage
-report behind it, so `bun run coverage` runs first. The `badge` job of
+which `bun run badge` writes out of `fallow health --hotspots --score` — the
+same coverage report behind it, so `bun run coverage` runs first. `--hotspots`
+is what makes the score the one `fallow health` prints: ten points of it are the
+hotspot penalty, which fallow weighs only when asked and reads out of the last
+six months of commits, so the run needs the whole history as well. `bun run
+badge` refuses a report missing either. The `badge` job of
 `.github/workflows/release.yml` runs the pair over the commit each release
 shipped and pushes the file when the score moved
 ([RELEASING.md](RELEASING.md#what-the-merge-does)), so the badge shows the last
