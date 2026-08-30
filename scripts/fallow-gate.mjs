@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describeGate, gateFindings, measuredFiles } from "./lib/fallow-gate.mjs";
+import { describeGate, gateFailed, gateFindings, measuredFiles } from "./lib/fallow-gate.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -56,20 +56,28 @@ const { include, exclude, churn, ceilings, exceptions } = config;
 // `fallow health --hotspots` is asked on its own because the combined run
 // hard-codes `--min-commits 3`, which drops a file with fewer commits than that
 // out of the churn table entirely.
+const hotspotReport = runFallow([
+  "health",
+  "--hotspots",
+  "--since",
+  churn.since,
+  "--min-commits",
+  String(churn.minCommits),
+]);
+
 const files = measuredFiles({
   paths: trackedFiles(include, exclude),
   scores: runFallow(["health", "--file-scores"]).file_scores,
-  hotspots: runFallow([
-    "health",
-    "--hotspots",
-    "--since",
-    churn.since,
-    "--min-commits",
-    String(churn.minCommits),
-  ]).hotspots,
+  hotspots: hotspotReport.hotspots,
+  hotspotSummary: hotspotReport.hotspot_summary,
   readSource: (path) => readFileSync(join(ROOT, path), "utf8"),
 });
 
-const findings = gateFindings({ files, ceilings, exceptions });
+const findings = gateFindings({
+  files,
+  ceilings,
+  exceptions,
+  hotspotSummary: hotspotReport.hotspot_summary,
+});
 console.log(describeGate({ files, findings, ceilings, since: churn.since }));
-process.exit(findings.failures.length + findings.stale.length === 0 ? 0 : 1);
+process.exit(gateFailed(findings) ? 1 : 0);

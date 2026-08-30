@@ -24,6 +24,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
+          # `bun run lint:fallow` reads churn out of the git history: how many
+          # lines each file gained and lost over the last six months. The
+          # default depth of 1 carries none of it, and fallow answers a shallow
+          # clone with a hotspot table in which every file was added whole by
+          # one commit — a table no churn ceiling can be exceeded in.
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0

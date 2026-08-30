@@ -19,6 +19,32 @@ const METRICS = {
   churn: { of: (file) => file.churn, label: "churn", format: String },
 };
 
+/** The one ceiling read out of git history rather than out of the tree. */
+const HISTORY_METRIC = "churn";
+
+const HISTORY_MISSING =
+  "fallow read a shallow clone, where every file looks added whole by a single commit " +
+  "and no churn ceiling can be exceeded. Check the tree out with its history — " +
+  "actions/checkout with `fetch-depth: 0`, or `git fetch --unshallow` — and run again.";
+
+/**
+ * Whether fallow measured the git history churn is read from.
+ *
+ * A clone without history still gets a full hotspot table out of fallow: one
+ * commit per file, adding it whole, with no warning inside the JSON report.
+ * `hotspot_summary.shallow_clone` is the only place fallow says the table is
+ * that fiction, and a report carrying no summary at all said nothing about the
+ * history — which is not an answer that the history is whole.
+ *
+ * fallow also caches what it read in `.fallow/churn.bin`, so a clone deepened
+ * after a run keeps answering `shallow_clone: true` until that file is dropped.
+ *
+ * @param {{shallow_clone?: boolean} | undefined} hotspotSummary fallow `hotspot_summary`
+ */
+function historyMeasured(hotspotSummary) {
+  return hotspotSummary?.shallow_clone === false;
+}
+
 /**
  * Joins what fallow scored to the files the gate covers.
  *
@@ -31,10 +57,12 @@ const METRICS = {
  * @param {string[]} input.paths repository-relative paths the gate covers
  * @param {Array<Record<string, unknown>>} input.scores fallow `file_scores`
  * @param {Array<Record<string, unknown>>} input.hotspots fallow `hotspots`
+ * @param {{shallow_clone?: boolean} | undefined} input.hotspotSummary fallow `hotspot_summary`
  * @param {(path: string) => string} input.readSource reads one file
  */
-export function measuredFiles({ paths, scores, hotspots, readSource }) {
+export function measuredFiles({ paths, scores, hotspots, hotspotSummary, readSource }) {
   const scoreOf = new Map(scores.map((score) => [score.path, score]));
+  const measured = historyMeasured(hotspotSummary);
   const churnOf = new Map(
     (hotspots ?? []).map((spot) => [spot.path, spot.lines_added + spot.lines_deleted])
   );
@@ -42,9 +70,11 @@ export function measuredFiles({ paths, scores, hotspots, readSource }) {
     ...scoreOf.get(path),
     path,
     lines: readSource(path).split("\n").length,
-    // A path absent from the hotspot table was touched by no commit in the
-    // window, so its churn is zero rather than unknown.
-    churn: churnOf.get(path) ?? 0,
+    // Over a measured history, a path absent from the hotspot table was touched
+    // by no commit in the window, so its churn is zero. Over no history there is
+    // no number to carry, and `judge` skips the ceiling rather than reading a
+    // zero nothing measured.
+    churn: measured ? (churnOf.get(path) ?? 0) : undefined,
   }));
 }
 
@@ -53,9 +83,17 @@ export function measuredFiles({ paths, scores, hotspots, readSource }) {
  * @param {Array<Record<string, unknown>>} input.files what `measuredFiles` returned
  * @param {Record<string, number>} input.ceilings ceiling per metric name
  * @param {Array<{path: string, metric: string, limit: number, reason: string}>} input.exceptions
+ * @param {{shallow_clone?: boolean} | undefined} input.hotspotSummary fallow `hotspot_summary`
  */
-export function gateFindings({ files, ceilings, exceptions }) {
+export function gateFindings({ files, ceilings, exceptions, hotspotSummary }) {
   assertPolicy(ceilings, exceptions);
+
+  // A ceiling nothing measured is a ceiling nothing can be over, so the gate
+  // says the measurement is missing instead of reporting the tree clean.
+  const blocked =
+    historyMeasured(hotspotSummary) || !(HISTORY_METRIC in ceilings)
+      ? []
+      : [{ metric: HISTORY_METRIC, reason: HISTORY_MISSING }];
 
   const failures = [];
   const held = [];
@@ -68,14 +106,25 @@ export function gateFindings({ files, ceilings, exceptions }) {
   }
 
   // An exception that holds nothing back is one nobody needs, and left in place
-  // it hides the next regression on that file.
+  // it hides the next regression on that file. An exception on a metric nothing
+  // measured is not that: it held nothing back because nothing was judged.
   const judged = [...held, ...failures];
   const stale = exceptions.filter(
     (entry) =>
+      !blocked.some((gap) => gap.metric === entry.metric) &&
       !judged.some((finding) => finding.path === entry.path && finding.metric === entry.metric)
   );
 
-  return { failures, held, stale };
+  return { failures, held, stale, blocked };
+}
+
+/**
+ * Whether what the gate found fails the run.
+ *
+ * @param {ReturnType<typeof gateFindings>} findings
+ */
+export function gateFailed(findings) {
+  return findings.failures.length + findings.stale.length + findings.blocked.length > 0;
 }
 
 /** Refuses a policy naming something the report cannot answer. */
@@ -141,13 +190,17 @@ export function describeGate({ files, findings, ceilings, since }) {
       `  ✗ .fallow-gate.jsonc: the ${entry.metric} exception for ${entry.path} holds nothing back — drop it`
     );
   }
-  if (findings.failures.length + findings.stale.length === 0) {
+  for (const gap of findings.blocked) {
+    lines.push(`  ✗ ${METRICS[gap.metric].label} is not measured here: ${gap.reason}`);
+  }
+  if (!gateFailed(findings)) {
     lines.push("  ✓ every file is inside its ceilings", "");
     return lines.join("\n");
   }
   lines.push(
     "",
-    `  ${findings.failures.length} file(s) over a ceiling, ${findings.stale.length} stale exception(s).`,
+    `  ${findings.failures.length} file(s) over a ceiling, ${findings.stale.length} stale ` +
+      `exception(s), ${findings.blocked.length} ceiling(s) nothing measured.`,
     "  Split the file, or except it in .fallow-gate.jsonc with the reason.",
     ""
   );
