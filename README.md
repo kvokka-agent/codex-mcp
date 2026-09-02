@@ -33,6 +33,12 @@ TL;DR
 
 Almost like Caude native agent
 
+Delegate with `sandbox: danger-full-access` or with
+`approvalsReviewer: auto_review`. Every other combination spends the calling
+agent's context on approval round trips — up to three times as many tokens for
+the same answer, measured in
+[docs/SANDBOX-POLICY-COST.md](docs/SANDBOX-POLICY-COST.md).
+
 ## Install
 
 - [bun](https://bun.com) >= 1.4
@@ -78,6 +84,7 @@ wrapper, picking the codex binary, and every environment variable.
 | [docs/TOOLS.md](docs/TOOLS.md) | The five tools and the read-only resources, input by input |
 | [docs/SESSIONS.md](docs/SESSIONS.md) | Running a session: checking, approvals, activity, resume, cleanup |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | codex-mcp against the alternatives, and its own limits |
+| [docs/SANDBOX-POLICY-COST.md](docs/SANDBOX-POLICY-COST.md) | What each sandbox and approval policy costs, measured |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, the app-server protocol, persistence, error model |
 | [docs/CODEX-UPGRADE.md](docs/CODEX-UPGRADE.md) | Following a Codex CLI release through the vendored schema |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Running your build in a real client, the checks, debugging |
